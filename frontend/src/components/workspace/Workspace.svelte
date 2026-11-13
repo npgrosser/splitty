@@ -40,7 +40,7 @@
   import { hostKey, hostOf, type ConnKey, type ServerConnection } from "../../lib/connection/server_connection.ts";
   import { HostPreferences } from "../../lib/remote/host_preferences.ts";
   import { fetchRemoteHosts, openRemoteSocket, validateTarget } from "../../lib/remote/api.ts";
-  import { RememberedScreens, hostToConnect } from "../../lib/remote/remembered.ts";
+  import { RememberedScreens, hostToConnect, hostsToReconnect } from "../../lib/remote/remembered.ts";
   import { HostDirectory } from "../../lib/remote/host_directory.ts";
   import { hostNeeded } from "../../lib/remote/on_hosts.ts";
   import { arrangeHostGroups, orderedScreens } from "../../lib/remote/screen_groups.ts";
@@ -166,8 +166,9 @@
   const NO_STATUS: RemoteStatus = { kind: "none" };
 
   // The remote screens remembered across restarts (lib/remote/remembered.ts):
-  // back at their places once the local screens are settled, connected only
-  // when shown, written after every change.
+  // back at their places once the local screens are settled, connected when
+  // shown or, for the hosts of `remote.reconnectHosts`, at once, written after
+  // every change.
   const remembered = new RememberedScreens({
     fetch: apiFetch,
     screens: getScreens,
@@ -183,6 +184,7 @@
           activate: false,
         });
       }
+      for (const target of hostsToReconnect(steps, getSettings().remote.reconnectHosts)) connectHost(hostKey(target));
     },
   });
 
@@ -773,7 +775,6 @@
       fetch: apiFetch,
       open: (url) => openExternalTarget({ url }),
       reserveOpen: reserveExternalOpen,
-      autoForward: () => getSettings().remote.autoForwardPorts,
       notify: showPortNotice,
     });
 

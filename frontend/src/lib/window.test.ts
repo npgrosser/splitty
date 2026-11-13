@@ -57,7 +57,7 @@ describe("reserved external browser tabs", () => {
     const { PortForwarding } = await import("./remote/port_forwarding.ts");
     const fetch = vi.fn();
     const ports = new PortForwarding({ fetch, open: (url) => openExternalTarget({ url }),
-      autoForward: () => false, notify: vi.fn(), changed: vi.fn() });
+      notify: vi.fn(), changed: vi.fn() });
     ports.openLink("host:vm1", "vscode://vscode-remote/ssh-remote+vm1/srv/");
     expect(open).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();

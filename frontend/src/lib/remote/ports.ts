@@ -149,18 +149,6 @@ export function parsePorts(value: unknown): DetectedPort[] | null {
   return [...byPort.values()].sort((a, b) => a.port - b.port);
 }
 
-/**
- * The ports of `next` that `previous` did not list. The first list of a
- * connection, and the first after a reconnect (`previous` undefined), lists
- * what was listening already: it is shown, but nothing in it counts as new
- * (provisional, tbd).
- */
-export function appearedPorts(previous: readonly DetectedPort[] | undefined, next: readonly DetectedPort[]): DetectedPort[] {
-  if (!previous) return [];
-  const known = new Set(previous.map((p) => p.port));
-  return next.filter((p) => !known.has(p.port));
-}
-
 // ── Forwards ──
 
 /** A forward as the local server answers with it, or null when it has not the shape. */

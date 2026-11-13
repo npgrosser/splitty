@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  MAX_REMEMBERED, PATH, RememberedScreens, WRITE_DELAY, hostToConnect, parseRemembered, planRestore,
+  MAX_REMEMBERED, PATH, RememberedScreens, WRITE_DELAY, hostToConnect, hostsToReconnect, parseRemembered, planRestore,
   rememberedList, type RememberedList, type RememberedScreen,
 } from "./remembered.ts";
 import { detachRemoteScreen, removeRemoteScreen, terminateRemoteScreen, type CloseEffects } from "./close_screen.ts";
@@ -171,6 +171,18 @@ describe("lazy connect", () => {
     // vm2 stays unconnected until its screen is shown.
     expect(connectionFor("host:vm2")).toBeUndefined();
     expect(hostToConnect(screens, screens[3].id, (k) => !!connectionFor(k))).toBe("host:vm2");
+  });
+
+  it("connects at start only the restored hosts that remote.reconnectHosts lists", () => {
+    const plan = planRestore([local("L1")], [
+      { target: "vm1", screenId: "s1", position: 0 },
+      { target: "vm2", screenId: "s2", position: 1 },
+      { target: "vm1", screenId: "s3", position: 2 },
+    ]);
+    expect(hostsToReconnect(plan, ["vm1", "vm3"])).toEqual(["vm1"]);
+    expect(hostsToReconnect(plan, ["vm2", "vm1"])).toEqual(["vm1", "vm2"]);
+    expect(hostsToReconnect(plan, [])).toEqual([]);
+    expect(hostsToReconnect(plan, undefined)).toEqual([]);
   });
 });
 

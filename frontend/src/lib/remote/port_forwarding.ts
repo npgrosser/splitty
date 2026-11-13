@@ -4,10 +4,8 @@
 // Per host connection, the last `ports.changed` the host sent on it; the
 // local connection is not watched, since its ports need no forward. A port
 // that appears brings no notice: the host's port list offers it (provisional,
-// tbd). With `remote.autoForwardPorts`, a port that appears after the first
-// list, or the first after a reconnect, is forwarded at once, once per
-// connection and process, so a dev server that restarts is not forwarded
-// again after a Stop, and a port forwarded already not at all.
+// tbd). `remote.autoForwardPorts` belongs to the hub, which forwards what
+// appears on the relays it carries; this window only shows the result.
 //
 // Saved and active state are read independently. Reads never restore a rule:
 // restoration belongs to the hub's successful host-readiness path. Client
@@ -19,7 +17,7 @@ import type { ConnSocket } from "../protocol/socket.ts";
 import { hostOf, type ConnKey } from "../connection/server_connection.ts";
 import { MAX_NAME, MAX_TEXT, plainLines, plainText } from "../protocol/untrusted.ts";
 import {
-  appearedPorts, forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts, portKey, portLists,
+  forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts, portKey, portLists,
   withForward, parseSavedForward, parseSavedForwards, forwardLabel, isPort, MAX_FORWARD_LABEL,
   type DetectedPort, type HostPorts, type PortAction, type RemoteForward, type SavedForward, type ForwardFailure,
 } from "./ports.ts";
@@ -48,8 +46,6 @@ export interface PortForwardingDeps {
   open(url: string): boolean;
   /** Reserve a blank browser tab synchronously during an explicit click. */
   reserveOpen?(): ReservedExternalOpen | undefined;
-  /** Whether new ports are forwarded without a click (`remote.autoForwardPorts`). */
-  autoForward(): boolean;
   notify(notice: PortNotice): void;
   /** The ports, the forwards or the pending actions changed. */
   changed(): void;
@@ -72,14 +68,11 @@ interface Host {
   target: string;
   /** The last list; undefined until the first after a (re)connect. */
   ports: DetectedPort[] | undefined;
-  /** The ports forwarded by the setting on this connection, with their process. */
-  autoForwarded: Map<number, string>;
 }
 
 export interface ForwardOptions {
   open?: boolean;
   local?: number;
-  automatic?: boolean;
   remember?: boolean;
   label?: string;
 }
@@ -107,7 +100,7 @@ export class PortForwarding {
   watch(conn: WatchedConnection): () => void {
     const target = hostOf(conn.key);
     if (target === undefined) return () => {};
-    const host: Host = { target, ports: undefined, autoForwarded: new Map() };
+    const host: Host = { target, ports: undefined };
     this.hosts.set(conn.key, host);
     this.schedule();
     const unsubMessage = conn.socket.onMessage((msg) => {
@@ -219,10 +212,10 @@ export class PortForwarding {
     }
   }
 
-  /** Explicit by default; automation never opts into Remember or resumes a pause. */
+  /** An explicit forward: it resumes a paused saved rule. */
   async forward(target: string, port: number, options: ForwardOptions = {}): Promise<RemoteForward | null> {
     const key = portKey(target, port);
-    if (this.disposed || (options.automatic && this.savedOf(target, port)?.enabled === false)) return null;
+    if (this.disposed) return null;
     const reservation = options.open ? this.deps.reserveOpen?.() : undefined;
     const { open, ...intent } = options;
     const signature = JSON.stringify(intent);
@@ -231,9 +224,6 @@ export class PortForwarding {
       const request = this.mutate(key, "forward", async (current) => {
         try {
           validateMapping(target, port, options.local, options.label);
-          if (options.automatic && (options.local !== undefined || options.remember)) {
-            throw new ForwardError("Automatic forwarding cannot change or remember a mapping.");
-          }
           const saved = this.savedOf(target, port);
           // A cached active entry may have been stopped in another window.
           const forward = await this.request(target, port, options);
@@ -267,7 +257,7 @@ export class PortForwarding {
           this.deps.changed();
           return active;
         } catch (err) {
-          if (current() && !(options.automatic && err instanceof ForwardError && err.code === "forward_paused")) {
+          if (current()) {
             this.recordError(key, `Port ${port} of ${target} was not forwarded`, err, "forward");
           }
           return null;
@@ -427,27 +417,13 @@ export class PortForwarding {
   private portsChanged(host: Host, raw: unknown): void {
     const next = parsePorts(raw);
     if (!next) return;
-    const appeared = appearedPorts(host.ports, next);
     host.ports = next;
     this.deps.changed();
-    this.autoForwardAppeared(host, appeared);
-  }
-
-  /** With the setting, forward the ports that appeared on a host, without a notice. */
-  private autoForwardAppeared(host: Host, appeared: readonly DetectedPort[]): void {
-    if (this.deps.autoForward() !== true) return;
-    const fresh = appeared.filter((p) => !this.forwardOf(host.target, p.port) && host.autoForwarded.get(p.port) !== p.process
-      && this.savedOf(host.target, p.port)?.enabled !== false);
-    for (const p of fresh) {
-      host.autoForwarded.set(p.port, p.process);
-      void this.forward(host.target, p.port, { automatic: true });
-    }
   }
 
   private async request(target: string, port: number, options: ForwardOptions): Promise<RemoteForward> {
     const res = await this.deps.fetch(FORWARDS_PATH, jsonRequest("POST", {
       target, port, ...(options.local === undefined ? {} : { local: options.local }),
-      ...(options.automatic ? { automatic: true } : {}),
     }));
     if (!res.ok) throw await failure(res);
     const forward = parseForward(await res.json());

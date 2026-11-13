@@ -12,7 +12,9 @@
 //
 // A restored screen does not connect: its host's connection opens when the
 // screen becomes the active one, or when the window connects the host anyway
-// (`hostToConnect`), so an unreachable host does not slow the start.
+// (`hostToConnect`), so an unreachable host does not slow the start. Only the
+// hosts the user listed in `remote.reconnectHosts` are connected at once
+// (`hostsToReconnect`), as the native window does.
 //
 // The list is written after every change, debounced, and never before the
 // remembered one was read and restored: a write before that would replace it.
@@ -154,6 +156,20 @@ export function hostToConnect(
   const active = screens.find((s) => s.id === activeKey);
   if (!active || active.conn === "local" || connected(active.conn)) return undefined;
   return active.conn;
+}
+
+/**
+ * The hosts the window connects at its start: those of the restored screens
+ * that `remote.reconnectHosts` lists, each once, in the order of the steps
+ * (provisional, tbd).
+ */
+export function hostsToReconnect(steps: readonly RestoreStep[], chosen: readonly string[] | undefined): string[] {
+  const listed = new Set(chosen ?? []);
+  const hosts: string[] = [];
+  for (const { screen } of steps) {
+    if (listed.has(screen.target) && !hosts.includes(screen.target)) hosts.push(screen.target);
+  }
+  return hosts;
 }
 
 // ── Reading and Writing ──

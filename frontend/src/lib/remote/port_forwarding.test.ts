@@ -10,7 +10,7 @@ import { manualPort } from "./manual_port.ts";
 
 interface WireForward { target: string; remote: number; local: number; url: string; state: "up" | "down" }
 
-type RequestBody = { target: string; port: number; local?: number; automatic?: boolean; label?: string };
+type RequestBody = { target: string; port: number; local?: number; label?: string };
 
 /** Both hub APIs. Deferred fetch wrappers below delay responses, not real services. */
 class FakeHub {
@@ -57,7 +57,6 @@ class FakeHub {
       return json(200, preference);
     }
     if (method === "POST") {
-      if (body.automatic && saved?.enabled === false) return json(409, { code: "forward_paused", error: "Paused" });
       if (active && body.local !== undefined && body.local !== active.local) {
         return json(409, { code: "active_mapping_conflict", error: "Stop before changing the active mapping." });
       }
@@ -90,24 +89,22 @@ async function settle(): Promise<void> {
 
 let instances: PortForwarding[] = [];
 
-function setup(options: { auto?: boolean; openWorks?: boolean; hub?: FakeHub } = {}) {
+function setup(options: { openWorks?: boolean; hub?: FakeHub } = {}) {
   const hub = options.hub ?? new FakeHub();
   const opened: string[] = [];
   const notices: PortNotice[] = [];
-  let auto = options.auto ?? false;
   const deps: PortForwardingDeps = {
     fetch: hub.fetch,
     open: (url) => {
       opened.push(url);
       return options.openWorks ?? true;
     },
-    autoForward: () => auto,
     notify: (n) => notices.push(n),
     changed: vi.fn(),
   };
   const ports = new PortForwarding(deps);
   instances.push(ports);
-  return { hub, opened, notices, ports, deps, setAuto: (on: boolean) => { auto = on; } };
+  return { hub, opened, notices, ports, deps };
 }
 
 function host(target: string): { socket: FakeSocket; conn: ServerConnection } {
@@ -235,67 +232,19 @@ describe("PortForwarding: notices", () => {
   });
 });
 
-describe("PortForwarding: automatic forwarding", () => {
-  it("forwards nothing without a click while the setting is off", async () => {
-    const { hub, ports } = setup({ auto: false });
+describe("PortForwarding: ports that appear", () => {
+  // remote-screens, Automatic Port Forwarding: the hub forwards them; the window only shows them.
+  it("lists a port that appears without forwarding it or announcing it", async () => {
+    const { hub, notices, opened, ports } = setup();
     const vm1 = host("vm1");
     ports.watch(vm1.conn);
-    list(vm1.socket);
-    list(vm1.socket, [8000, "python3"]);
-    await settle();
-    expect(hub.of("POST")).toEqual([]);
-  });
-
-  it("forwards a new port at once with the setting on, without a notice", async () => {
-    const { hub, notices, opened, ports } = setup({ auto: true });
-    const vm1 = host("vm1");
-    ports.watch(vm1.conn);
-    // The first list is not forwarded.
     list(vm1.socket, [3000, "node"]);
-    await settle();
-    expect(hub.of("POST")).toEqual([]);
-
     list(vm1.socket, [3000, "node"], [8000, "python3"]);
     await settle();
-    expect(hub.of("POST")).toEqual([{ method: "POST", body: { target: "vm1", port: 8000, automatic: true } }]);
+    expect(hub.of("POST")).toEqual([]);
     expect(opened).toEqual([]);
     expect(notices).toEqual([]);
-    expect(ports.lists()[0].rows[1].forward?.url).toBe("http://localhost:8000");
-  });
-
-  it("does not forward what was listening before a reconnect", async () => {
-    const { hub, ports } = setup({ auto: true });
-    const vm1 = host("vm1");
-    ports.watch(vm1.conn);
-    list(vm1.socket, [3000, "node"]);
-    vm1.socket.drop();
-    list(vm1.socket, [3000, "node"], [8000, "python3"]);
-    await settle();
-    expect(hub.of("POST")).toEqual([]);
-    list(vm1.socket, [3000, "node"], [8000, "python3"], [9000, "ruby"]);
-    await settle();
-    expect(hub.of("POST").map((r) => r.body?.port)).toEqual([9000]);
-  });
-
-  it("forwards every new port, once per process", async () => {
-    const { hub, ports } = setup({ auto: true });
-    const vm1 = host("vm1");
-    ports.watch(vm1.conn);
-    list(vm1.socket);
-    list(vm1.socket, [3000, "a"], [3001, "b"], [3002, "c"], [3003, "d"]);
-    await settle();
-    expect(hub.of("POST").map((r) => r.body?.port)).toEqual([3000, 3001, 3002, 3003]);
-
-    // A forward the user stopped is not forwarded again for the same process.
-    await ports.stop("vm1", 3000);
-    list(vm1.socket);
-    list(vm1.socket, [3000, "a"]);
-    await settle();
-    expect(hub.of("POST")).toHaveLength(4);
-    list(vm1.socket);
-    list(vm1.socket, [3000, "vite"]);
-    await settle();
-    expect(hub.of("POST")).toHaveLength(5);
+    expect(ports.lists()[0].rows.map((row) => row.port)).toEqual([3000, 8000]);
   });
 });
 
@@ -799,49 +748,8 @@ describe("PortForwarding: refresh and mutation ordering", () => {
 });
 
 describe("PortForwarding: pause-aware detection and links", () => {
-  it("silently skips known paused mappings and respects a stale window's automatic refusal", async () => {
-    const { hub, ports, notices } = setup({ auto: true });
-    const vm = host("vm1");
-    hub.saved = [preference({ enabled: false })];
-    await ports.refresh();
-    ports.watch(vm.conn);
-    list(vm.socket);
-    list(vm.socket, [5173, "vite"]);
-    await settle();
-    expect(hub.of("POST")).toEqual([]);
-    expect(notices).toEqual([]);
-    const stale = setup({ auto: true });
-    stale.hub.saved = [preference({ enabled: false })];
-    stale.ports.watch(vm.conn);
-    list(vm.socket);
-    list(vm.socket, [5173, "vite"]);
-    await settle();
-    expect(stale.hub.of("POST")).toEqual([{ method: "POST", body: { target: "vm1", port: 5173, automatic: true } }]);
-    expect(stale.notices).toEqual([]);
-    expect(stale.ports.saved()[0].enabled).toBe(false);
-  });
-
-  it("keeps automatic saved-port conflicts exact while allowing unrelated ephemeral forwards", async () => {
-    const { hub, ports, notices } = setup({ auto: true });
-    const vm = host("vm1");
-    hub.saved = [preference()];
-    await ports.refresh();
-    ports.watch(vm.conn);
-    list(vm.socket);
-    hub.fail = { status: 409, body: { error: "Saved local port busy", code: "local_port_conflict" } };
-    list(vm.socket, [5173, "vite"], [8000, "api"]);
-    await settle();
-    expect(hub.of("POST").map((r) => r.body)).toEqual([
-      { target: "vm1", port: 5173, automatic: true }, { target: "vm1", port: 8000, automatic: true },
-    ]);
-    expect(ports.saved()[0].local).toBe(15173);
-    expect(ports.forwards().map((f) => f.remote)).toEqual([8000]);
-    expect(notices.some((n) => n.kind === "error")).toBe(true);
-    expect(hub.of("PUT", PREFERENCES_PATH)).toEqual([]);
-  });
-
   it("resumes a paused saved link explicitly while preserving HTTPS, path, query and fragment", async () => {
-    const { hub, ports, opened } = setup({ auto: true });
+    const { hub, ports, opened } = setup();
     hub.saved = [preference({ enabled: false })];
     await ports.refresh();
     ports.openLink(hostKey("vm1"), "https://127.0.0.1:5173/app?x=1#top");

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  MAX_PORTS, appearedPorts, forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts,
+  MAX_PORTS, forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts,
   portLists, withForward, parseSavedForwards, parseSavedForward, MAX_SAVED_FORWARDS, type DetectedPort, type RemoteForward, type SavedForward,
 } from "./ports.ts";
 import { MAX_TITLE } from "../protocol/untrusted.ts";
@@ -38,19 +38,6 @@ describe("parsePorts", () => {
     expect(parsePorts({ port: 80 })).toBeNull();
     const many = Array.from({ length: MAX_PORTS + 50 }, (_, i) => ({ port: i + 1, sessionId: "s", process: "p" }));
     expect(parsePorts(many)).toHaveLength(MAX_PORTS);
-  });
-});
-
-describe("appearedPorts", () => {
-  it("counts nothing in a connection's first list", () => {
-    expect(appearedPorts(undefined, [port(3000), port(8000)])).toEqual([]);
-  });
-
-  it("returns only the ports the last list did not have", () => {
-    expect(appearedPorts([port(3000), port(8000)], [port(3000), port(5173), port(9000)]))
-      .toEqual([port(5173), port(9000)]);
-    expect(appearedPorts([port(3000), port(8000)], [port(3000)])).toEqual([]);
-    expect(appearedPorts([], [port(3000)])).toEqual([port(3000)]);
   });
 });
 

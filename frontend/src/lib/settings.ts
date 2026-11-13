@@ -137,6 +137,12 @@ export interface RemoteSettings {
    * opens a port on this machine that any local process can reach.
    */
   autoForwardPorts: boolean;
+  /**
+   * The hosts a window connects at its start when it brings back remembered
+   * screens of them; others connect when one of their screens is shown.
+   * Absent on older servers.
+   */
+  reconnectHosts?: string[];
 }
 
 export interface SplittySettings {
