@@ -7,7 +7,7 @@ model {
       metadata { module 'splitty_client_core::api_stream' }
     }
     owned_service = component 'owned_service' {
-      description 'Explicit validated WSL child arguments or Unix embedded startup; one owned backend with separate session/API streams, explicit one-attempt host update intent and joined observed cleanup.'
+      description 'Explicit validated WSL child arguments or Unix embedded startup, startup phases and a WSL target still being prepared on its own thread; one owned backend with separate session/API streams, explicit one-attempt host update intent and joined observed cleanup.'
       metadata { module 'splitty_client_core::owned_service' }
     }
     api_stream -> splitty.core.native_api 'Validate operation role and arguments against the shared contract'

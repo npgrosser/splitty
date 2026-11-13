@@ -3,7 +3,7 @@
 model {
   extend splitty.gpui {
     gpui_main = component 'gpui_main' {
-      description 'Application entry point for the native multi-source window and optional fixture probe, observing one canonical Screen/pane/host title projection for the OS and window chrome. The pinned external Linux platform uses finite native-event batches and one buffered-event continuation so foreground workspace updates progress under sustained input without changing application queues. On Windows, the Kit title bar follows the projected application palette; a hidden startup window waits for accepted appearance, error or bounded timeout and builds its first scene before activation.'
+      description 'Application entry point for the native multi-source window and optional fixture probe, observing one canonical Screen/pane/host title projection for the OS and window chrome. The pinned external Linux platform uses finite native-event batches and one buffered-event continuation so foreground workspace updates progress under sustained input without changing application queues. On Windows, the Kit title bar follows the projected application palette; a hidden startup window waits for accepted appearance, error or bounded timeout and builds its first scene before activation. Until the workspace arrives the window shows the startup phase or the failure that ended it.'
       metadata { module 'splitty_gpui' }
     }
 
@@ -13,7 +13,7 @@ model {
     }
 
     gpui_startup = component 'gpui_startup' {
-      description 'Parse native workspace launch options before creating a window. On Windows without an explicit WSL target: choose the remembered or default supported distribution, install the backend that ships beside the executable when its version or checksum differs, and report a failure in a dialog.'
+      description 'Parse native workspace launch options before creating a window. On Windows without an explicit WSL target: choose the remembered or default supported distribution, install the backend that ships beside the executable when its version or checksum differs; this runs on its own thread started before the window, reports its phases, translates the SSH dialog path in the same inspection call and stops its wsl.exe calls when the window closes.'
       metadata { module 'splitty_gpui::startup' }
     }
 

@@ -25,6 +25,9 @@ pub struct WslLaunch {
     distro: String,
     backend: String,
     config_dir: Option<String>,
+    /// The Linux path of the SSH dialog executable, when the preparation
+    /// already resolved it in this distribution.
+    askpass: Option<String>,
 }
 impl WslLaunch {
     pub fn new(distro: String, backend: String, config_dir: Option<String>) -> io::Result<Self> {
@@ -45,7 +48,21 @@ impl WslLaunch {
             distro,
             backend,
             config_dir,
+            askpass: None,
         })
+    }
+    /// Names the Linux path of the SSH dialog executable, as `wslpath -u`
+    /// printed it in this distribution, so the start needs no extra `wsl.exe`
+    /// call to translate it. A path that is not absolute is refused.
+    pub fn with_askpass(mut self, path: String) -> io::Result<Self> {
+        if !path.starts_with('/') || path.len() > 4096 || path.chars().any(char::is_control) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "The SSH dialog path must be an absolute Linux path",
+            ));
+        }
+        self.askpass = Some(path);
+        Ok(self)
     }
     pub fn distro(&self) -> &str {
         &self.distro
@@ -80,12 +97,152 @@ impl WslLaunch {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub enum LocalBackend {
     /// Existing Unix default. Windows must supply WSL explicitly.
     #[default]
     Embedded,
     Wsl(WslLaunch),
+    /// A WSL target still being prepared on its own thread.
+    Preparing(WslPreparation),
+}
+
+/// A phase of a window's start before its workspace is ready, in their order.
+/// The WSL phases occur only on Windows without an explicit target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupPhase {
+    /// Listing the WSL distributions to choose one.
+    FindingDistribution,
+    /// Starting the named distribution (WSL boots first when it is not
+    /// running) and checking that it can run the backend.
+    StartingDistribution(String),
+    /// Installing the backend that ships with the app into the distribution.
+    InstallingBackend(String),
+    /// Starting the local backend, in the named WSL distribution if any.
+    StartingBackend(Option<String>),
+    /// Opening the workspace's connection to the started backend.
+    Connecting,
+}
+
+enum PreparationEvent {
+    Phase(StartupPhase),
+    Done(Result<WslLaunch, String>),
+}
+
+/// What a running preparation reports and reads.
+pub struct PreparationProgress {
+    events: tokio::sync::mpsc::UnboundedSender<PreparationEvent>,
+    stop: Arc<AtomicBool>,
+}
+impl PreparationProgress {
+    /// Reports the phase the preparation enters.
+    pub fn phase(&self, phase: StartupPhase) {
+        let _ = self.events.send(PreparationEvent::Phase(phase));
+    }
+    /// Set once nobody waits any more: the preparation ends its child
+    /// processes and returns.
+    pub fn stop(&self) -> &AtomicBool {
+        &self.stop
+    }
+}
+
+/// The WSL launch target, prepared on a thread of its own. It is started
+/// before the window opens, so WSL boots while the window is created; its
+/// phases reach the window through the workspace worker.
+pub struct WslPreparation {
+    events: tokio::sync::mpsc::UnboundedReceiver<PreparationEvent>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl std::fmt::Debug for WslPreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WslPreparation")
+            .finish_non_exhaustive()
+    }
+}
+
+/// One step of a preparation as the worker sees it.
+#[derive(Debug)]
+pub(crate) enum Prepared {
+    Phase(StartupPhase),
+    Ready(WslLaunch),
+}
+
+impl WslPreparation {
+    /// Runs `prepare` on a new thread. It may block on `wsl.exe` and on
+    /// dialogs; it reports its phases and watches the stop flag.
+    pub fn spawn(
+        prepare: impl FnOnce(&PreparationProgress) -> Result<WslLaunch, String> + Send + 'static,
+    ) -> io::Result<Self> {
+        let (sender, events) = tokio::sync::mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let progress = PreparationProgress {
+            events: sender,
+            stop: stop.clone(),
+        };
+        let thread = std::thread::Builder::new()
+            .name("splitty-wsl-preparation".into())
+            .spawn(move || {
+                let result = prepare(&progress);
+                let _ = progress.events.send(PreparationEvent::Done(result));
+            })?;
+        Ok(Self {
+            events,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// The next phase or the prepared target. A failed preparation returns
+    /// its message as the error. `stop` ends the preparation and waits for
+    /// its thread, so no child process of it outlives the worker.
+    pub(crate) async fn next(&mut self, stop: &AtomicBool) -> io::Result<Prepared> {
+        loop {
+            if stop.load(Ordering::Acquire) {
+                self.stop.store(true, Ordering::Release);
+                self.join().await;
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "workspace startup cancelled",
+                ));
+            }
+            tokio::select! {
+                event = self.events.recv() => {
+                    return match event {
+                        Some(PreparationEvent::Phase(phase)) => Ok(Prepared::Phase(phase)),
+                        Some(PreparationEvent::Done(result)) => {
+                            self.join().await;
+                            result.map(Prepared::Ready).map_err(io::Error::other)
+                        }
+                        None => {
+                            self.join().await;
+                            Err(io::Error::other("The WSL preparation ended without a result"))
+                        }
+                    };
+                }
+                _ = tokio::time::sleep(Duration::from_millis(16)) => {}
+            }
+        }
+    }
+
+    /// Ends the preparation and waits for its thread.
+    pub(crate) async fn cancel(mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.join().await;
+    }
+
+    async fn join(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
+        }
+    }
+}
+impl Drop for WslPreparation {
+    fn drop(&mut self) {
+        // Not joined here: a drop may happen on the UI thread.
+        self.stop.store(true, Ordering::Release);
+    }
 }
 
 pub(crate) enum OwnedService {
@@ -102,6 +259,10 @@ impl From<crate::EmbeddedService> for OwnedService {
 impl OwnedService {
     pub async fn start(backend: LocalBackend, stop: &AtomicBool) -> io::Result<Self> {
         match backend {
+            LocalBackend::Preparing(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the WSL target is still being prepared",
+            )),
             #[cfg(not(target_os = "windows"))]
             LocalBackend::Embedded => Ok(crate::EmbeddedService::start().into()),
             #[cfg(target_os = "windows")]
@@ -111,7 +272,11 @@ impl OwnedService {
             )),
             LocalBackend::Wsl(launch) => {
                 let mut askpass = None;
-                if let Some(program) = splitty_remote::ssh::askpass_program() {
+                let program = splitty_remote::ssh::askpass_program();
+                if program.is_some() && launch.askpass.is_some() {
+                    // Resolved by the preparation's inspection of the distribution.
+                    askpass = launch.askpass.clone();
+                } else if let Some(program) = program {
                     // Resolve using the selected distro's mount configuration,
                     // rather than assuming Windows drives are under /mnt.
                     let mut translate = tokio::process::Command::new("wsl.exe");
@@ -281,6 +446,90 @@ mod tests {
             ["env", "/home/a/splitty"]
         );
     }
+    #[test]
+    fn a_resolved_dialog_path_replaces_the_translation_and_must_be_absolute() {
+        let launch = WslLaunch::new("D".into(), "/home/a/splitty".into(), None).unwrap();
+        assert!(launch.clone().with_askpass("C:\\app.exe".into()).is_err());
+        assert!(launch.clone().with_askpass("/mnt/c/a\npp".into()).is_err());
+        let resolved = launch.with_askpass("/mnt/c/app.exe".into()).unwrap();
+        assert_eq!(resolved.askpass.as_deref(), Some("/mnt/c/app.exe"));
+    }
+
+    fn sample_launch() -> WslLaunch {
+        WslLaunch::new("Ubuntu".into(), "/home/a/splitty".into(), None).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_preparation_reports_its_phases_then_its_target_or_its_failure() {
+        let stop = AtomicBool::new(false);
+        let mut preparation = WslPreparation::spawn(|progress| {
+            progress.phase(StartupPhase::StartingDistribution("Ubuntu".into()));
+            progress.phase(StartupPhase::InstallingBackend("Ubuntu".into()));
+            Ok(sample_launch())
+        })
+        .unwrap();
+        let mut phases = Vec::new();
+        let launch = loop {
+            match preparation.next(&stop).await.unwrap() {
+                Prepared::Phase(phase) => phases.push(phase),
+                Prepared::Ready(launch) => break launch,
+            }
+        };
+        assert_eq!(launch.distro(), "Ubuntu");
+        assert_eq!(
+            phases,
+            [
+                StartupPhase::StartingDistribution("Ubuntu".into()),
+                StartupPhase::InstallingBackend("Ubuntu".into())
+            ]
+        );
+        assert!(preparation.thread.is_none(), "the thread was joined");
+
+        let mut failing =
+            WslPreparation::spawn(|_| Err("WSL is not installed.".to_owned())).unwrap();
+        let error = failing.next(&stop).await.unwrap_err();
+        assert_eq!(error.to_string(), "WSL is not installed.");
+    }
+
+    #[tokio::test]
+    async fn a_stopped_worker_stops_the_preparation_and_waits_for_it() {
+        let (started, ready) = std::sync::mpsc::channel();
+        let ended = Arc::new(AtomicBool::new(false));
+        let observed = ended.clone();
+        let mut preparation = WslPreparation::spawn(move |progress| {
+            let _ = started.send(());
+            while !progress.stop().load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            observed.store(true, Ordering::Release);
+            Err("The start was cancelled.".to_owned())
+        })
+        .unwrap();
+        ready.recv().unwrap();
+        let stop = AtomicBool::new(true);
+        let error = tokio::time::timeout(Duration::from_secs(5), preparation.next(&stop))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(ended.load(Ordering::Acquire), "joined before returning");
+    }
+
+    #[test]
+    fn dropping_a_preparation_tells_it_to_stop() {
+        let (sender, stopped) = std::sync::mpsc::channel();
+        let preparation = WslPreparation::spawn(move |progress| {
+            while !progress.stop().load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let _ = sender.send(());
+            Err("stopped".to_owned())
+        })
+        .unwrap();
+        drop(preparation);
+        stopped.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
     #[test]
     fn incomplete_or_ambiguous_targets_are_rejected_before_spawn() {
         for (distro, binary, config) in [

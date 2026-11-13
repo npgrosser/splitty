@@ -316,17 +316,7 @@ impl SettingsView {
             ..WslChoice::default()
         };
         if wsl.chosen.is_some() {
-            cx.spawn(async move |this, cx| {
-                let distros = cx
-                    .background_executor()
-                    .spawn(async { crate::startup::wsl_distributions() })
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.wsl.distros = distros;
-                    cx.notify();
-                });
-            })
-            .detach();
+            Self::list_wsl_distributions(cx);
         }
         Self {
             themes,
@@ -345,6 +335,34 @@ impl SettingsView {
             wsl,
             backend_version: None,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// Lists the distributions the WSL section offers, off the UI thread.
+    fn list_wsl_distributions(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let distros = cx
+                .background_executor()
+                .spawn(async { crate::startup::wsl_distributions() })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.wsl.distros = distros;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// The local backend's WSL distribution became known after the window
+    /// opened, as it does when the start prepared it.
+    pub(super) fn local_distribution_known(&mut self, cx: &mut Context<Self>) {
+        if self.wsl.chosen.is_some() {
+            return;
+        }
+        if let Some(distro) = crate::startup::wsl_distro() {
+            self.wsl.chosen = Some(distro.to_owned());
+            Self::list_wsl_distributions(cx);
+            cx.notify();
         }
     }
 

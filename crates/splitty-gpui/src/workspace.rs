@@ -24,6 +24,7 @@ mod settings;
 mod shell_profiles;
 #[cfg(test)]
 mod source_routing_tests;
+mod startup_page;
 mod templates;
 mod terminal_menu;
 mod title;
@@ -1047,6 +1048,8 @@ pub struct Workspace {
     search_owner: Option<(PaneKey, Entity<Terminal>)>,
     visible_pending: bool,
     status: String,
+    /// The start of the local backend, shown until the workspace arrives.
+    startup: startup_page::Startup,
     appearance: NativeAppearance,
     tab_prefs: TabPrefs,
     /// Whether scrolled terminals show the control that returns to the bottom.
@@ -1429,7 +1432,8 @@ impl Workspace {
                 visible_route_generation: 0,
                 search_owner: None,
                 visible_pending: false,
-                status: "Starting local workspace…".into(),
+                status: String::new(),
+                startup: startup_page::Startup::default(),
                 appearance: NativeAppearance::fallback(&ui_family),
                 themes,
                 tab_prefs: TabPrefs::default(),
@@ -2109,9 +2113,12 @@ impl Workspace {
         self.tab_context_menu = None;
         self.close_profile_picker(window, cx);
         self.dismiss_templates(window, cx);
+        // While the WSL target is prepared the worker reads no commands yet;
+        // its stop ends the preparation.
         if target == CloseTarget::Window
             && (self.cleanup_complete.load(Ordering::Acquire)
-                || self.worker_finished.load(Ordering::Acquire))
+                || self.worker_finished.load(Ordering::Acquire)
+                || (self.model.is_none() && self.startup.preparing()))
         {
             self.stop();
             cx.quit();
@@ -3938,6 +3945,26 @@ impl Workspace {
                 }
                 Update::Status(status) => {
                     self.status = status;
+                    cx.notify();
+                }
+                Update::Startup(phase) => {
+                    if let splitty_client_core::owned_service::StartupPhase::StartingBackend(
+                        Some(_),
+                    ) = &phase
+                    {
+                        // A prepared WSL target is known only from now on.
+                        self.settings
+                            .update(cx, |view, cx| view.local_distribution_known(cx));
+                    }
+                    self.startup.entered(phase);
+                    cx.notify();
+                }
+                Update::LocalServiceFailed(reason) => {
+                    if self.model.is_none() {
+                        self.startup.failed(reason);
+                    } else {
+                        self.status = format!("Local service: {reason}");
+                    }
                     cx.notify();
                 }
                 Update::CloseSubmitted { request_id, source } => {
@@ -6379,7 +6406,7 @@ impl Render for Workspace {
         }) {
             main_content = main_content.child(self.render_no_screens_page(cx));
         } else {
-            main_content = main_content.child(div().flex_1().p_4().child("Connecting…"));
+            main_content = main_content.child(self.render_startup_page());
         }
         content = content.child(main_content);
         view.child(content)

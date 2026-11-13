@@ -324,16 +324,18 @@ fn main() -> anyhow::Result<()> {
     splitty_client_core::set_askpass_program(std::env::current_exe()?);
     // Started without a WSL target, the Windows workspace chooses a
     // distribution and installs the backend that ships beside the executable.
+    // That starts now, on a thread of its own, so WSL boots while the window
+    // opens; the window shows its phases and a failure.
     #[cfg(target_os = "windows")]
     let backend = match backend {
         splitty_client_core::owned_service::LocalBackend::Embedded if !probe => {
-            match startup::wsl::prepare() {
-                Ok(launch) => splitty_client_core::owned_service::LocalBackend::Wsl(launch),
-                Err(error) => {
-                    startup::wsl::report_failure(&error);
-                    anyhow::bail!(error);
-                }
-            }
+            splitty_client_core::owned_service::LocalBackend::Preparing(
+                splitty_client_core::owned_service::WslPreparation::spawn(|progress| {
+                    let launch = startup::wsl::prepare(progress)?;
+                    startup::set_wsl_distro(launch.distro());
+                    Ok(launch)
+                })?,
+            )
         }
         backend => backend,
     };

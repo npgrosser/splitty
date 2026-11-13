@@ -83,6 +83,25 @@ Enter/Escape/Blur without changing A's selection or any session/process/SSH
 inventory. The fixture uses private `.invalid` hosts and an owned SSH-shape shim.
 It is not real OpenSSH installation/update acceptance.
 
+## Startup
+
+Until its workspace arrives, a window shows a startup page
+(`workspace/startup_page.rs`, the empty page's column with a spinner): the
+phase the start is in, or why it failed and in which phase. On Windows
+without WSL arguments `main` starts the WSL preparation
+(`startup/wsl.rs::prepare`) on a thread of its own before the window opens,
+so WSL boots while the window is created; the workspace worker forwards its
+phases (looking for distributions, starting the distribution, installing the
+backend) and then reports starting the backend and connecting. A warm start
+runs two `wsl.exe` calls one after the other: the inspection, which also
+translates the SSH dialog's path with `wslpath`, and the backend itself;
+listing the distributions (no remembered one) and installing (first start of
+a version) add one each. A failure stays on the page instead of ending the
+app; closing the window kills a running `wsl.exe` call of the preparation.
+The hidden Windows window still waits up to one second for the backend's
+appearance before it shows. Not yet seen in a real Windows window; the
+provisional choices are NSP-1 to NSP-3 in `openspec/open-decisions.md`.
+
 ## Architecture boundaries and recent regression lessons
 
 - Server mux state, session lifecycle and host launch defaults remain canonical.

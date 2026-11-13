@@ -448,6 +448,11 @@ pub enum Update {
         session: String,
     },
     Status(String),
+    /// The phase the start of the local backend entered; the window shows
+    /// it until its workspace arrives.
+    Startup(crate::owned_service::StartupPhase),
+    /// The local service could not start or ended, with the reason.
+    LocalServiceFailed(String),
     CloseSubmitted {
         request_id: u64,
         source: Option<SourceToken>,
@@ -1252,7 +1257,7 @@ impl Worker {
                 )
                 .await;
                 if let Err(error) = &result {
-                    let _ = updates.try_send(Update::Status(format!("Local service: {error:#}")));
+                    let _ = updates.try_send(Update::LocalServiceFailed(format!("{error:#}")));
                 }
                 result
             })
@@ -1299,7 +1304,46 @@ async fn run(
     scheme: ColorScheme,
     backend: crate::owned_service::LocalBackend,
 ) -> anyhow::Result<()> {
+    use crate::owned_service::{LocalBackend, Prepared, StartupPhase};
+    // A window closed while the target is prepared: no service exists, so
+    // there is nothing left to clean up and the stop is no failure.
+    let closing = |error: anyhow::Error| {
+        if stop.load(Ordering::Acquire) {
+            cleanup_complete.store(true, Ordering::Release);
+            Ok(())
+        } else {
+            Err(error)
+        }
+    };
+    let backend = match backend {
+        LocalBackend::Preparing(mut preparation) => loop {
+            match preparation.next(&stop).await {
+                Ok(Prepared::Phase(phase)) => {
+                    if let Err(error) = publish(&updates, Update::Startup(phase), &stop).await {
+                        preparation.cancel().await;
+                        return closing(error);
+                    }
+                }
+                Ok(Prepared::Ready(launch)) => break LocalBackend::Wsl(launch),
+                Err(error) => return closing(error.into()),
+            }
+        },
+        backend => backend,
+    };
+    let distro = match &backend {
+        LocalBackend::Wsl(launch) => Some(launch.distro().to_owned()),
+        _ => None,
+    };
+    publish(
+        &updates,
+        Update::Startup(StartupPhase::StartingBackend(distro)),
+        &stop,
+    )
+    .await?;
     let service = crate::owned_service::OwnedService::start(backend, &stop).await?;
+    // Reported without waiting: the service is owned now and must reach
+    // `run_service`, which joins it on every path.
+    let _ = updates.try_send(Update::Startup(StartupPhase::Connecting));
     run_service(service, commands, updates, stop, cleanup_complete, scheme).await
 }
 
@@ -2847,6 +2891,101 @@ mod template_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod source_tests;
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::owned_service::{LocalBackend, StartupPhase, WslPreparation};
+
+    /// A preparation's phases reach the window in order, and its failure is
+    /// reported as the local service's failure; nothing is started after it.
+    #[test]
+    fn a_failed_preparation_reports_its_phase_and_then_its_reason() {
+        let (_commands, receiver) = mpsc::channel(4);
+        let (sender, mut updates) = mpsc::channel(8);
+        let preparation = WslPreparation::spawn(|progress| {
+            progress.phase(StartupPhase::StartingDistribution("Ubuntu".into()));
+            Err("The WSL distribution 'Ubuntu' could not be inspected: no error output".into())
+        })
+        .unwrap();
+        let worker = Worker::start_with_backend(
+            receiver,
+            sender,
+            ColorScheme::Dark,
+            LocalBackend::Preparing(preparation),
+        );
+        let mut received = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while received.len() < 2 {
+            assert!(std::time::Instant::now() < deadline, "{received:?}");
+            match updates.try_recv() {
+                Ok(Update::Startup(phase)) => received.push(format!("{phase:?}")),
+                Ok(Update::LocalServiceFailed(reason)) => received.push(reason),
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        assert_eq!(
+            received,
+            [
+                format!("{:?}", StartupPhase::StartingDistribution("Ubuntu".into())),
+                "The WSL distribution 'Ubuntu' could not be inspected: no error output".into()
+            ]
+        );
+        assert!(worker.shutdown().is_err(), "the start failed");
+    }
+
+    /// Closing the window during the preparation is no failure: the worker
+    /// ends the preparation, waits for it and starts nothing.
+    #[test]
+    fn a_stop_during_the_preparation_ends_it_without_an_error() {
+        let (_commands, receiver) = mpsc::channel(4);
+        let (sender, mut updates) = mpsc::channel(8);
+        let ended = Arc::new(AtomicBool::new(false));
+        let observed = ended.clone();
+        let preparation = WslPreparation::spawn(move |progress| {
+            progress.phase(StartupPhase::FindingDistribution);
+            while !progress.stop().load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            observed.store(true, Ordering::Release);
+            Err("The start was cancelled.".into())
+        })
+        .unwrap();
+        let worker = Worker::start_with_backend(
+            receiver,
+            sender,
+            ColorScheme::Dark,
+            LocalBackend::Preparing(preparation),
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(std::time::Instant::now() < deadline);
+            match updates.try_recv() {
+                Ok(Update::Startup(StartupPhase::FindingDistribution)) => break,
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        let cleanup = worker.cleanup_complete.clone();
+        worker.shutdown().unwrap();
+        assert!(ended.load(Ordering::Acquire), "the preparation was joined");
+        assert!(
+            cleanup.load(Ordering::Acquire),
+            "no service was left behind"
+        );
+        while let Ok(update) = updates.try_recv() {
+            assert!(
+                !matches!(
+                    update,
+                    Update::Startup(StartupPhase::StartingBackend(_))
+                        | Update::LocalServiceFailed(_)
+                ),
+                "nothing started or failed after the stop"
+            );
+        }
+    }
+}
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_startup_tests {

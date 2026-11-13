@@ -2,18 +2,19 @@
 //! to show: the window holds no Screen, or the shown Screen holds no pane.
 //! One icon, a short title, one muted line and the action that fills the
 //! page, with its keyboard shortcut. Colors come from the theme
-//! (`NativeAppearance`); the action is the toolkit's primary button.
+//! (`NativeAppearance`); the action is the toolkit's primary button. The
+//! startup page (`startup_page`) shares the centered column without an action.
 use super::*;
 
 /// The icon's edge, the text sizes and the spacing between the parts.
-const ICON: f32 = 28.;
-const ICON_OPACITY: f32 = 0.7;
+pub(super) const ICON: f32 = 28.;
+pub(super) const ICON_OPACITY: f32 = 0.7;
 const TITLE_TEXT: f32 = 14.;
 const DETAIL_TEXT: f32 = 12.;
 const TEXT_GAP: f32 = 6.;
-const ACTION_GAP: f32 = 18.;
+pub(super) const ACTION_GAP: f32 = 18.;
 const SHORTCUT_GAP: f32 = 8.;
-const MAX_WIDTH: f32 = 320.;
+pub(super) const MAX_WIDTH: f32 = 320.;
 
 /// What an empty page says and offers.
 pub(super) struct EmptyPage {
@@ -30,78 +31,101 @@ pub(super) struct EmptyPage {
     pub(super) disabled: bool,
 }
 
+/// The parts of a centered page; `page_id` is also its selector in view tests.
+pub(super) struct PageColumn {
+    pub(super) page_id: &'static str,
+    pub(super) icon: AnyElement,
+    pub(super) title: SharedString,
+    pub(super) detail: SharedString,
+    pub(super) max_width: f32,
+}
+
 impl Workspace {
+    /// The centered column of an icon, a title and one muted line.
+    pub(super) fn render_page_column(&self, column: PageColumn) -> (Div, Stateful<Div>) {
+        let appearance = &self.appearance;
+        let page_id = column.page_id;
+        let frame = div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgb(appearance.surface));
+        let page = div()
+            .id(page_id)
+            .when(cfg!(all(test, feature = "ui-test-support")), |page| {
+                page.debug_selector(move || page_id.into())
+            })
+            .flex()
+            .flex_col()
+            .items_center()
+            .max_w(chrome_rems(column.max_width))
+            .px_4()
+            .child(column.icon)
+            .child(
+                div()
+                    .mt(chrome_rems(ACTION_GAP))
+                    .text_size(chrome_rems(TITLE_TEXT))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(appearance.text))
+                    .text_center()
+                    .child(column.title),
+            )
+            .child(
+                div()
+                    .mt(chrome_rems(TEXT_GAP))
+                    .text_size(chrome_rems(DETAIL_TEXT))
+                    .text_color(rgb(appearance.muted))
+                    .text_center()
+                    .child(column.detail),
+            );
+        (frame, page)
+    }
+
     pub(super) fn render_empty_page(
         &self,
         page: EmptyPage,
         cx: &mut Context<Self>,
         run: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Div {
-        let appearance = &self.appearance;
-        let (page_id, action_id) = (page.id, page.action_id);
+        let action_id = page.action_id;
         let shortcut = palette::shortcut_label(page.shortcut, cx.platform_info().is_mac());
-        div()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgb(appearance.surface))
-            .child(
+        let (frame, column) = self.render_page_column(PageColumn {
+            page_id: page.id,
+            icon: Icon::new(page.icon)
+                .size(chrome_rems(ICON))
+                .text_color(rgb(self.appearance.muted))
+                .opacity(ICON_OPACITY)
+                .into_any_element(),
+            title: page.title.into(),
+            detail: page.detail.into(),
+            max_width: MAX_WIDTH,
+        });
+        let appearance = &self.appearance;
+        frame.child(
+            column.child(
                 div()
-                    .id(page_id)
-                    .when(cfg!(all(test, feature = "ui-test-support")), |page| {
-                        page.debug_selector(move || page_id.into())
-                    })
+                    .mt(chrome_rems(ACTION_GAP))
                     .flex()
-                    .flex_col()
                     .items_center()
-                    .max_w(chrome_rems(MAX_WIDTH))
-                    .px_4()
+                    .gap(chrome_rems(SHORTCUT_GAP))
                     .child(
-                        Icon::new(page.icon)
-                            .size(chrome_rems(ICON))
-                            .text_color(rgb(appearance.muted))
-                            .opacity(ICON_OPACITY),
+                        Button::new(action_id)
+                            .debug_selector(move || action_id.into())
+                            .label(page.action)
+                            .icon(Icon::new(IconName::Plus))
+                            .primary()
+                            .small()
+                            .focus_ring(focus_visible(cx))
+                            .disabled(page.disabled)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                run(this, window, cx);
+                            })),
                     )
-                    .child(
-                        div()
-                            .mt(chrome_rems(ACTION_GAP))
-                            .text_size(chrome_rems(TITLE_TEXT))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(rgb(appearance.text))
-                            .child(page.title),
-                    )
-                    .child(
-                        div()
-                            .mt(chrome_rems(TEXT_GAP))
-                            .text_size(chrome_rems(DETAIL_TEXT))
-                            .text_color(rgb(appearance.muted))
-                            .text_center()
-                            .child(page.detail),
-                    )
-                    .child(
-                        div()
-                            .mt(chrome_rems(ACTION_GAP))
-                            .flex()
-                            .items_center()
-                            .gap(chrome_rems(SHORTCUT_GAP))
-                            .child(
-                                Button::new(action_id)
-                                    .debug_selector(move || action_id.into())
-                                    .label(page.action)
-                                    .icon(Icon::new(IconName::Plus))
-                                    .primary()
-                                    .small()
-                                    .focus_ring(focus_visible(cx))
-                                    .disabled(page.disabled)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        run(this, window, cx);
-                                    })),
-                            )
-                            .child(menu_style::shortcut(appearance, shortcut)),
-                    ),
-            )
+                    .child(menu_style::shortcut(appearance, shortcut)),
+            ),
+        )
     }
 }
 
