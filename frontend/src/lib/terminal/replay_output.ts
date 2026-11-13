@@ -4,6 +4,10 @@
  * A sequence ends where xterm.js ends it, also at CAN, SUB and an ESC that
  * does not end a string: one that never ended asks for nothing, and what
  * follows it is judged on its own.
+ *
+ * Servers filter a replay themselves before they send it, with these rules
+ * since 0.3.3 (`pty::replay` in splitty-core; older rules since 0.2.4). This
+ * copy is for hosts before 0.3.3 and can go once no supported host is older.
  */
 const ESC = 0x1b;
 const CAN = 0x18;

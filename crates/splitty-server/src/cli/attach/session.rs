@@ -47,7 +47,11 @@ pub struct Attach {
 enum Phase {
     /// Before `mux.welcome`.
     Connecting,
-    /// From `attach` to `attached`: frames are the buffered output.
+    /// From `attach` to `attached`: frames are the buffered output. Servers
+    /// filter it themselves before they send it, with these rules since 0.3.3
+    /// (older rules since 0.2.4); filtering again is for daemons before 0.3.3
+    /// and can go once no supported daemon is older. The keeper path
+    /// (`keeper.rs`) has no server in between and keeps its filter.
     Replay(ReplayFilter),
     Live,
 }
