@@ -1,7 +1,7 @@
 <script lang="ts">
   import { settings } from "../../../stores/settings.svelte.ts";
   import { updateSetting, defaults, numericLimit, isAllowed, selectValue, inputNumber, type ThemeMode, type ZoomScope } from "../../../lib/settings.ts";
-  import { ZOOM_STEPS, zoomLabel } from "../../../lib/zoom.ts";
+  import { zoomSteps, zoomLabel } from "../../../lib/zoom.ts";
   import { isMac } from "../../../lib/shortcuts.ts";
   import { listThemeNames, reloadTheme, resolveActiveThemeName } from "../../../lib/theme.ts";
   import { isDesktop, shellKind } from "../../../lib/platform.ts";
@@ -129,7 +129,7 @@
     onReset={() => updateSetting("appearance", "zoom", defaults.appearance.zoom)}
   >
     <select value={String(s.appearance.zoom)} onchange={(e) => updateSetting("appearance", "zoom", Number(selectValue<string>(e)))}>
-      {#each ZOOM_STEPS as step}
+      {#each zoomSteps() as step}
         <option value={String(step)}>{zoomLabel(step)}</option>
       {/each}
     </select>

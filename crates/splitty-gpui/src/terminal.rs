@@ -136,7 +136,7 @@ const SIZE_REPORT_HOLD: Duration = Duration::from_millis(120);
 /// its output from the screen, counted from the moment it began.
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The web client's terminal font size; display zoom scales it.
-const BASE_FONT_SIZE: f32 = 14.;
+pub(crate) const BASE_FONT_SIZE: f32 = 14.;
 /// Provisional row height until layout measures the face: rows use the
 /// font's own ascent and descent, as the web client's line height of 1.0.
 const BASE_LINE_HEIGHT: f32 = 18.;
@@ -462,8 +462,9 @@ struct TerminalMetrics {
 }
 
 impl TerminalMetrics {
+    /// `scale` is the zoom's, within the levels of the local service.
     fn new(scale: f32) -> Self {
-        let scale = if scale.is_finite() && (0.5..=3.).contains(&scale) {
+        let scale = if scale.is_finite() && scale > 0. {
             scale
         } else {
             1.
@@ -4267,6 +4268,16 @@ mod tests {
         assert_ne!(baseline.pixel_cell(1.), enlarged.pixel_cell(1.));
         assert_ne!(baseline.pixel_cell(1.), baseline.pixel_cell(1.5));
         assert_eq!(TerminalMetrics::new(f32::NAN).scale, 1.);
+        // display-zoom, Levels from the server: the levels bound the zoom,
+        // not the metrics, so a level beyond 300 % is shown.
+        assert_eq!(TerminalMetrics::new(4.).scale, 4.);
+        assert_eq!(
+            TerminalMetrics::new(4.).font_size,
+            px(super::BASE_FONT_SIZE * 4.)
+        );
+        for invalid in [0., -1., f32::INFINITY] {
+            assert_eq!(TerminalMetrics::new(invalid).scale, 1.);
+        }
     }
 
     #[test]

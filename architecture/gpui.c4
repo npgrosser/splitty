@@ -95,6 +95,7 @@ model {
     gpui_appearance -> terminal 'Provide a plain terminal color configuration'
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
     gpui_appearance -> splitty.client_core.client_zoom 'Project confirmed display zoom and scope'
+    gpui_appearance -> splitty.client_core.client_settings 'Take the zoom levels from the service settings limits'
     gpui_workspace -> splitty.client_core.client_zoom 'Submit zoom intents and present confirmed scale'
     gpui_workspace -> splitty.client_core.native_workspace 'Send pasted or dropped files to the source of their pane and answer its file offers; submit fixed-local host and navigation intents including one owner-bound remote Screen creation request, exact captured local or remote Screen renames, source-bound terminal commands and assessed close/template intents; share window presence and user interaction for the PTY size policy, take over sizes and show each session at its PTY size; reject obsolete output and outcomes'
     gpui_workspace -> splitty.client_core.owned_service 'Pass the selected backend into the shared workspace worker'

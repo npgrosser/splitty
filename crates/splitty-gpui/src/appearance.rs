@@ -9,8 +9,9 @@ use crate::terminal::TerminalColors;
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::theme::{Theme, ThemeColor, ThemeConfig, ThemeMode};
 use gpui_kit::{px, rgb, App, Hsla, Rgba};
-use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
-use splitty_client_core::zoom::Zoom;
+use splitty_client_core::appearance::{terminal_palette_name, AppearanceSnapshot, ColorScheme};
+use splitty_client_core::settings::SettingsField;
+use splitty_client_core::zoom::{Zoom, ZoomSteps};
 use std::rc::Rc;
 
 mod catalog;
@@ -71,6 +72,8 @@ pub struct NativeAppearance {
     pub selection_foreground: u32,
     pub selection_background: u32,
     pub zoom: Zoom,
+    /// The levels zoom steps through, the local service's.
+    pub zoom_steps: ZoomSteps,
     /// What of the selection could not be shown as asked.
     pub notice: Option<String>,
     /// The mode of the shown UI theme, which can differ from the system's.
@@ -128,7 +131,8 @@ impl NativeAppearance {
             terminal: TerminalColors::default(),
             selection_foreground: 0xd9e2ef,
             selection_background: 0x345778,
-            zoom: Zoom::from_values(1.0, "window"),
+            zoom: Zoom::default(),
+            zoom_steps: ZoomSteps::default(),
             notice: None,
             scheme: ColorScheme::Dark,
             config: None,
@@ -159,7 +163,10 @@ impl NativeAppearance {
             ui_family,
             mono_family,
         );
-        result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope);
+        // The levels to step through and show: the service's limits, or the
+        // fallback ones of a service without metadata.
+        result.zoom_steps = ZoomSteps::from_limits(snapshot.limits(SettingsField::Zoom));
+        result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope, &result.zoom_steps);
         result
     }
 
@@ -401,34 +408,33 @@ impl NativeAppearance {
     }
 }
 
-/// The terminal palette of a selection, in this order: the named palette; the
-/// palette named for the UI theme's mode; the palette with the UI theme's
-/// name; the default palette of that mode.
+/// The terminal palette of a selection: the one the server's rule chooses
+/// for the UI theme's mode (the named palette, else the one named for the
+/// mode), looked up in the catalog; else the palette with the UI theme's
+/// name; else the default palette of that mode.
 fn terminal_palette<'a>(
     selection: &ThemeSelection,
     theme: &UiTheme,
     catalog: &'a ThemeCatalog,
     problems: &mut Vec<String>,
 ) -> Option<&'a TerminalPalette> {
-    let by_mode = match theme.scheme {
-        ColorScheme::Dark => selection.terminal_theme_dark,
-        ColorScheme::Light => selection.terminal_theme_light,
-    };
-    let chosen = [selection.terminal_theme, by_mode]
-        .into_iter()
-        .find(|name| *name != "default" && !name.is_empty());
-    chosen
-        .and_then(|name| {
-            let palette = catalog.palette(name);
-            if palette.is_none() {
-                problems.push(format!(
-                    "Terminal palette “{name}” is unavailable; the theme's palette is shown."
-                ));
-            }
-            palette
-        })
-        .or_else(|| catalog.palette_for_theme(&theme.id))
-        .or_else(|| catalog.default_palette(theme.scheme))
+    terminal_palette_name(
+        selection.terminal_theme,
+        selection.terminal_theme_dark,
+        selection.terminal_theme_light,
+        theme.scheme,
+    )
+    .and_then(|name| {
+        let palette = catalog.palette(name);
+        if palette.is_none() {
+            problems.push(format!(
+                "Terminal palette “{name}” is unavailable; the theme's palette is shown."
+            ));
+        }
+        palette
+    })
+    .or_else(|| catalog.palette_for_theme(&theme.id))
+    .or_else(|| catalog.default_palette(theme.scheme))
 }
 
 /// A toolkit color as `0xRRGGBB`, composed over `under` where it is translucent.

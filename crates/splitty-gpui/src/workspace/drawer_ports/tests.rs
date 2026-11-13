@@ -597,7 +597,11 @@ fn compact_zoomed_drawer_keeps_host_create_action_in_view() {
             window.resize(size(px(560.), px(420.)));
             view.update(cx, |workspace, cx| {
                 workspace.apply_zoom(
-                    splitty_client_core::zoom::Zoom::from_values(1.25, "window"),
+                    splitty_client_core::zoom::Zoom::from_values(
+                        1.25,
+                        "window",
+                        &Default::default(),
+                    ),
                     window,
                     cx,
                 );

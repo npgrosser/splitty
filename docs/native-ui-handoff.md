@@ -167,7 +167,9 @@ provisional choices are NSP-1 to NSP-3 in `openspec/open-decisions.md`.
 The app resolves UI themes and terminal palettes in its own catalog
 (`crates/splitty-gpui/src/appearance/`): GPUI Kit theme sets and Ghostty theme
 files, bundled from `crates/splitty-gpui/themes/` and read from the themes
-directory. The service stores only the names. [Themes](themes.md) describes the
+directory. The service stores only the names; which palette name the
+terminal settings choose is the server core's rule, shared with the web
+client. [Themes](themes.md) describes the
 formats and the `splitty` block; `scripts/vendor-themes.py` refreshes the
 bundled third-party files. The Splitty themes in `themes/ui/splitty.json` and
 `themes/terminal/splitty/` are edited there directly.

@@ -355,11 +355,24 @@ pub(crate) async fn get_resolved_theme(
     state: &ServiceState,
     params: HashMap<String, String>,
 ) -> Payload<Value> {
-    let name = params
-        .get("name")
-        .cloned()
-        .unwrap_or_else(|| state.config.read().unwrap().appearance.theme.clone());
-    let theme = splitty_core::theme::resolve_theme(&name, &state.themes_dir);
+    let (name, [named, dark, light]) = {
+        let config = state.config.read().unwrap();
+        let name = params
+            .get("name")
+            .cloned()
+            .unwrap_or_else(|| config.appearance.theme.clone());
+        let terminal = &config.terminal;
+        let palettes = [&terminal.theme, &terminal.theme_dark, &terminal.theme_light];
+        (name, palettes.map(String::clone))
+    };
+    // The terminal colors are those of the palette the settings choose.
+    let theme = splitty_core::theme::resolve_theme_with_palette(
+        &name,
+        &named,
+        &dark,
+        &light,
+        &state.themes_dir,
+    );
     Payload(serde_json::to_value(&theme).unwrap_or(json!({})))
 }
 

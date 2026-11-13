@@ -25,11 +25,11 @@ None.
 
 ## Impact
 
-`crates/splitty-core` (settings metadata and validation, theme palette rule), `crates/splitty-server` (`theme.get` answer), `crates/splitty-client-core` (zoom levels, zoom executor, palette rule for the native client), `crates/splitty-gpui` (zoom levels from the snapshot, terminal font rounding, palette rule), `frontend/` (zoom levels from metadata, theme reload on palette settings), `docs/protocol.ts`, `docs/architecture.md`.
+`crates/splitty-core` (settings metadata and validation, theme palette rule), `crates/splitty-server` (`theme.get` answer), `crates/splitty-client-core` (zoom levels, zoom executor, palette rule for the native client), `crates/splitty-gpui` (zoom levels from the snapshot, terminal font rounding, palette rule), `frontend/` (zoom levels from metadata, theme reload on palette settings), `docs/protocol.ts`, `docs/architecture.md`, `docs/themes.md`, `docs/native-ui-handoff.md`, `architecture/`.
 
 ## Architecture impact
 
-none (new behavior inside the existing settings, theme and zoom modules; no new crate, top-level module or dependency between components).
+new relationships in `architecture/client-core.c4` and `architecture/gpui.c4`: the client zoom policy takes its levels from the client settings limits and falls back to the server core's levels (`client_zoom -> client_settings`, `client_zoom -> config`, `client_settings -> config`), the native appearance takes the zoom limits from the client settings (`gpui_appearance -> client_settings`), and the client appearance chooses the terminal palette name by the core theme rule (`appearance -> theme`); `docs/architecture.md` (Settings authority, native appearance and zoom) describes them. No new crate or module.
 
 ## Decisions
 

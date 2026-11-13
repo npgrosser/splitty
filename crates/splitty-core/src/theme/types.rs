@@ -60,6 +60,15 @@ pub struct ResolvedTheme {
     pub variant: Variant,
     pub ui: UiTokens,
     pub terminal: TerminalTokens,
+    /// The identifier of the theme `terminal` comes from: the terminal
+    /// palette the settings choose (`resolve_theme_with_palette`), or this
+    /// theme's own. Absent for a plain theme file or from an older service.
+    #[serde(
+        default,
+        rename = "terminalPalette",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub terminal_palette: Option<String>,
     /// Optional visual effects (glow, scanlines, etc.). Passed to the
     /// frontend as `--splitty-effect-*` CSS custom properties.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

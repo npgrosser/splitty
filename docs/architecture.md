@@ -516,9 +516,10 @@ Round-robin dirty reads prevent one feature from starving the others, and
 superseded results cannot replace a newer choice. The same owned client admits
 up to 32 queued zoom intents beside its active job and alternates ready reads
 and writes. The intents that wait when a zoom job starts are that one job: it
-reads current settings, applies each intent's bounded step in order with the
+reads the settings metadata and the current settings, applies each intent's
+step in order through the service's levels (`zoom::ZoomSteps`) with the
 UI-free `zoom` policy and patches only `appearance.zoom` when the result
-differs, so a burst of steps costs one read and one write. Intents that arrive
+differs, so a burst of steps costs two reads and one write. Intents that arrive
 during a confirmed write follow it at once, and the appearance is read after
 the last of them. Mutation outcomes carry independent request identities, one
 per intent; a refresh cannot discard an acknowledgement. Failed or uncertain
@@ -533,7 +534,8 @@ current data; terminals keep working. Setup and pending-job cleanup are
 awaited on every worker exit before owned service shutdown, including update
 receiver failure. The API stream never consumes terminal delivery. Appearance
 font overrides remain chrome settings. Display zoom scales the native terminal's
-15 px text and 21 px row baseline in both scopes; window scope also scales native
+14 px text and 18 px row baseline in both scopes, rounded to whole pixels of
+text with the terminals scope as in the web client; window scope also scales native
 chrome through rem units without changing OS DPI. The styled toolkit Root owns
 the rem baseline, so window scale updates its theme base font rather than relying
 on a direct window rem assignment that the next Root render would overwrite.
@@ -1442,7 +1444,12 @@ The native pending view uses the shared Rust projection without speculative sess
 Each server owns the effective home settings in `config.toml`. The same config layer
 provides defaults, field limits and atomic PATCH validation to HTTP and native UI
 operations. Clients read `/api/home/settings/metadata` when available and use its
-values for controls and reset actions. The native client validates an edit
+values for controls and reset actions. The zoom levels are the `values` of
+`appearance.zoom` there (`config::ZOOM_LEVELS`); both clients step through
+them and offer them, and the native window bounds its display by them. A
+native window whose local service lists none takes the levels of its own
+build's core within that service's bounds; the web window, served by the same
+build, only resets without metadata. The native client validates an edit
 against those limits only; for a server without metadata it falls back to the
 built-in ranges and choices (`splitty_client_core::settings::fallback_limits`)
 and edits no field such a server may not know (`SettingsField::needs_metadata`). A successful settings or shell-profile write
@@ -1494,11 +1501,16 @@ the theme's optional `splitty` object and derives every absent token from the
 toolkit colors, lifting primary text to a readable contrast. The terminal
 palette is the one `terminal.theme` names, else the one named for the UI theme's
 mode (`terminal.themeDark`, `terminal.themeLight`), else the one with the UI
-theme's identifier (ignoring `-`), else the default of that mode. A name the catalog lacks
+theme's identifier (ignoring `-`), else the default of that mode. The first two
+steps are the server core's rule (`splitty_core::theme::terminal_palette_name`),
+which the application applies with its own UI theme's mode. A name the catalog lacks
 shows the next choice with a notice and leaves the setting alone. Palette
 changes update retained terminal engines without replacing sessions or history.
 The service's own theme module (`splitty_core::theme`, `theme.get`,
-`theme.list`) serves the web client only.
+`theme.list`) serves the web client only: `theme.get` applies the same rule
+with the answered theme's variant and gives the answer the chosen theme's
+terminal colors (`terminalPalette` names it), and the web client reloads the
+theme when a terminal palette setting changes. Palette names stay per client.
 ### Native functions added after the remote slice
 
 The native window has a command palette and a shortcut list (`workspace/palette.rs`): every command is a `Shortcut` or one of a few palette-only actions, run through the same `run_shortcut` as its key. Viewer panes (`workspace/viewer.rs`) ask the worker for a document with `ReadViewer`; `native_workspace/viewers.rs` reads it over the pane's own connection through `document.rs`, which now carries `ifVersion` and reports `viewer.unchanged` and `viewer.failed`. The window asks only for shown panes: at first, for a newer record, and every two seconds for a file. Terminal images come from the engine's render state (`Frame::images`, `Frame::image_pixels`) and are kept as textures per image generation; only the in-stream medium is enabled. `remote.autoForwardPorts` is the hub's (`hub::auto_forward`); the window only shows its forwards. `hub/shares.rs` is the client of the local service's reverse forwards; its stream is opened on first use. `NotificationCenter::take_fresh` hands newly admitted, unwatched facts to the window for notices and system notifications. The change `native-feature-gaps` lists what is still missing.

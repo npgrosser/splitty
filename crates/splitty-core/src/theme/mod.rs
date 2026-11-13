@@ -13,5 +13,7 @@ mod resolve;
 mod types;
 
 pub use list::list_themes;
-pub use resolve::{resolve_theme, resolve_theme_file};
+pub use resolve::{
+    resolve_theme, resolve_theme_file, resolve_theme_with_palette, terminal_palette_name,
+};
 pub use types::*;

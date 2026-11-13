@@ -1660,6 +1660,21 @@ mod tests {
             assert_eq!(sizes.first(), Some(&SettingsValue::Number(0.0)));
             assert_eq!(sizes.get(1), Some(&SettingsValue::Number(8.0)));
             assert_eq!(sizes.last(), Some(&SettingsValue::Number(24.0)));
+            // display-zoom, Zoom Settings: the zoom choices are the levels,
+            // also without metadata.
+            let levels = |state: &SettingsView| -> Vec<SettingsValue> {
+                state.choices[&SettingsField::Zoom]
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect()
+            };
+            let listed: Vec<_> = splitty_client_core::zoom::ZoomSteps::default()
+                .levels()
+                .iter()
+                .copied()
+                .map(SettingsValue::Number)
+                .collect();
+            assert_eq!(levels(state), listed);
             assert!(state
                 .status(SettingsField::Theme)
                 .unwrap()
@@ -1680,6 +1695,14 @@ mod tests {
             assert!(state.enabled(SettingsField::Theme));
             assert!(state.enabled(SettingsField::TerminalTheme));
             assert!(state.enabled(SettingsField::Zoom));
+            // The server's metadata lists the same levels; the editor offers
+            // them, not a grid of its own.
+            let zoom: Vec<_> = state.choices[&SettingsField::Zoom]
+                .iter()
+                .map(|(label, _)| label.as_str())
+                .collect();
+            assert_eq!(zoom.len(), 13);
+            assert_eq!(&zoom[..3], ["50%", "67%", "75%"]);
             assert!(state.enabled(SettingsField::DrawerPinned));
             assert_eq!(
                 state.reconnect_hosts(),

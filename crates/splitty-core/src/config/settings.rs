@@ -204,7 +204,8 @@ pub struct AppearanceSettings {
     pub border_radius: i32,
     pub font_size: i32,
     pub font_family: String,
-    /// The zoom level of this computer's windows, from 0.5 to 3.0.
+    /// The zoom level of this computer's windows, within [`ZOOM_LEVELS`];
+    /// an update sets one of them.
     pub zoom: f64,
     /// What zooms: `window` (the whole page) or `terminals` (their font size).
     pub zoom_scope: String,
@@ -585,7 +586,7 @@ impl HomeConfig {
         if self.appearance.font_size != 0 && !(8..=24).contains(&self.appearance.font_size) {
             self.appearance.font_size = 0;
         }
-        if !(0.5..=3.0).contains(&self.appearance.zoom) {
+        if !(ZOOM_LEVELS[0]..=ZOOM_LEVELS[ZOOM_LEVELS.len() - 1]).contains(&self.appearance.zoom) {
             self.appearance.zoom = 1.0;
         }
         if !matches!(self.appearance.zoom_scope.as_str(), "window" | "terminals") {
@@ -630,6 +631,13 @@ impl HomeConfig {
     }
 }
 
+/// The zoom levels a window steps through and offers, in order; the
+/// metadata lists them as the values of `appearance.zoom`, and an update
+/// takes no other level.
+pub const ZOOM_LEVELS: [f64; 13] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
+
 /// Server-owned control metadata; paths use the JSON wire spelling.
 pub fn settings_metadata() -> Value {
     let mut limits = serde_json::json!({
@@ -651,7 +659,7 @@ pub fn settings_metadata() -> Value {
             "appearance.themeMode": {"values": ["fixed", "auto"]},
             "appearance.borderRadius": {"min": 0, "max": 20, "step": 1},
             "appearance.fontSize": {"min": 0, "max": 24, "step": 1, "values": [0, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]},
-            "appearance.zoom": {"min": 0.5, "max": 3, "step": 0.1},
+            "appearance.zoom": {"min": ZOOM_LEVELS[0], "max": ZOOM_LEVELS[ZOOM_LEVELS.len() - 1], "values": ZOOM_LEVELS},
             "appearance.zoomScope": {"values": ["window", "terminals"]},
             "tabs.closeButton": {"values": ["always", "active"]},
             "tabs.minWidth": {"min": 0, "max": 40, "step": 1},
@@ -714,7 +722,15 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
         }
         if let Some(limit) = limits.get(path) {
             if let Some(values) = limit.get("values").and_then(Value::as_array) {
-                if !values.contains(value) {
+                // Numbers compare by value: `1` is the listed level `1.0`.
+                let listed = values.iter().any(|allowed| {
+                    allowed == value
+                        || matches!(
+                            (allowed.as_f64(), value.as_f64()),
+                            (Some(allowed), Some(value)) if allowed == value
+                        )
+                });
+                if !listed {
                     return Err(invalid(path, "unsupported value"));
                 }
             }
@@ -1150,6 +1166,32 @@ mod tests {
         let json = serde_json::to_value(&loaded).unwrap();
         assert_eq!(json["appearance"]["zoom"], 1.5);
         assert_eq!(json["appearance"]["zoomScope"], "terminals");
+
+        // display-zoom, Levels from the server: the metadata lists the
+        // levels with their bounds and no grid step.
+        let limit = &settings_metadata()["limits"]["appearance.zoom"];
+        assert_eq!(limit["values"], serde_json::json!(ZOOM_LEVELS));
+        assert_eq!(limit["min"], 0.5);
+        assert_eq!(limit["max"], 3.0);
+        assert!(limit.get("step").is_none());
+
+        // display-zoom, Level outside the list: refused, nothing stored. A
+        // listed level is taken also as an integer.
+        let refused = update_at(&path, serde_json::json!({"appearance": {"zoom": 1.3}}));
+        assert!(matches!(
+            refused,
+            Err(ConfigError::InvalidField { ref field, .. }) if field == "appearance.zoom"
+        ));
+        assert_eq!(load_from(&path).appearance.zoom, 1.5);
+        for (sent, stored) in [(serde_json::json!(0.67), 0.67), (serde_json::json!(1), 1.0)] {
+            let updated = update_at(&path, serde_json::json!({"appearance": {"zoom": sent}}));
+            assert_eq!(updated.unwrap().appearance.zoom, stored);
+        }
+
+        // display-zoom, Level between the listed ones: a stored level the
+        // list does not hold still loads.
+        fs::write(&path, "[appearance]\nzoom = 1.17\n").unwrap();
+        assert_eq!(load_from(&path).appearance.zoom, 1.17);
     }
 
     #[test]

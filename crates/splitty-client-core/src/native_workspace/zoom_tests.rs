@@ -169,7 +169,11 @@ async fn real_service() {
         reached = (reached.max(index)..levels.len())
             .find(|step| {
                 result.outcome
-                    == ZoomOutcome::Confirmed(Zoom::from_values(levels[*step], "terminals"))
+                    == ZoomOutcome::Confirmed(Zoom::from_values(
+                        levels[*step],
+                        "terminals",
+                        &Default::default(),
+                    ))
             })
             .unwrap_or_else(|| panic!("unexpected outcome {:?}", result.outcome));
     }

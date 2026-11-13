@@ -3,18 +3,26 @@
 
 import { isMac } from "./shortcuts.ts";
 import { shellKind, type ShellKind } from "./platform.ts";
-import type { ZoomScope } from "./settings.ts";
+import { allowedValues, type ZoomScope } from "./settings.ts";
 
-/** The levels, as Chromium's. */
-export const ZOOM_STEPS = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3] as const;
+/**
+ * The levels the server allows, ascending: the `values` of `appearance.zoom`
+ * in its settings metadata. Empty without metadata.
+ */
+export function zoomSteps(): number[] {
+  const levels = (allowedValues("appearance.zoom") ?? [])
+    .filter((level): level is number => typeof level === "number" && Number.isFinite(level) && level > 0);
+  return [...new Set(levels)].sort((a, b) => a - b);
+}
 
 export type ZoomAction = "in" | "out" | "reset";
 
-/** The next level in `action`'s direction, staying within the steps. */
-export function nextZoom(current: number, action: ZoomAction): number {
+/** The next level in `action`'s direction, staying within `steps`; without steps only a reset changes it. */
+export function nextZoom(current: number, action: ZoomAction, steps: readonly number[] = zoomSteps()): number {
   if (action === "reset") return 1;
-  if (action === "in") return ZOOM_STEPS.find((step) => step > current + 0.001) ?? ZOOM_STEPS[ZOOM_STEPS.length - 1];
-  return [...ZOOM_STEPS].reverse().find((step) => step < current - 0.001) ?? ZOOM_STEPS[0];
+  if (steps.length === 0) return current;
+  if (action === "in") return steps.find((step) => step > current + 0.001) ?? steps[steps.length - 1];
+  return [...steps].reverse().find((step) => step < current - 0.001) ?? steps[0];
 }
 
 /** The zoom a key press asks for: Cmd (macOS) or Ctrl (elsewhere) with +, =, - or 0. */
@@ -38,7 +46,7 @@ export function handlesZoomKeys(scope: ZoomScope, shell: ShellKind = shellKind):
   return scope === "terminals" || shell !== "web";
 }
 
-/** A terminal's font size at `zoom`: zoomed only with the terminals scope. */
+/** A terminal's font size at `zoom`: zoomed only with the terminals scope, to whole pixels as in every client. */
 export function zoomedFontSize(fontSize: number, zoom: number, scope: ZoomScope): number {
   return scope === "terminals" ? Math.round(fontSize * zoom) : fontSize;
 }

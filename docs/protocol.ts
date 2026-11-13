@@ -2999,6 +2999,12 @@ export interface NativeDocumentAssignment {
 /** Data returned by theme.get and GET /api/home/theme.
  * id identifies the actual resolved source, including a fallback source;
  * name remains an authored display name. Older replies may omit id.
+ * terminal holds the colors of the terminal palette the stored settings choose
+ * for this theme's variant: terminal.theme unless "default", else
+ * terminal.themeDark / terminal.themeLight unless "default", else this theme's
+ * own. terminalPalette is the id of the theme they come from; a chosen name the
+ * server has no theme for gives this theme's own colors and id. Older replies
+ * omit terminalPalette and always carry the theme's own terminal colors.
  */
 export interface ResolvedNativeTheme {
   id?: string;
@@ -3006,6 +3012,7 @@ export interface ResolvedNativeTheme {
   variant: "light" | "dark";
   ui: Record<string, string>;
   terminal: Record<string, string>;
+  terminalPalette?: string;
   effects?: Record<string, string>;
   layout: {
     "dnd-overlay-scope": string;
@@ -3299,7 +3306,11 @@ interface HubCatalogObservation {
 // PATCH /api/home/settings remains a partial settings request and returns the
 // complete effective settings. Validation failure is HTTP 400 with
 // { error: string, field: dottedFieldPath }; no change is persisted.
+// A field with `values` takes only a listed value; numbers compare by value.
 // terminal.xterm.scrollSensitivity and fastScrollSensitivity accept fractions.
+// appearance.zoom lists the zoom levels clients step through and offer as its
+// `values` (with min and max, no step); older servers publish
+// { min: 0.5, max: 3, step: 0.1 } and accept any level in that range.
 export interface SettingsChangedEvent {
   type: "settings.changed"; id: string; timestamp: number; settings: unknown;
 }

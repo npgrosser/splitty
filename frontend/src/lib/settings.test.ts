@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-const { apiFetch } = vi.hoisted(() => ({ apiFetch: vi.fn() }));
+const { apiFetch, reloadTheme } = vi.hoisted(() => ({ apiFetch: vi.fn(), reloadTheme: vi.fn() }));
 vi.mock("./protocol/http.ts", () => ({ apiFetch }));
+vi.mock("./theme.ts", () => ({ reloadTheme, resolveActiveThemeName: () => "splitty-dark" }));
 afterEach(() => { vi.resetModules(); vi.clearAllMocks(); });
 const initial = { terminal: { xterm: { scrollSensitivity: 1 } }, drawer: { sidebarWidth: 200, pinned: false }, editors: { file: "vscode", folder: "vscode", extensions: [], projects: [] } };
 const metadata = { defaults: initial, limits: { "terminal.xterm.scrollSensitivity": { min: 0.1, max: 10, step: 0.1 } } };
@@ -42,6 +43,27 @@ describe("server-owned settings", () => {
     local.socket.message({ type: "settings.changed", settings: { ...initial, drawer: { ...initial.drawer, sidebarWidth: 280 } } });
     expect(settings.getSettings().drawer.sidebarWidth).toBe(280);
     local.conn.dispose(); remote.conn.dispose();
+  });
+  it("reloads the theme when a terminal palette setting changes (Palette change reaches open terminals)", async () => {
+    const appearance = { theme: "splitty-dark", themeMode: "fixed", themeDark: "splitty-dark", themeLight: "splitty-light" };
+    const terminal = { ...initial.terminal, theme: "default", themeDark: "default", themeLight: "default" };
+    const loaded = { ...initial, appearance, terminal };
+    apiFetch.mockImplementation(async (path: string) => path.endsWith("metadata") ? json(metadata) : json(loaded));
+    const settings = await import("./settings.ts");
+    await settings.loadSettings();
+    expect(reloadTheme).not.toHaveBeenCalled();
+    for (const field of ["theme", "themeDark", "themeLight"] as const) {
+      reloadTheme.mockClear();
+      settings.applyServerSettings({ ...loaded, terminal: { ...terminal, [field]: "splitty-retro" } } as never);
+      await vi.waitFor(() => expect(reloadTheme).toHaveBeenCalledWith("splitty-dark"));
+      // Back to the loaded palette: one more reload, settled before the next.
+      settings.applyServerSettings(loaded as never);
+      await vi.waitFor(() => expect(reloadTheme).toHaveBeenCalledTimes(2));
+    }
+    reloadTheme.mockClear();
+    settings.applyServerSettings({ ...loaded, drawer: { ...loaded.drawer, sidebarWidth: 280 } } as never);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reloadTheme).not.toHaveBeenCalled();
   });
   it("uses old host values as reset values without metadata", async () => {
     apiFetch.mockImplementation(async (path: string) => path.endsWith("metadata") ? json({}, 404) : json({ ...initial, drawer: { sidebarWidth: 270, pinned: false } }));

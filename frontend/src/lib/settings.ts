@@ -45,7 +45,11 @@ export interface XtermSettings {
 
 export interface TerminalSettings {
   renderer: TerminalRenderer;
+  /** The terminal palette: a theme name, or `default` for `themeDark`/`themeLight` by the UI theme's mode. */
   theme: string;
+  /** The palette for a dark or a light UI theme while `theme` is `default`; `default` for the UI theme's own. */
+  themeDark: string;
+  themeLight: string;
   closeOnExit: CloseOnExit;
   ligatures: boolean;
   windowPaddingBalance: boolean;
@@ -198,8 +202,12 @@ function syncTheme(previous: SplittySettings | undefined, next: SplittySettings)
   const before = previous?.appearance;
   const after = next.appearance;
   if (!before || !after) return;
+  // The server's theme answer carries the terminal palette these settings choose.
+  const palette = (settings: SplittySettings | undefined) =>
+    [settings?.terminal?.theme, settings?.terminal?.themeDark, settings?.terminal?.themeLight].join("\n");
   if (before.theme !== after.theme || before.themeMode !== after.themeMode ||
-      before.themeDark !== after.themeDark || before.themeLight !== after.themeLight) {
+      before.themeDark !== after.themeDark || before.themeLight !== after.themeLight ||
+      palette(previous) !== palette(next)) {
     void import("./theme.ts").then((theme) => theme.reloadTheme(theme.resolveActiveThemeName()));
   }
 }

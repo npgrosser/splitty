@@ -133,7 +133,7 @@ model {
     }
 
     client_zoom = component 'client_zoom' {
-      description 'Pure bounded display zoom levels, scope projection and keyboard intent steps.'
+      description 'Display zoom levels from the service settings metadata (the server core levels for an older service), scope projection with whole-pixel terminal font sizes in the terminals scope, and keyboard intent steps.'
       metadata { module 'splitty_client_core::zoom' }
     }
 
@@ -185,6 +185,10 @@ model {
     client_root -> appearance 'Expose charged appearance snapshots'
     client_root -> local_service 'Expose the owned local settings API client'
     local_service -> client_zoom 'Resolve queued zoom intents against current settings'
+    client_zoom -> client_settings 'Take the zoom levels from the service settings limits'
+    client_zoom -> splitty.core.config 'Fall back to the server core zoom levels for an older service'
+    client_settings -> splitty.core.config 'List the server core zoom levels in the fallback limits'
+    appearance -> splitty.core.theme 'Choose the terminal palette name by the server core rule'
     native_workspace -> client_zoom 'Carry identified zoom intents and independent outcomes'
     local_service -> appearance 'Read appearance independently and reuse in-memory fixtures'
     local_service -> client_settings 'Queue and validate shared single-field settings edits'

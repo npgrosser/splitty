@@ -38,6 +38,10 @@ system. Settings, Terminal:
   not matter, so Tokyo Night gets TokyoNight) and the Splitty palette of that
   mode where there is none.
 
+The browser UI follows the same terminal settings with its own theme files: a
+palette it has no theme of that name for shows the UI theme's terminal colors
+there.
+
 ## Adding themes
 
 Put files into `themes/` in the configuration directory

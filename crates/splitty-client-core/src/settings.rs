@@ -355,7 +355,12 @@ pub fn fallback_limits(field: SettingsField) -> Option<&'static SettingsLimits> 
                 .collect();
             BTreeMap::from([
                 (F::FontSize, range(0.0, 24.0, 1.0, font_sizes)),
-                (F::Zoom, range(0.5, 3.0, 0.1, Vec::new())),
+                // The levels this build's server lists; such a server took
+                // any level in their range, and its windows offered these.
+                (
+                    F::Zoom,
+                    range(0.5, 3.0, 0.1, splitty_core::config::ZOOM_LEVELS.to_vec()),
+                ),
                 (F::DrawerWidth, range(150.0, 400.0, 10.0, Vec::new())),
                 (F::ThemeMode, choices(&["fixed", "auto"])),
                 (F::ZoomScope, choices(&["window", "terminals"])),

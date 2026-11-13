@@ -238,6 +238,7 @@ pub fn resolve_theme_file(theme: &ThemeFile) -> ResolvedTheme {
         variant: theme.variant.clone(),
         ui,
         terminal,
+        terminal_palette: None,
         effects: theme.effects.clone(),
         layout: theme.layout.clone(),
     }
@@ -302,6 +303,57 @@ pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme 
     named("splitty-dark", &bundled::splitty_dark())
 }
 
+/// The terminal palette settings choose for a UI theme of `variant`: the
+/// one `named` names (`terminal.theme`); while that is `default`, the one
+/// named for the variant (`terminal.themeDark`, `terminal.themeLight`);
+/// `None` while that is `default` too, for the UI theme's own palette. An
+/// empty name counts as `default`. Every client chooses by this rule and
+/// looks the name up in its own themes.
+pub fn terminal_palette_name<'a>(
+    named: &'a str,
+    dark: &'a str,
+    light: &'a str,
+    variant: &Variant,
+) -> Option<&'a str> {
+    let by_variant = match variant {
+        Variant::Dark => dark,
+        Variant::Light => light,
+    };
+    [named, by_variant]
+        .into_iter()
+        .find(|name| !name.is_empty() && *name != "default")
+}
+
+/// The theme `name` (see [`resolve_theme`]) with the terminal colors of the
+/// palette [`terminal_palette_name`] chooses from the terminal settings
+/// `named`, `dark` and `light` for its variant, where a theme of that name
+/// exists; otherwise with its own. `terminal_palette` names the theme the
+/// terminal colors come from.
+pub fn resolve_theme_with_palette(
+    name: &str,
+    named: &str,
+    dark: &str,
+    light: &str,
+    themes_dir: &std::path::Path,
+) -> ResolvedTheme {
+    let mut theme = resolve_theme(name, themes_dir);
+    theme.terminal_palette = theme.id.clone();
+    let Some(palette) = terminal_palette_name(named, dark, light, &theme.variant) else {
+        return theme;
+    };
+    if theme.id.as_deref() == Some(palette) {
+        return theme;
+    }
+    let source = resolve_theme(palette, themes_dir);
+    // A palette the server has no theme for resolves to the fallback theme
+    // under another identifier; the UI theme's own colors stay.
+    if source.id.as_deref() == Some(palette) {
+        theme.terminal = source.terminal;
+        theme.terminal_palette = source.id;
+    }
+    theme
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +406,74 @@ mod tests {
         let theme = resolve_theme("nonexistent", dir.path());
         assert_eq!(theme.name, "Splitty Dark");
         assert_eq!(theme.id.as_deref(), Some("splitty-dark"));
+    }
+
+    /// settings, Terminal Palette Choice: the named palette, then the one
+    /// for the variant, then the theme's own; empty counts as `default`.
+    #[test]
+    fn terminal_palette_name_follows_the_order() {
+        use Variant::{Dark, Light};
+        assert_eq!(terminal_palette_name("nord", "a", "b", &Dark), Some("nord"));
+        assert_eq!(terminal_palette_name("default", "a", "b", &Dark), Some("a"));
+        assert_eq!(terminal_palette_name("", "a", "b", &Light), Some("b"));
+        assert_eq!(
+            terminal_palette_name("default", "default", "b", &Dark),
+            None
+        );
+        assert_eq!(terminal_palette_name("default", "a", "", &Light), None);
+    }
+
+    /// settings, Named palette in the web window, Palette by the UI theme's
+    /// mode, Palette the server does not have.
+    #[test]
+    fn a_theme_answer_carries_the_chosen_palette() {
+        let dir = tempfile::tempdir().unwrap();
+        let colors = |name: &str| serde_json::to_value(resolve_theme(name, dir.path()).terminal);
+        let shown = |theme: &ResolvedTheme| serde_json::to_value(&theme.terminal).unwrap();
+        let (light, retro, dark) = (
+            colors("splitty-light").unwrap(),
+            colors("splitty-retro").unwrap(),
+            colors("splitty-dark").unwrap(),
+        );
+        assert_ne!(colors("splitty-classic-light").unwrap(), light);
+
+        let named = resolve_theme_with_palette(
+            "splitty-dark",
+            "splitty-light",
+            "default",
+            "default",
+            dir.path(),
+        );
+        assert_eq!(
+            named.ui.surface_base,
+            resolve_theme("splitty-dark", dir.path()).ui.surface_base
+        );
+        assert_eq!(shown(&named), light);
+        assert_ne!(shown(&named), dark);
+        assert_eq!(named.terminal_palette.as_deref(), Some("splitty-light"));
+
+        let pair = |name| {
+            resolve_theme_with_palette(
+                name,
+                "default",
+                "splitty-retro",
+                "splitty-light",
+                dir.path(),
+            )
+        };
+        assert_eq!(shown(&pair("splitty-dark")), retro);
+        let classic_light = pair("splitty-classic-light");
+        assert_eq!(shown(&classic_light), light);
+        assert_eq!(
+            classic_light.terminal_palette.as_deref(),
+            Some("splitty-light")
+        );
+
+        for palette in ["catppuccin-mocha", "default", "../escape"] {
+            let own = resolve_theme_with_palette("splitty-retro", palette, "", "", dir.path());
+            assert_eq!(shown(&own), retro, "{palette}");
+            assert_eq!(own.terminal_palette.as_deref(), Some("splitty-retro"));
+        }
     }
 
     #[test]

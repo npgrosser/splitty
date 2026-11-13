@@ -29,6 +29,30 @@ pub fn settings_snapshot_with_pin(
     availability: Availability,
     pinned: bool,
 ) -> Arc<AppearanceSnapshot> {
+    let metadata = (!matches!(availability, Availability::MissingMetadata)).then(settings_metadata);
+    snapshot(connection_id, generation, metadata, pinned)
+}
+
+/// The settings metadata this build's server publishes, to change in a test.
+pub fn server_metadata() -> serde_json::Value {
+    settings_metadata()
+}
+
+/// A snapshot with this metadata, as from a server whose limits differ.
+pub fn settings_snapshot_with_metadata(
+    connection_id: Uuid,
+    generation: u64,
+    metadata: serde_json::Value,
+) -> Arc<AppearanceSnapshot> {
+    snapshot(connection_id, generation, Some(metadata), true)
+}
+
+fn snapshot(
+    connection_id: Uuid,
+    generation: u64,
+    metadata: Option<serde_json::Value>,
+    pinned: bool,
+) -> Arc<AppearanceSnapshot> {
     let budget = ConnectionBudget::default();
     let drawer = DrawerSettings {
         pinned,
@@ -45,17 +69,21 @@ pub fn settings_snapshot_with_pin(
         native_tabs: Default::default(),
         editors: Default::default(),
     };
-    let metadata = serde_json::from_value::<SettingsMetadata>(settings_metadata())
-        .expect("test settings metadata");
+    let metadata_error = metadata
+        .is_none()
+        .then(|| "Metadata unavailable".to_owned());
+    let metadata = metadata.map(|metadata| {
+        let metadata =
+            serde_json::from_value::<SettingsMetadata>(metadata).expect("test settings metadata");
+        budget.charge(0, false, || metadata).expect("test charge")
+    });
     Arc::new(AppearanceSnapshot {
         connection_id,
         generation,
         settings: budget.charge(0, false, || settings).expect("test charge"),
         scheme: ColorScheme::Dark,
         terminal_generation: generation,
-        metadata: (!matches!(availability, Availability::MissingMetadata))
-            .then(|| budget.charge(0, false, || metadata).expect("test charge")),
-        metadata_error: matches!(availability, Availability::MissingMetadata)
-            .then(|| "Metadata unavailable".to_owned()),
+        metadata,
+        metadata_error,
     })
 }

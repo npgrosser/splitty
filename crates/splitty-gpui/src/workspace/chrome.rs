@@ -184,11 +184,11 @@ pub(super) mod view_tests {
     #[test]
     fn a_zoom_step_shows_at_once_and_settles_on_the_service_value() {
         use splitty_client_core::appearance::test_support::{settings_snapshot, Availability};
-        use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
+        use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult, ZoomSteps};
         with_view(|window, view| {
             let owner = Uuid::new_v4();
             let (commands, mut receiver) = mpsc::channel(8);
-            let at = |level| Zoom::from_values(level, "window");
+            let at = |level| Zoom::from_values(level, "window", &ZoomSteps::default());
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
                     workspace.commands = commands;
@@ -292,6 +292,40 @@ pub(super) mod view_tests {
                 });
             });
             assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    /// display-zoom, Levels from the server: the window steps through the
+    /// local service's levels and shows one beyond 300 %.
+    #[test]
+    fn zoom_steps_through_the_services_levels() {
+        use splitty_client_core::appearance::test_support::{
+            server_metadata, settings_snapshot_with_metadata,
+        };
+        use splitty_client_core::zoom::ZoomAction;
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let (commands, _receiver) = mpsc::channel(8);
+            let mut metadata = server_metadata();
+            metadata["limits"]["appearance.zoom"] =
+                serde_json::json!({"min": 0.25, "max": 4, "values": [0.25, 0.5, 1, 2, 4]});
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(WindowWorkspace::new(owner));
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_metadata(owner, 1, metadata),
+                        window,
+                        cx,
+                    );
+                    for level in [2., 4., 4.] {
+                        workspace.submit_zoom(ZoomAction::In, window, cx);
+                        assert_eq!(workspace.appearance.zoom.level(), level);
+                    }
+                    assert_eq!(workspace.appearance.zoom.window_scale(), 4.);
+                    assert_eq!(workspace.zoom_feedback.as_ref().unwrap().0, "Zoom 400 %");
+                });
+            });
         });
     }
 

@@ -356,7 +356,7 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     assert_eq!(result.request_id, second);
     assert_eq!(
         result.outcome,
-        ZoomOutcome::Confirmed(Zoom::from_values(1.25, "terminals"))
+        ZoomOutcome::Confirmed(Zoom::from_values(1.25, "terminals", &Default::default()))
     );
     client.finish().await.unwrap();
     task.await.unwrap();
@@ -365,7 +365,7 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
 }
 
 #[tokio::test]
-async fn queued_steps_are_one_read_and_one_write_and_the_refresh_follows_the_last() {
+async fn queued_steps_are_one_job_of_reads_and_one_write_and_the_refresh_follows_the_last() {
     // The script is the whole conversation: a step more would be a request
     // the service does not expect.
     let appearance = |level: f64| {
@@ -377,10 +377,21 @@ async fn queued_steps_are_one_read_and_one_write_and_the_refresh_follows_the_las
             ),
         ]
     };
-    let mut script = vec![("home.get", home(1.0)), ("home.update", home(1.1))];
+    // A job reads the levels and the level, then writes once.
+    let job = |level: f64, next: f64| {
+        [
+            (
+                "home.metadata",
+                splitty_core::config::settings_metadata().to_string(),
+            ),
+            ("home.get", home(level)),
+            ("home.update", home(next)),
+        ]
+    };
+    let mut script = job(1.0, 1.1).to_vec();
     // Three steps in and a reset waited behind the first write, then two out.
-    script.extend([("home.get", home(1.1)), ("home.update", home(1.0))]);
-    script.extend([("home.get", home(1.0)), ("home.update", home(0.8))]);
+    script.extend(job(1.1, 1.0));
+    script.extend(job(1.0, 0.8));
     script.extend(appearance(0.8));
     let exchanges = script
         .into_iter()
@@ -410,7 +421,11 @@ async fn queued_steps_are_one_read_and_one_write_and_the_refresh_follows_the_las
             .map(|id| ZoomResult {
                 connection_id: owner,
                 request_id: id,
-                outcome: ZoomOutcome::Confirmed(Zoom::from_values(level, "terminals")),
+                outcome: ZoomOutcome::Confirmed(Zoom::from_values(
+                    level,
+                    "terminals",
+                    &Default::default(),
+                )),
             })
             .collect::<Vec<_>>()
     };
@@ -531,7 +546,7 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
         assert_eq!(result.request_id == first, index == 0);
         assert_eq!(
             result.outcome,
-            ZoomOutcome::Confirmed(Zoom::from_values(3.0, "window"))
+            ZoomOutcome::Confirmed(Zoom::from_values(3.0, "window", &Default::default()))
         );
     }
     assert!(client.zoom.is_empty() && client.active_zoom.is_empty());
@@ -935,3 +950,58 @@ async fn template_catalog_limit_rejects_atomically_without_hot_retry() {
 }
 
 mod settings_tests;
+
+/// display-zoom, Levels from the server: a zoom job steps through the levels
+/// the service's metadata lists and takes its answer within them; display-zoom,
+/// Older local service: without metadata the earlier levels apply.
+#[tokio::test]
+async fn a_zoom_job_steps_through_the_levels_the_service_lists() {
+    let mut wide = splitty_core::config::settings_metadata();
+    wide["limits"]["appearance.zoom"] =
+        serde_json::json!({"min": 0.25, "max": 4, "values": [0.25, 0.5, 1, 2, 4]});
+    for (metadata, status, level, written) in [
+        (wide.to_string(), 200, 3.0, Some(4.0)),
+        ("{}".to_owned(), 404, 2.0, Some(2.5)),
+        ("{}".to_owned(), 404, 3.0, None),
+    ] {
+        let mut exchanges = vec![
+            Exchange {
+                operation: "home.metadata",
+                status,
+                uncertain: false,
+                body: metadata,
+            },
+            Exchange {
+                operation: "home.get",
+                status: 200,
+                uncertain: false,
+                body: home(level),
+            },
+        ];
+        // The script ends where the job does: a write it did not expect, or
+        // none where it expects one, fails the service.
+        exchanges.extend(written.map(|written| Exchange {
+            operation: "home.update",
+            status: 200,
+            uncertain: false,
+            body: home(written),
+        }));
+        let (api, task, dir) = scripted(exchanges).await;
+        let owner = Uuid::new_v4();
+        let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+        client.dirty = [false; 3];
+        client
+            .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)
+            .unwrap();
+        let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
+            panic!("missing outcome")
+        };
+        let ZoomOutcome::Confirmed(zoom) = result.outcome else {
+            panic!("not confirmed: {:?}", result.outcome)
+        };
+        assert_eq!(zoom.level(), written.unwrap_or(level));
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

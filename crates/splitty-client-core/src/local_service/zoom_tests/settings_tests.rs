@@ -40,7 +40,7 @@ fn edit(field: F) -> SettingsEdit {
             | F::TerminalThemeLight => V::Text("splitty-light".into()),
             F::FontSize => V::Number(18.0),
             F::FontFamily => V::Text("Owned Test Font".into()),
-            F::Zoom => V::Number(1.2),
+            F::Zoom => V::Number(1.25),
             F::ZoomScope => V::Text("window".into()),
             F::CloseOnExit => V::Text("never".into()),
             F::ScrollToBottom => V::Bool(false),

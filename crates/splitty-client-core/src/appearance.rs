@@ -77,6 +77,24 @@ impl DrawerVisibilityResult {
     }
 }
 
+/// The terminal palette the settings `theme`, `dark` and `light`
+/// (`terminal.theme`, `terminal.themeDark`, `terminal.themeLight`) choose for
+/// a UI theme of `mode`, by the server's rule, which the web client gets in
+/// its theme answer; `None` for the UI theme's own palette. The name is looked
+/// up in the application's own catalog.
+pub fn terminal_palette_name<'a>(
+    theme: &'a str,
+    dark: &'a str,
+    light: &'a str,
+    mode: ColorScheme,
+) -> Option<&'a str> {
+    let variant = match mode {
+        ColorScheme::Dark => splitty_core::theme::Variant::Dark,
+        ColorScheme::Light => splitty_core::theme::Variant::Light,
+    };
+    splitty_core::theme::terminal_palette_name(theme, dark, light, &variant)
+}
+
 /// The UI supplies the operating system's preference; no platform calls belong here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ColorScheme {

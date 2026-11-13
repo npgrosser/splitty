@@ -1669,7 +1669,7 @@ impl Workspace {
                 drawer_row_slots: Rc::default(),
                 drawer_pending: None,
                 wheel_navigation: WheelNavigation::default(),
-                zoom: PresentedZoom::new(Zoom::from_values(1.0, "window")),
+                zoom: PresentedZoom::new(Zoom::default()),
                 zoom_feedback: None,
                 profiles: None,
                 profiles_error: None,
@@ -2006,7 +2006,7 @@ impl Workspace {
         });
         for view in self.panes.values() {
             view.terminal.update(cx, |terminal, cx| {
-                terminal.step_zoom(zoom.terminal_scale(), cx)
+                terminal.step_zoom(zoom.terminal_scale(terminal::BASE_FONT_SIZE), cx)
             });
         }
         self.appearance.zoom = zoom;
@@ -2038,7 +2038,9 @@ impl Workspace {
             },
         )) {
             Ok(()) => {
-                let zoom = self.zoom.step(request_id, action);
+                let zoom = self
+                    .zoom
+                    .step(request_id, action, &self.appearance.zoom_steps);
                 self.apply_zoom(zoom, window, cx);
                 self.show_zoom_level(zoom);
             }
@@ -3041,7 +3043,10 @@ impl Workspace {
             self.smoke_last_input_pane.clone(),
         );
         let colors = self.appearance.terminal;
-        let terminal_scale = self.appearance.zoom.terminal_scale();
+        let terminal_scale = self
+            .appearance
+            .zoom
+            .terminal_scale(terminal::BASE_FONT_SIZE);
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, origin, cx));
@@ -3179,7 +3184,7 @@ impl Workspace {
             }
             self.hosts
                 .set_owner(window_model.local_source().connection_id());
-            self.zoom = PresentedZoom::new(Zoom::from_values(1.0, "window"));
+            self.zoom = PresentedZoom::new(Zoom::default());
             self.apply_zoom(self.zoom.presented(), window, cx);
             self.appearance_generation = 0;
             self.notification_settings_generation = 0;
