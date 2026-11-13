@@ -399,14 +399,14 @@ async fn surviving_api_still_requires_authentication() {
     let client = TestServer::client();
 
     let anonymous = client
-        .get(server.url("/api/stats"))
+        .get(server.url("/api/build"))
         .send()
         .await
         .expect("request");
     assert_eq!(anonymous.status(), reqwest::StatusCode::UNAUTHORIZED);
 
     let authenticated = client
-        .get(server.url("/api/stats"))
+        .get(server.url("/api/build"))
         .bearer_auth(&server.token)
         .send()
         .await
@@ -484,7 +484,7 @@ async fn api_rejects_foreign_origin() {
     let client = TestServer::client();
 
     let response = client
-        .get(server.url("/api/stats"))
+        .get(server.url("/api/build"))
         .bearer_auth(&server.token)
         .header("Origin", "https://evil.example")
         .send()
@@ -504,7 +504,7 @@ async fn api_allows_absent_origin_for_non_browser_clients() {
     let client = TestServer::client();
 
     let response = client
-        .get(server.url("/api/stats"))
+        .get(server.url("/api/build"))
         .bearer_auth(&server.token)
         .send()
         .await
@@ -607,7 +607,7 @@ async fn no_response_carries_wildcard_cors() {
     let server = TestServer::start();
     let client = TestServer::client();
 
-    for path in ["/health", "/api/stats"] {
+    for path in ["/health", "/api/build"] {
         let response = client
             .get(server.url(path))
             .bearer_auth(&server.token)
@@ -762,7 +762,7 @@ async fn query_parameter_token_is_not_accepted() {
     let client = TestServer::client();
 
     let response = client
-        .get(server.url(&format!("/api/stats?token={}", server.token)))
+        .get(server.url(&format!("/api/build?token={}", server.token)))
         .send()
         .await
         .expect("request");
@@ -777,7 +777,7 @@ async fn legacy_token_cookie_is_not_accepted() {
     let client = TestServer::client();
 
     let response = client
-        .get(server.url("/api/stats"))
+        .get(server.url("/api/build"))
         .header("Cookie", format!("splitty-token={}", server.token))
         .send()
         .await
@@ -793,7 +793,7 @@ async fn session_cookie_authenticates_the_api() {
     let client = server.authenticated_client().await;
 
     let response = client
-        .get(server.url("/api/stats"))
+        .get(server.url("/api/build"))
         .header("Origin", server.own_origin())
         .send()
         .await
@@ -1081,7 +1081,7 @@ async fn control_socket_cannot_reach_privileged_endpoints() {
         ("GET", "/api/shell-profiles"),
         ("GET", "/api/home/theme"),
         ("GET", "/api/templates"),
-        ("GET", "/api/stats"),
+        ("GET", "/api/build"),
         // Minting browser credentials must stay on the token-authenticated path.
         ("POST", "/api/bootstrap"),
         ("POST", "/api/ws-ticket"),

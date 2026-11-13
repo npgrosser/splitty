@@ -1,7 +1,7 @@
 //! Settings structs, defaults, validation, and TOML persistence.
 //!
-//! Defines `HomeConfig` (the main user-facing configuration) and `ServerConfig`,
-//! along with all nested settings groups (terminal, appearance, tabs, drawer,
+//! Defines `HomeConfig` (the main user-facing configuration) along with all
+//! nested settings groups (terminal, appearance, tabs, drawer,
 //! window, notifications, remote). Includes TOML <-> JSON key transformation
 //! (snake_case on disk, camelCase on the wire) and deep-merge for partial updates.
 
@@ -209,12 +209,6 @@ pub struct AppearanceSettings {
     pub zoom: f64,
     /// What zooms: `window` (the whole page) or `terminals` (their font size).
     pub zoom_scope: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ServerConfig {
-    // Placeholder — real server settings come with remote connections milestone
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -988,33 +982,6 @@ pub fn save_to(config: &HomeConfig, path: &Path) -> Result<(), ConfigError> {
     fs::write(&tmp, &toml_str)?;
     fs::rename(&tmp, path)?;
 
-    Ok(())
-}
-
-pub fn load_server() -> ServerConfig {
-    load_server_from(&super::server_config_path())
-}
-
-pub fn load_server_from(path: &Path) -> ServerConfig {
-    let data = match fs::read_to_string(path) {
-        Ok(d) => d,
-        Err(_) => return ServerConfig::default(),
-    };
-    toml::from_str(&data).unwrap_or_default()
-}
-
-pub fn save_server(config: &ServerConfig) -> Result<(), ConfigError> {
-    save_server_to(config, &super::server_config_path())
-}
-
-pub fn save_server_to(config: &ServerConfig, path: &Path) -> Result<(), ConfigError> {
-    if let Some(parent) = path.parent() {
-        super::ensure_private_dir(parent)?;
-    }
-    let toml_str = toml::to_string_pretty(config)?;
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, &toml_str)?;
-    fs::rename(&tmp, path)?;
     Ok(())
 }
 

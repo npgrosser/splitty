@@ -84,30 +84,6 @@
       "errors": "plain"
     },
     {
-      "operation": "serverSettings.get",
-      "method": "GET",
-      "path": "/api/server/settings",
-      "scope": "backend",
-      "arguments": [],
-      "maxBodyBytes": 1048576,
-      "cancellation": "read",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
-      "operation": "serverSettings.update",
-      "method": "PATCH",
-      "path": "/api/server/settings",
-      "scope": "backend",
-      "arguments": [
-        "body"
-      ],
-      "maxBodyBytes": 1048576,
-      "cancellation": "mutation",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
       "operation": "template.extract",
       "method": "POST",
       "path": "/api/templates/extract/screen",
@@ -188,17 +164,6 @@
       "operation": "build.get",
       "method": "GET",
       "path": "/api/build",
-      "scope": "backend",
-      "arguments": [],
-      "maxBodyBytes": 1048576,
-      "cancellation": "read",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
-      "operation": "stats.get",
-      "method": "GET",
-      "path": "/api/stats",
       "scope": "backend",
       "arguments": [],
       "maxBodyBytes": 1048576,

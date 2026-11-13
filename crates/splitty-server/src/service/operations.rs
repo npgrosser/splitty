@@ -488,21 +488,6 @@ pub(crate) async fn put_shell_profiles(
     Payload(serde_json::to_value(shell_state).unwrap_or(json!({}))).into_reply()
 }
 
-// ── Server Settings ──────────────────────────────────────────────────────────
-
-pub(crate) async fn get_server_settings(state: &ServiceState) -> Payload<Value> {
-    let cfg = state.server_config.read().unwrap();
-    Payload(serde_json::to_value(&*cfg).unwrap_or(json!({})))
-}
-
-pub(crate) async fn patch_server_settings(_state: &ServiceState, _partial: Value) -> Reply {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Payload(json!({"error": "server settings are not yet configurable"})),
-    )
-        .into_reply()
-}
-
 // ── Templates ───────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1210,17 +1195,6 @@ pub(crate) async fn post_session_send(
         )
             .into_reply(),
     }
-}
-
-// ── Stats ───────────────────────────────────────────────────────────────────
-
-pub(crate) async fn get_stats(state: &ServiceState) -> Payload<Value> {
-    Payload(json!({
-        "screens": state.mux_store.screen_count(),
-        "runtime": {
-            "backend": "rust",
-        },
-    }))
 }
 
 pub(crate) async fn post_file_offer(

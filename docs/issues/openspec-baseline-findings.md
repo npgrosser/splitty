@@ -528,7 +528,7 @@ that area touches them.
   any older client of a newer daemon beyond the `splitty` command; everything over SSH (`connect`, the hub reading
   the other build's `remote-handshake`, installing or updating a host's daemon, `remote-migrate`); managed jobs,
   agent grants, viewer panes, annotations and scratchpads in `state.json`, and the other files below the
-  configuration directory (`server.toml`, templates, themes); the macOS and Windows (WSL) builds; versions older
+  configuration directory (templates, themes); the macOS and Windows (WSL) builds; versions older
   than the last release (run once by hand against 0.2.4 on 2026-11-12: passed). The pinned rollback smoke in
   `tests/daemon_lifecycle.rs` needs Bubblewrap and does not run in CI. A run shows only what differs between the
   two builds: 0.3.1 and 0.3.2 differ in the server code by two settings.

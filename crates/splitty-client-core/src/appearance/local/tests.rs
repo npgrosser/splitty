@@ -6,7 +6,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 use crate::connection::Client as SessionClient;
 use serde_json::json;
 use splitty_core::{
-    config::{HomeConfig, ServerConfig},
+    config::HomeConfig,
     mux::{
         effect_runner::{EffectRunner, EnvContext},
         Store,
@@ -103,7 +103,6 @@ fn fixture_with_path(
         config: Arc::new(RwLock::new(config)),
         config_path: config_path.unwrap_or_else(|| path.join("config.toml")),
         shell_profiles: profiles,
-        server_config: Arc::new(RwLock::new(ServerConfig::default())),
         template_store: Arc::new(splitty_core::template::FileStore::new(
             path.join("templates"),
         )),

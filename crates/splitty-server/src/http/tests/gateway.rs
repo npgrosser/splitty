@@ -254,8 +254,12 @@ async fn gateway_routes_fixed_catalog_calls_without_forwarding_browser_credentia
         .await
         .unwrap();
     assert_eq!(reply.status(), StatusCode::BAD_REQUEST);
-    let reply = app.clone().oneshot(request("/api/agents")).await.unwrap();
-    assert_eq!(reply.status(), StatusCode::NOT_FOUND);
+    // Not routes, and no operations either (control-api, Build and Runtime
+    // Information: Removed runtime routes).
+    for path in ["/api/agents", "/api/stats", "/api/server/settings"] {
+        let reply = app.clone().oneshot(request(path)).await.unwrap();
+        assert_eq!(reply.status(), StatusCode::NOT_FOUND, "{path}");
+    }
     let reply = app
         .clone()
         .oneshot(

@@ -3131,8 +3131,6 @@ export type NativeCall =
   | { operation: "theme.list"; args?: { } }
   | { operation: "shellProfiles.get"; args?: { } }
   | { operation: "shellProfiles.update"; args: { body: unknown; } }
-  | { operation: "serverSettings.get"; args?: { } }
-  | { operation: "serverSettings.update"; args: { body: unknown; } }
   | { operation: "template.extract"; args: { body: { screenId: string; name?: string; root?: string } } }
   | { operation: "template.list"; args?: { } }
   | { operation: "template.get"; args: { slug: string; } }
@@ -3140,7 +3138,6 @@ export type NativeCall =
   | { operation: "template.create"; args: { body: SaveTemplateByName; } }
   | { operation: "template.delete"; args: { slug: string; } }
   | { operation: "build.get"; args?: { } }
-  | { operation: "stats.get"; args?: { } }
   | { operation: "command.send"; args: { body: unknown; } }
   | { operation: "mux.state"; args?: { } }
   | { operation: "mux.screens"; args?: { } }

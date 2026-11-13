@@ -21,7 +21,6 @@ pub fn build(
     control_socket: &Path,
 ) -> Runtime {
     let config = splitty_core::config::load();
-    let server_config = splitty_core::config::load_server();
     let themes_dir = splitty_core::config::themes_dir();
     let template_store = match splitty_core::template::FileStore::new_default() {
         Ok(store) => Arc::new(store),
@@ -40,7 +39,6 @@ pub fn build(
         Stores {
             config,
             config_path: splitty_core::config::config_path(),
-            server_config,
             themes_dir,
             template_store,
             hub: crate::hub::Hub::system(),
@@ -77,7 +75,6 @@ pub fn build_in(
         Stores {
             config: splitty_core::config::load_from(&config_path),
             config_path,
-            server_config: splitty_core::config::load_server_from(&dir.join("server.toml")),
             themes_dir: dir.join("themes"),
             template_store: Arc::new(splitty_core::template::FileStore::new(
                 dir.join("templates"),
@@ -91,7 +88,6 @@ pub fn build_in(
 struct Stores {
     config: splitty_core::config::HomeConfig,
     config_path: PathBuf,
-    server_config: splitty_core::config::ServerConfig,
     themes_dir: PathBuf,
     template_store: Arc<splitty_core::template::FileStore>,
     hub: crate::hub::Hub,
@@ -110,7 +106,6 @@ fn assemble(
     let Stores {
         config,
         config_path,
-        server_config,
         themes_dir,
         template_store,
         hub,
@@ -209,7 +204,6 @@ fn assemble(
         config,
         config_path,
         shell_profiles,
-        server_config: Arc::new(RwLock::new(server_config)),
         template_store,
         themes_dir,
         version: env!("CARGO_PKG_VERSION").to_string(),

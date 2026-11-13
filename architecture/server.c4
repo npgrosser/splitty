@@ -140,7 +140,7 @@ model {
     service -> splitty.core.mux 'Workspace store; agent replies and review waits as trusted operations'
     service -> splitty.core.daemon 'Persist workspace changes only in daemon mode'
     service -> splitty.core.effect_runner 'Runtime composition of PTY effects and owner-control environment'
-    service -> splitty.core.config 'Home and server settings, metadata and validation'
+    service -> splitty.core.config 'Home settings, metadata and validation'
     service -> splitty.core.shell_profiles 'Shell profile state'
     service -> splitty.core.template 'Template store'
     service -> jobs 'Trusted-user and scoped job operations with serialization under authorization guards'
@@ -162,7 +162,7 @@ model {
     // Into the core
 
     http -> splitty.core.auth 'token validation, single-use codes'
-    http -> splitty.core.config 'HomeConfig, ServerConfig in tests'
+    http -> splitty.core.config 'HomeConfig in tests'
     http -> splitty.core.ids 'ids'
     http -> splitty.core.mux 'JobLaunch; Store, ops and EffectRunner in tests'
     http -> splitty.core.native_api 'Check shared directory response conformance for gateway and native requests'
@@ -261,7 +261,7 @@ model {
     main -> native 'Private instance-lock inheritance, daemon socket binding/accept loop and owned desktop child pipes'
     main -> splitty.transport.wire 'Native discovery transport version'
     main -> splitty.core.auth 'load_or_create, resolve'
-    main -> splitty.core.config 'config_dir, load, load_server, themes_dir'
+    main -> splitty.core.config 'config_dir, load, themes_dir'
     main -> splitty.core.daemon 'daemon.json, PID checks, save_state, restore'
     main -> splitty.core.effect_runner 'EffectRunner, EnvContext'
     main -> splitty.core.protocol 'Dispatcher, NotificationEngine, SizeConfig'

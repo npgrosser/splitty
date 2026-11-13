@@ -28,7 +28,6 @@ pub struct State {
     /// The settings file that settings writes replace.
     pub config_path: PathBuf,
     pub shell_profiles: Arc<RwLock<splitty_core::shell_profiles::ShellProfilesState>>,
-    pub server_config: Arc<RwLock<splitty_core::config::ServerConfig>>,
     pub template_store: Arc<splitty_core::template::FileStore>,
     pub themes_dir: PathBuf,
     pub version: String,

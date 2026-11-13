@@ -153,10 +153,6 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.toml")
 }
 
-pub fn server_config_path() -> PathBuf {
-    config_dir().join("server.toml")
-}
-
 pub fn themes_dir() -> PathBuf {
     config_dir().join("themes")
 }

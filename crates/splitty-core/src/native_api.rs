@@ -211,8 +211,6 @@ operations! {
     ThemeList, "theme.list", "GET", "/api/home/themes", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
     ShellProfilesGet, "shellProfiles.get", "GET", "/api/shell-profiles", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
     ShellProfilesUpdate, "shellProfiles.update", "PUT", "/api/shell-profiles", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
-    ServerSettingsGet, "serverSettings.get", "GET", "/api/server/settings", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
-    ServerSettingsUpdate, "serverSettings.update", "PATCH", "/api/server/settings", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     TemplateExtract, "template.extract", "POST", "/api/templates/extract/screen", Backend, ["body"], MAX_API_BODY, Read, Ordinary, Plain;
     TemplateList, "template.list", "GET", "/api/templates", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
     TemplateGet, "template.get", "GET", "/api/templates/{slug}", Backend, ["slug"], MAX_API_BODY, Read, Ordinary, Plain;
@@ -220,7 +218,6 @@ operations! {
     TemplateCreate, "template.create", "POST", "/api/templates", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     TemplateDelete, "template.delete", "DELETE", "/api/templates/{slug}", Backend, ["slug"], MAX_API_BODY, Mutation, Ordinary, Plain;
     BuildGet, "build.get", "GET", "/api/build", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
-    StatsGet, "stats.get", "GET", "/api/stats", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
     CommandSend, "command.send", "POST", "/api/command", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     MuxState, "mux.state", "GET", "/api/mux/state", Control, [], MAX_API_BODY, Read, Ordinary, Plain;
     MuxScreens, "mux.screens", "GET", "/api/mux/screens", Control, [], MAX_API_BODY, Read, Ordinary, Plain;

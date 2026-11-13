@@ -163,6 +163,10 @@ fn credentials_administration_and_generic_proxy_are_not_native_operations() {
         "agent.list",
         "job.owner",
         "file.readLocal",
+        // Removed without a caller (control-api, Build and Runtime Information).
+        "stats.get",
+        "serverSettings.get",
+        "serverSettings.update",
     ] {
         let request = json!({"operation": name, "args": {"url": "http://127.0.0.1/"}});
         assert!(
