@@ -2,13 +2,15 @@
 //!
 //! Defines the transport-agnostic `Request`/`Response` types, message type constants
 //! for both plain terminal and mux protocols, the `Dispatcher` that routes requests
-//! to the PTY backend, the `NotificationEngine` for tracking session lifecycle events,
+//! to the PTY backend, the `NotificationEngine` for tracking session lifecycle events and the
+//! `Notice` that classifies each notification event for the windows,
 //! the store of images pasted into a pane (`paste`) and of files dropped into
 //! one (`upload`), and the arbiter of the PTY size of sessions that several
 //! connections show (`sizing`).
 
 pub mod dispatcher;
 mod messages;
+pub mod notice;
 pub mod notify;
 pub mod paste;
 pub mod sizing;

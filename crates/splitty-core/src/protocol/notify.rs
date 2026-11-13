@@ -153,9 +153,6 @@ struct SessionTracker {
     idle_notified: bool,
     /// When the last process.idle event was emitted (cooldown).
     last_idle_notif_at: Option<Instant>,
-
-    /// Set when the client sends a "close" message.
-    user_initiated: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +204,6 @@ impl NotificationEngine {
                 last_cmdline: String::new(),
                 idle_notified: false,
                 last_idle_notif_at: None,
-                user_initiated: false,
             },
         );
     }
@@ -216,14 +212,6 @@ impl NotificationEngine {
     pub fn untrack_session(&self, session_id: &str) {
         let mut inner = self.inner.lock().unwrap();
         inner.sessions.remove(session_id);
-    }
-
-    /// Mark a session close as user-initiated.
-    pub fn mark_user_initiated(&self, session_id: &str) {
-        let mut inner = self.inner.lock().unwrap();
-        if let Some(t) = inner.sessions.get_mut(session_id) {
-            t.user_initiated = true;
-        }
     }
 
     /// Called by the proc-info poller on each poll.
@@ -283,7 +271,14 @@ impl NotificationEngine {
 
     /// Called when an OSC 133 semantic event is received.
     /// Emits `process.idle` on `CommandFinished` transitions (respecting cooldown).
-    pub fn on_semantic_event(&self, session_id: &str, action: &crate::pty::osc::SemanticAction) {
+    /// `reports_status`: the session holds a root program status record, so
+    /// its notice is suppressed.
+    pub fn on_semantic_event(
+        &self,
+        session_id: &str,
+        action: &crate::pty::osc::SemanticAction,
+        reports_status: bool,
+    ) {
         use crate::pty::osc::SemanticAction;
 
         match action {
@@ -305,7 +300,12 @@ impl NotificationEngine {
                         t.last_idle_notif_at = Some(Instant::now());
 
                         let proc_name = t.last_proc.clone();
-                        pending.push(ServerEvent::process_idle(session_id, proc_name, *exit_code));
+                        pending.push(ServerEvent::process_idle(
+                            session_id,
+                            proc_name,
+                            *exit_code,
+                            reports_status,
+                        ));
                     }
                 }
 
@@ -324,16 +324,17 @@ impl NotificationEngine {
         }
     }
 
-    /// Called when a PTY session exits.
-    pub fn on_session_exit(&self, session_id: &str, exit_code: i32) {
+    /// Called when a PTY session exits; `user_initiated` when the server
+    /// closed it while its program ran.
+    pub fn on_session_exit(&self, session_id: &str, exit_code: i32, user_initiated: bool) {
         debug!(session_id, exit_code, "notify: session exit");
-        let (user_initiated, proc_name, command) = {
+        let (proc_name, command) = {
             let mut inner = self.inner.lock().unwrap();
             let t = match inner.sessions.remove(session_id) {
                 Some(t) => t,
                 None => return,
             };
-            (t.user_initiated, t.last_proc, t.command)
+            (t.last_proc, t.command)
         };
 
         let process = if proc_name.is_empty() {
@@ -464,7 +465,7 @@ mod tests {
         let (engine, collected) = collecting_engine();
         engine.track_session("s1", "vim");
 
-        engine.on_session_exit("s1", 0);
+        engine.on_session_exit("s1", 0, false);
 
         let events = collected.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -486,7 +487,7 @@ mod tests {
         let (engine, collected) = collecting_engine();
         engine.track_session("s1", "node server.js");
 
-        engine.on_session_exit("s1", 1);
+        engine.on_session_exit("s1", 1, false);
 
         let events = collected.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -542,6 +543,7 @@ mod tests {
         engine.on_semantic_event(
             "s1",
             &SemanticAction::CommandFinished { exit_code: Some(0) },
+            false,
         );
 
         let events = collected.lock().unwrap();
@@ -570,11 +572,13 @@ mod tests {
         engine.on_semantic_event(
             "s1",
             &SemanticAction::CommandFinished { exit_code: Some(0) },
+            false,
         );
         // Second within cooldown should not
         engine.on_semantic_event(
             "s1",
             &SemanticAction::CommandFinished { exit_code: Some(0) },
+            false,
         );
 
         let events = collected.lock().unwrap();
@@ -585,6 +589,55 @@ mod tests {
         assert_eq!(idle_events.len(), 1);
     }
 
+    /// mux-protocol, Classified Notification Events: Waiting program that
+    /// reports its status, and an exit the server was asked for.
+    #[test]
+    fn notices_carry_the_suppression_the_session_reports() {
+        use crate::protocol::notice::Suppressed;
+        use crate::pty::osc::SemanticAction;
+
+        let notice = |event: &ServerEvent| match event {
+            ServerEvent::ProcessIdle { notice, .. } | ServerEvent::SessionExited { notice, .. } => {
+                notice.clone().expect("notice")
+            }
+            other => panic!("unexpected {other:?}"),
+        };
+        let (engine, collected) = collecting_engine();
+        engine.track_session("s1", "");
+        engine.on_proc_update("s1", "claude", "claude", false);
+        engine.on_semantic_event(
+            "s1",
+            &SemanticAction::CommandFinished { exit_code: Some(0) },
+            true,
+        );
+        engine.track_session("s2", "");
+        engine.on_proc_update("s2", "make", "make", false);
+        engine.on_semantic_event(
+            "s2",
+            &SemanticAction::CommandFinished { exit_code: Some(0) },
+            false,
+        );
+        engine.track_session("s3", "vim");
+        engine.on_session_exit("s3", 129, true);
+        engine.track_session("s4", "vim");
+        engine.on_session_exit("s4", 1, false);
+
+        let events = collected.lock().unwrap();
+        let notices: Vec<_> = events.iter().map(notice).collect();
+        assert_eq!(notices[0].suppressed, Some(Suppressed::ProgramStatus));
+        assert_eq!(notices[1].title, "make is waiting");
+        assert_eq!(notices[1].suppressed, None);
+        assert_eq!(notices[2].suppressed, Some(Suppressed::UserInitiated));
+        assert!(matches!(
+            events[2],
+            ServerEvent::SessionExited {
+                user_initiated: true,
+                ..
+            }
+        ));
+        assert_eq!(notices[3].suppressed, None);
+    }
+
     // -----------------------------------------------------------------------
     // replay returns buffered events
     // -----------------------------------------------------------------------
@@ -593,7 +646,7 @@ mod tests {
     fn replay_returns_buffered_events() {
         let (engine, _collected) = collecting_engine();
         engine.track_session("s1", "vim");
-        engine.on_session_exit("s1", 0);
+        engine.on_session_exit("s1", 0, false);
 
         let replayed = engine.replay(&["s1".to_string()]);
         assert_eq!(replayed.len(), 1);

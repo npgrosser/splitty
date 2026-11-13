@@ -142,3 +142,26 @@ fn changes_read_again_are_not_marked() {
     assert!(!tracker.change(Some(&block), false, now));
     assert!(tracker.change(Some(&record(StatusState::Done)), false, now));
 }
+
+/// mux-protocol, Classified Notification Events: a marked event's notice
+/// names its screen by the catalog, and none is built without a record or
+/// for a state that does not notify.
+#[test]
+fn a_notice_names_the_screen_of_the_location() {
+    use std::collections::HashMap;
+
+    let labels = HashMap::from([("s2".to_owned(), "Screen 2".to_owned())]);
+    let at = ("p1".to_owned(), "s2".to_owned());
+    let done = super::notice(&labels, Some(&at), Some(&record(StatusState::Done))).expect("notice");
+    assert_eq!(done.title, "Screen 2: Done");
+    let elsewhere = ("p1".to_owned(), "gone".to_owned());
+    let blocked = blocked(BlockKind::Question, "Which branch?");
+    assert_eq!(
+        super::notice(&labels, Some(&elsewhere), Some(&blocked))
+            .expect("notice")
+            .title,
+        "Waiting for an answer: Which branch?"
+    );
+    assert!(super::notice(&labels, Some(&at), None).is_none());
+    assert!(super::notice(&labels, None, Some(&record(StatusState::Working))).is_none());
+}

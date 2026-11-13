@@ -114,6 +114,7 @@ impl MuxHandler {
             capabilities.push(splitty_core::protocol::upload::CAPABILITY.into());
             capabilities.push(splitty_core::protocol::PROGRAM_STATUS_CAPABILITY.into());
             capabilities.push(splitty_core::mux::CLOSE_ASSESSMENT_CAPABILITY.into());
+            capabilities.push(splitty_core::protocol::notice::CAPABILITY.into());
         }
         self.send_event(&event).await;
     }

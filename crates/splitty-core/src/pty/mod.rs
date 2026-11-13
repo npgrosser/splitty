@@ -306,6 +306,12 @@ pub trait SessionHandle: Send + Sync {
     async fn write(&self, data: &[u8]) -> io::Result<()>;
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
     fn close(&self) -> io::Result<()>;
+    /// Whether [`close`](Self::close) was called while the program still
+    /// ran: its exit is user-initiated (`mux-protocol`, Classified
+    /// Notification Events).
+    fn closed_on_request(&self) -> bool {
+        false
+    }
     /// Begin service-owned termination, including sessions already closing.
     fn begin_shutdown(&self) -> io::Result<()> {
         self.close()

@@ -63,6 +63,8 @@ pub struct Session {
     terminal: Box<dyn Terminal>,
     managed: bool,
     exit_reported: AtomicBool,
+    /// Closed while its program still ran.
+    closed_on_request: AtomicBool,
     /// Shared with the terminal, which feeds it.
     output: Arc<Output>,
     /// Shared with the output, which queues the probe answers.
@@ -480,6 +482,7 @@ impl Session {
             terminal,
             managed,
             exit_reported: AtomicBool::new(false),
+            closed_on_request: AtomicBool::new(false),
             output,
             input: Arc::clone(&input),
             osc_rx,
@@ -739,7 +742,14 @@ impl SessionHandle for Session {
     }
 
     fn close(&self) -> io::Result<()> {
+        if !*self.terminal.done().borrow() {
+            self.closed_on_request.store(true, Ordering::SeqCst);
+        }
         self.terminal.close()
+    }
+
+    fn closed_on_request(&self) -> bool {
+        self.closed_on_request.load(Ordering::SeqCst)
     }
 
     fn begin_shutdown(&self) -> io::Result<()> {

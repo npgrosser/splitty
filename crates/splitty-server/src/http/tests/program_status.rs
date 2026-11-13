@@ -134,13 +134,15 @@ async fn run_root_records_reach_every_connection(native: bool) {
     let mut a = served.open_local_for(native).await;
     let welcome = json_of(next(&mut a).await);
     assert_eq!(welcome["type"], "mux.welcome", "{welcome}");
-    assert!(
-        welcome["capabilities"]
-            .as_array()
-            .expect("capabilities")
-            .contains(&json!("program-status-v1")),
-        "{welcome}"
-    );
+    for capability in ["program-status-v1", "notification-notices-v1"] {
+        assert!(
+            welcome["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .contains(&json!(capability)),
+            "{welcome}"
+        );
+    }
     let greeting = after_greetings(&mut a).await;
     assert_eq!(greeting["type"], "program_status.changed", "{greeting}");
     assert_eq!(greeting["sessionId"], sid.as_str());
@@ -149,6 +151,7 @@ async fn run_root_records_reach_every_connection(native: bool) {
     assert_eq!(greeting["status"]["state"], "blocked");
     assert_eq!(greeting["status"]["kind"], "permission");
     assert!(greeting.get("notify").is_none(), "{greeting}");
+    assert!(greeting.get("notice").is_none(), "{greeting}");
     assert!(greeting["id"].is_string() && greeting["timestamp"].is_i64());
 
     // `a` streams the session, `b` does not.
@@ -165,6 +168,7 @@ async fn run_root_records_reach_every_connection(native: bool) {
     assert_eq!(working["status"]["state"], "working");
     assert_eq!(working["status"]["app"], "claude-code");
     assert!(working.get("notify").is_none(), "{working}");
+    assert!(working.get("notice").is_none(), "{working}");
 
     // 100 reports within about a second.
     for progress in 1..100 {
@@ -203,6 +207,32 @@ async fn run_root_records_reach_every_connection(native: bool) {
         "{cleared}"
     );
 
+    // mux-protocol, Classified Notification Events (Blocked program): a
+    // marked event carries the notice, its screen named by the catalog.
+    state
+        .mux_store
+        .dispatch(Op::RenameScreen {
+            screen_id: "s1".into(),
+            name: "build".into(),
+        })
+        .expect("rename");
+    report(
+        &session,
+        "state=blocked:kind=permission:msg=UnVuIHRlc3RzPw==",
+    )
+    .await;
+    let blocked = both(&mut a, &mut b).await;
+    assert_eq!(blocked["notify"], true, "{blocked}");
+    assert_eq!(
+        blocked["notice"],
+        json!({
+            "kind": "program-status",
+            "severity": "warning",
+            "title": "build: Waiting for permission: Run tests?",
+            "setting": "programStatus",
+        })
+    );
+
     // A child record alone sends nothing: the next event is the root's.
     report(&session, "state=working:id=task").await;
     tokio::time::sleep(INTERVAL * 3).await;
@@ -225,6 +255,7 @@ async fn run_root_records_reach_every_connection(native: bool) {
     assert_eq!(moved["screenId"], "s2");
     assert_eq!(moved["status"]["state"], "done");
     assert!(moved.get("notify").is_none(), "{moved}");
+    assert!(moved.get("notice").is_none(), "{moved}");
 
     state
         .client_state

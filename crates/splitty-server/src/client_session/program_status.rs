@@ -16,13 +16,16 @@
 //! `error`, or changed its kind or message while in that state, from live
 //! output, and the session's last marked event with that state is at least
 //! [`NOTIFY_INTERVAL`] old. The greeting and the event for a moved pane are
-//! never marked; a window decides whether a marked event notifies.
+//! never marked. A marked event carries the notice a window shows for it,
+//! naming the screen by the server's catalog; a window decides whether it
+//! notifies.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use splitty_core::ids::SessionId;
+use splitty_core::protocol::notice::{screen_label, Notice};
 use splitty_core::protocol::ServerEvent;
 use splitty_core::pty::status::{ProgramStatus, StatusState};
 use tokio::sync::Mutex;
@@ -52,6 +55,8 @@ struct Watching {
     /// The store's change count the locations were read at.
     workspace: Option<u64>,
     locations: HashMap<SessionId, (String, String)>,
+    /// Each screen's label in a notice, by its id.
+    screen_labels: HashMap<String, String>,
     /// What every client was sent, per session.
     sessions: HashMap<String, Tracker>,
 }
@@ -122,6 +127,15 @@ impl Watching {
             .into_iter()
             .map(|(session, (pane, screen))| (session, (pane.to_string(), screen.to_string())))
             .collect();
+        let (catalog, _) = client_state.mux_store.workspace_catalog();
+        self.screen_labels = catalog
+            .into_iter()
+            .enumerate()
+            .map(|(index, info)| {
+                let label = screen_label(info.name.as_deref(), index);
+                (info.id.to_string(), label)
+            })
+            .collect();
     }
 
     /// The events for what changed since the last check, recording them as
@@ -146,11 +160,16 @@ impl Watching {
                 }
                 if root.record != tracker.sent {
                     let notify = tracker.change(root.record.as_ref(), root.read_again, now);
+                    let notice = notify
+                        .then(|| {
+                            notice(&self.screen_labels, location.as_ref(), root.record.as_ref())
+                        })
+                        .flatten();
                     events.push(ServerEvent::program_status_changed(
                         id,
                         location,
                         root.record,
-                        notify,
+                        notice,
                     ));
                     continue;
                 }
@@ -160,7 +179,7 @@ impl Watching {
                     id,
                     location,
                     tracker.sent.clone(),
-                    false,
+                    None,
                 ));
             }
         }
@@ -174,7 +193,7 @@ impl Watching {
                     id.clone(),
                     tracker.location.clone(),
                     None,
-                    false,
+                    None,
                 ));
             }
             false
@@ -196,12 +215,23 @@ impl Watching {
                         id.clone(),
                         tracker.location.clone(),
                         Some(record.clone()),
-                        false,
+                        None,
                     )
                 })
             })
             .collect()
     }
+}
+
+/// The notice of a marked event for `record` at `location`, its screen
+/// named by `labels`.
+fn notice(
+    labels: &HashMap<String, String>,
+    location: Option<&(String, String)>,
+    record: Option<&ProgramStatus>,
+) -> Option<Notice> {
+    let screen = location.and_then(|(_, screen)| labels.get(screen));
+    Notice::program_status(screen.map(String::as_str), record?)
 }
 
 /// Send `sender`, a client that just got its `mux.welcome` and the listening

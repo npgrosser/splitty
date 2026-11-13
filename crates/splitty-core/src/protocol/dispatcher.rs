@@ -645,11 +645,6 @@ impl Connection {
     }
 
     async fn handle_close(&self, req: &Request) {
-        if let Some(ref notify) = self.dispatcher.notify {
-            let engine = notify.lock().unwrap();
-            engine.mark_user_initiated(&req.id);
-        }
-
         self.stop_stream(&req.id).await;
         self.dispatcher
             .sizes
@@ -959,7 +954,7 @@ async fn stream_output(
     if let Some(ref notify) = notify {
         if session.claim_exit_report() {
             let engine = notify.lock().unwrap();
-            engine.on_session_exit(session.session_id(), exit_code);
+            engine.on_session_exit(session.session_id(), exit_code, session.closed_on_request());
         }
     }
     let result = session.process_result();
@@ -1124,10 +1119,15 @@ async fn watch_semantic(
                     sid.clone(), action_str.to_string(), exit_code,
                 ));
 
-                // Notify engine about semantic events
+                // Notify engine about semantic events; a program that
+                // reports its status tells through it instead.
                 if let Some(ref notify_engine) = notify {
+                    let reports_status = matches!(
+                        event.action,
+                        crate::pty::osc::SemanticAction::CommandFinished { .. }
+                    ) && session.program_status().record.is_some();
                     let engine = notify_engine.lock().unwrap();
-                    engine.on_semantic_event(&sid, &event.action);
+                    engine.on_semantic_event(&sid, &event.action, reports_status);
                 }
             }
         }
@@ -3090,7 +3090,81 @@ mod tests {
             "notifications: {:?}",
             notifications.lock().unwrap()
         );
+        // It exited by itself.
+        assert!(notifications.lock().unwrap().iter().any(|event| matches!(
+            event,
+            ServerEvent::SessionExited { user_initiated: false, notice: Some(notice), .. }
+                if notice.suppressed.is_none()
+        )));
         backend.close_all();
+    }
+
+    /// mux-protocol, Classified Notification Events (Pane closed by the
+    /// user): a session the server closes while its program runs, as a
+    /// closed pane does through the backend, exits user-initiated and its
+    /// notice is suppressed; closing it after its exit does not mark it.
+    #[tokio::test]
+    async fn a_session_closed_while_running_exits_user_initiated() {
+        use crate::protocol::notice::Suppressed;
+        if !pty_available() {
+            return;
+        }
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let collected = notifications.clone();
+        let engine =
+            NotificationEngine::new(Box::new(move |event| collected.lock().unwrap().push(event)));
+        let backend = Arc::new(PtyBackend::new());
+        backend
+            .create(sh_opts("running", "sleep 30"))
+            .await
+            .expect("spawn sh");
+        backend
+            .create(sh_opts("ended", "exit 3"))
+            .await
+            .expect("spawn sh");
+        let mut dispatcher = Dispatcher::new(backend.clone());
+        dispatcher.notify = Some(Arc::new(Mutex::new(engine)));
+        let dispatcher = Arc::new(dispatcher);
+        let sender = Arc::new(MockSender::new());
+        let conn = dispatcher.new_connection(sender.clone());
+        conn.handle(&attach("running")).await;
+        conn.handle(&attach("ended")).await;
+        let ended = backend.get("ended").expect("session");
+        assert!(wait_until(Duration::from_secs(5), || *ended.done().borrow()).await);
+        backend.close("ended").expect("close");
+        backend.close("running").expect("close");
+
+        let exit = |id: &str| {
+            notifications
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|event| match event {
+                    ServerEvent::SessionExited {
+                        session_id,
+                        user_initiated,
+                        notice,
+                        ..
+                    } if session_id == id => Some((*user_initiated, notice.clone())),
+                    _ => None,
+                })
+        };
+        assert!(
+            wait_until(Duration::from_secs(5), || exit("running").is_some()
+                && exit("ended").is_some())
+            .await,
+            "notifications: {:?}",
+            notifications.lock().unwrap()
+        );
+        let (user_initiated, notice) = exit("running").expect("exit");
+        assert!(user_initiated);
+        assert_eq!(
+            notice.expect("notice").suppressed,
+            Some(Suppressed::UserInitiated)
+        );
+        let (user_initiated, notice) = exit("ended").expect("exit");
+        assert!(!user_initiated);
+        assert_eq!(notice.expect("notice").suppressed, None);
     }
 
     fn bells(sender: &MockSender) -> usize {

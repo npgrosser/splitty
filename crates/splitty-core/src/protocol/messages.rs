@@ -273,6 +273,9 @@ pub enum ServerEvent {
         process: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         cmdline: Option<String>,
+        /// What a window shows for it (`notification-notices-v1`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<super::notice::Notice>,
     },
 
     #[serde(rename = "process.idle", rename_all = "camelCase")]
@@ -283,6 +286,9 @@ pub enum ServerEvent {
         process: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
+        /// What a window shows for it (`notification-notices-v1`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<super::notice::Notice>,
     },
 
     #[serde(rename = "session.exited", rename_all = "camelCase")]
@@ -296,6 +302,9 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         command: Option<String>,
         user_initiated: bool,
+        /// What a window shows for it (`notification-notices-v1`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<super::notice::Notice>,
     },
 
     // -- Generic notification (fallback) ------------------------------------
@@ -309,6 +318,9 @@ pub enum ServerEvent {
         body: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// What a window shows for it (`notification-notices-v1`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<super::notice::Notice>,
     },
 
     // -- Listening ports ----------------------------------------------------
@@ -335,9 +347,13 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         screen_id: Option<String>,
         status: Option<ProgramStatus>,
-        /// A window may notify about this change.
+        /// A window may notify about this change; exactly then `notice` is
+        /// present.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         notify: bool,
+        /// What a window shows for it (`notification-notices-v1`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        notice: Option<super::notice::Notice>,
     },
 
     // -- Mux events ---------------------------------------------------------
@@ -635,20 +651,28 @@ impl ServerEvent {
             id: generate_event_id(),
             timestamp: now_millis(),
             session_id: session_id.into(),
+            notice: Some(super::notice::Notice::process_finished(&process)),
             process,
             cmdline,
         }
     }
 
+    /// `reports_status`: the session holds a root program status record,
+    /// which tells instead.
     pub fn process_idle(
         session_id: impl Into<String>,
         process: String,
         exit_code: Option<i32>,
+        reports_status: bool,
     ) -> Self {
         Self::ProcessIdle {
             id: generate_event_id(),
             timestamp: now_millis(),
             session_id: session_id.into(),
+            notice: Some(super::notice::Notice::process_idle(
+                &process,
+                reports_status,
+            )),
             process,
             exit_code,
         }
@@ -665,6 +689,11 @@ impl ServerEvent {
             id: generate_event_id(),
             timestamp: now_millis(),
             session_id: session_id.into(),
+            notice: Some(super::notice::Notice::session_exited(
+                exit_code,
+                process.as_deref(),
+                user_initiated,
+            )),
             exit_code,
             process,
             command,
@@ -832,11 +861,12 @@ impl ServerEvent {
         }
     }
 
+    /// Marked `notify` exactly when `notice` is given.
     pub fn program_status_changed(
         session_id: impl Into<String>,
         location: Option<(String, String)>,
         status: Option<ProgramStatus>,
-        notify: bool,
+        notice: Option<super::notice::Notice>,
     ) -> Self {
         let (pane_id, screen_id) = location.unzip();
         Self::ProgramStatusChanged {
@@ -846,7 +876,8 @@ impl ServerEvent {
             pane_id,
             screen_id,
             status,
-            notify,
+            notify: notice.is_some(),
+            notice,
         }
     }
 }
@@ -1000,7 +1031,13 @@ mod tests {
                 msg: Some("Allow edit?".into()),
                 updated_at: 1_700_000_000_000,
             }),
-            true,
+            Some(crate::protocol::notice::Notice {
+                kind: crate::protocol::notice::NoticeKind::ProgramStatus,
+                severity: crate::protocol::notice::Severity::Warning,
+                title: "Screen 1: Waiting for permission: Allow edit?".into(),
+                setting: Some(crate::protocol::notice::Setting::ProgramStatus),
+                suppressed: None,
+            }),
         );
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "program_status.changed");
@@ -1008,6 +1045,15 @@ mod tests {
         assert_eq!(json["paneId"], "pane-1");
         assert_eq!(json["screenId"], "screen-1");
         assert_eq!(json["notify"], true);
+        assert_eq!(
+            json["notice"],
+            serde_json::json!({
+                "kind": "program-status",
+                "severity": "warning",
+                "title": "Screen 1: Waiting for permission: Allow edit?",
+                "setting": "programStatus",
+            })
+        );
         assert_eq!(
             json["status"],
             serde_json::json!({
@@ -1020,11 +1066,11 @@ mod tests {
         );
 
         let cleared = serde_json::to_value(ServerEvent::program_status_changed(
-            "sess-1", None, None, false,
+            "sess-1", None, None, None,
         ))
         .unwrap();
         assert!(cleared["status"].is_null(), "null, not absent: {cleared}");
-        for absent in ["paneId", "screenId", "notify"] {
+        for absent in ["paneId", "screenId", "notify", "notice"] {
             assert!(cleared.get(absent).is_none(), "{absent}");
         }
     }
@@ -1133,6 +1179,9 @@ mod tests {
         assert_eq!(json["process"], "node");
         assert_eq!(json["command"], "node server.js");
         assert_eq!(json["userInitiated"], false);
+        assert_eq!(json["notice"]["kind"], "session.crashed");
+        assert_eq!(json["notice"]["title"], "node failed");
+        assert!(json["notice"].get("suppressed").is_none());
     }
 
     #[test]
@@ -1145,6 +1194,8 @@ mod tests {
         assert_eq!(json["sessionId"], "sess-a");
         assert_eq!(json["process"], "cargo");
         assert_eq!(json["cmdline"], "cargo build");
+        assert_eq!(json["notice"]["title"], "cargo finished");
+        assert_eq!(json["notice"]["setting"], "processFinished");
     }
 
     #[test]
