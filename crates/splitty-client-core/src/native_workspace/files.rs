@@ -104,7 +104,10 @@ pub enum FileUpdate {
 }
 
 /// The name a download is saved under: the last path component as plain
-/// text, without characters file systems refuse.
+/// text, without characters file systems refuse. As in the web client,
+/// controls and the bidirectional embeddings, overrides and isolates go: an
+/// offered name must not display in another order than it is saved in.
+/// Current servers offer no such name; an older or a hostile one may.
 fn download_name(name: &str) -> Option<String> {
     if name.len() > MAX_NAME_BYTES {
         return None;
@@ -112,7 +115,9 @@ fn download_name(name: &str) -> Option<String> {
     let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
     let cleaned: String = last
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| {
+            !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
         .map(|c| match c {
             '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
             other => other,
@@ -1067,6 +1072,16 @@ mod tests {
         assert_eq!(download_name("dir/"), None);
         assert_eq!(download_name(".."), None);
         assert_eq!(download_name(&"x".repeat(300)), None);
+        // A name that would display reversed is saved as it reads.
+        assert_eq!(
+            download_name("invoice\u{202e}fdp.exe").as_deref(),
+            Some("invoicefdp.exe")
+        );
+        assert_eq!(
+            download_name("\u{2066}report\u{2069}.pdf\u{202c}").as_deref(),
+            Some("report.pdf")
+        );
+        assert_eq!(download_name("\u{202e}\u{2067}"), None);
     }
 
     #[test]

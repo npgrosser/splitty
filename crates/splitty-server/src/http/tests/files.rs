@@ -126,6 +126,18 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["code"], "invalid_path");
 
+    // A file whose name would display in another order than it is saved
+    // in is never offered: the offer's name is the last component of the path.
+    let reversed = dir.path().join("invoice\u{202e}fdp.exe");
+    std::fs::write(&reversed, b"x").expect("file");
+    let (status, body) = offer(
+        control.clone(),
+        json!({"sessionId":session,"path":reversed}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["code"], "invalid_path");
+
     let input = json!({"sessionId":session,"path":file});
     let worker = if native {
         let state = served.state.clone();
