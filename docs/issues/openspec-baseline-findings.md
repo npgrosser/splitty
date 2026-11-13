@@ -405,6 +405,11 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   lets a client offer a server's scratchpads only when the server announced the capability; the native window
   does not read it, so on a host whose daemon does not know `set_scratchpad` the text is typed, never kept,
   and replaced by the next snapshot.
+- **The native zoom keeps a built-in range** (found on 2026-11-13). Settings edits follow the server's
+  metadata, but the window shows a stored `appearance.zoom` outside 0.5 to 3.0 at 1.0, and its zoom keys step
+  only through the built-in steps up to 3.0 (`Zoom::from_values`, `Zoom::apply`,
+  `crates/splitty-client-core/src/zoom.rs`). A server that widens the zoom limit would store a level the
+  window does not show. The current server's limit is the same range.
 
 ## Stale documentation
 
