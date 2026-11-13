@@ -1,6 +1,6 @@
 # Connections, listeners and session lifetime
 
-The desktop app owns its local terminal backend. Remote terminals belong to a
+The app owns its local terminal backend. Remote terminals belong to a
 daemon on the SSH host. A browser uses an explicitly started local gateway.
 These choices determine both the transport and what happens when a client closes.
 
@@ -13,9 +13,9 @@ arrows are dependencies, not necessarily process or network boundaries.
 ```mermaid
 flowchart LR
   subgraph computer["Your computer"]
-    app["Desktop app<br/>packaged UI + native broker"]
+    app["Desktop app<br/>native UI and client core"]
     local["App-owned local backend<br/>local PTYs and shells"]
-    app -->|"IPC / inherited pipes"| local
+    app -->|"in-process channels / owned pipes"| local
   end
   subgraph host["SSH host"]
     remote["SSH exec bridge<br/>private socket / daemon<br/>keepers / PTYs"]
@@ -24,8 +24,7 @@ flowchart LR
 ```
 
 The thick edge crosses machines; the thin edge stays local. For remote screens,
-the local backend's hub owns the SSH connection. A separate remote window uses
-its native broker's own SSH connection. The detailed host-side hops appear in
+the local backend's hub owns the SSH connection. The detailed host-side hops appear in
 the sequence diagram below. The SSH service is the host's existing `sshd`; Splitty
 starts no terminal-service TCP listener on that host. SSH configuration may route through
 a jump host or `ProxyCommand`; the destination and authentication are those of
@@ -33,9 +32,9 @@ the selected system SSH client.
 
 | Use | UI / client to backend | TCP listener for Splitty UI | Session lifetime |
 | --- | --- | --- | --- |
-| Desktop, local | Window-bound IPC, then in-process channels or app-owned child pipes | None | Local sessions end when the app exits |
+| Desktop, local | In-process channels, or the pipes of an app-owned child process | None | Local sessions end when the app exits |
 | Separate local daemon | Private Unix client socket, for example with `splitty attach` | None | Keeper-backed sessions outlive clients and ordinary daemon restarts |
-| Desktop, SSH host | Native stream over SSH exec stdin/stdout, then the host's private client socket | None; uses the existing SSH service | Host sessions survive client exit and connection loss |
+| Desktop, SSH host | The local backend's hub: native stream over SSH exec stdin/stdout, then the host's private client socket | None; uses the existing SSH service | Host sessions survive client exit and connection loss |
 | Explicit browser access | HTTP/WebSocket to a loopback gateway, then its selected backend | One explicitly requested loopback gateway | Determined by the selected backend, not the browser tab |
 
 Closing a pane deliberately can end its session. Closing a remote view or losing
@@ -44,22 +43,24 @@ shutdown, and `daemon stop --end-sessions` deliberately ends kept sessions.
 
 ## The local desktop backend
 
-The desktop always starts its own backend, even if a separate local daemon is
+The app always starts its own backend, even if a separate local daemon is
 already running. It neither attaches to that daemon nor adopts its old keepers.
 
-| Desktop shell | Local backend location | Connection |
+| Platform | Local backend location | Connection |
 | --- | --- | --- |
-| Tauri on Linux/macOS | Embedded in the native application process | WebView IPC to the native broker, then in-process byte channels |
-| Tauri on Windows | An application-owned Linux helper in the selected WSL 2 distribution | WebView IPC, then the owned `wsl.exe` stdin/stdout pipes |
+| Linux, macOS | Embedded in the app's process | In-process byte channels |
+| Windows | An application-owned Linux helper in the selected WSL 2 distribution (`desktop-backend --owner`) | The owned `wsl.exe` stdin/stdout pipes |
 
-The native process assigns each UI document its backend and permissions. A
-renderer cannot supply an arbitrary socket address or turn its connection into
-a network proxy. Separate remote windows have authority only for their assigned
-host; the main window may ask its local hub to open remote screens.
+The app assigns each window its backend. Remote screens reach their hosts only through the local backend's hub,
+so on Windows they use WSL's `ssh`. The UI is part of the app's executable; a
+remote host supplies terminal data and service responses, never UI code.
 
-On Windows, a separate remote window uses Windows OpenSSH and works without WSL.
-Local terminals still need WSL. The UI assets are packaged with the desktop app;
-the remote host supplies terminal data and service responses, not executable UI.
+The Tauri shell built from source keeps the same backend placement behind a
+WebView: its pages reach the native process over IPC, and the native process
+assigns each page its backend and permissions. Its separate remote windows
+hold their own SSH connection, with authority only for their assigned host,
+and on Windows use Windows OpenSSH without WSL
+([development](development.md#the-tauri-shell)).
 
 ## Explicit browser access and separate daemons
 
@@ -95,7 +96,7 @@ processes already running as the same OS user.
 
 ```mermaid
 sequenceDiagram
-  participant Client as Desktop / gateway
+  participant Client as Local backend / gateway
   participant SSH as System SSH
   participant Host as Host commands
   participant Daemon as Daemon
@@ -138,7 +139,7 @@ until exit is observed; it does not stop the remote daemon or its keepers.
 
 | Boundary | What authorizes it |
 | --- | --- |
-| UI document to native broker | Native-assigned window/document proof, role and backend |
+| App window to local backend | The app's own in-process channel or owned child pipes; the Tauri shell adds a native-assigned document proof, role and backend for its pages |
 | Client to host's SSH service | System OpenSSH host-key verification and the selected user's keys/agent/configuration |
 | Host bridge to daemon | Private directory/socket permissions, OS peer UID and verified daemon instance |
 | Browser to explicit gateway | Gateway-local bootstrap/session credentials, exact Host/Origin and WebSocket admission checks |
@@ -170,7 +171,7 @@ socket. Non-sticky group/world-writable ancestors are refused, so an existing
 sharing on native Linux. Pinning one process's directory descriptor cannot
 prove that another process sees the same registry after an ancestor is renamed.
 Splitty neither changes those parent permissions nor falls back to an
-unregistered browser listener. Native desktop and daemon connections do not
+unregistered browser listener. The app's and daemon connections do not
 need this registry. See the [registry requirements](remote.md#forwarding-registry-requirements)
 for paths and platform restrictions.
 
@@ -181,7 +182,9 @@ Run `pnpm --dir architecture dev` from the repository root and select a view:
 | LikeC4 view | What to inspect |
 | --- | --- |
 | `connections` — Connection components | Native, browser and SSH boundaries across the existing modules |
-| `desktop` — Desktop app components | Document authority, app-owned backends, WSL and remote windows |
+| `gpui` — splitty-gpui components | The app's windows, workspace view, terminal engine and startup |
+| `client_core` — splitty-client-core components | The app's UI-free sources, connections and app-owned backends |
+| `desktop` — Desktop app components | The Tauri shell: document authority, app-owned backends, WSL and remote windows |
 | `remote` — splitty-remote components | SSH invocation, payload installation, bridge, owner and supervision |
 | `server` — splitty-server components | Native endpoint, browser gateway, shared operations and client sessions |
 | `transport` — splitty-transport components | Framing, negotiation, cancellation and bounded delivery |
