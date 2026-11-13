@@ -370,3 +370,78 @@ async fn an_answer_lands_around_large_input_in_several_frames() {
     assert!(read.ends_with(answer), "queued while the input was written");
     session.close().expect("close");
 }
+
+/// A program that ended while no controller held its keeper has ended for
+/// the adopting session from the start, with its result, before the keeper's
+/// frames are read: an observer cannot take its exit for one it saw happen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_program_that_ended_unobserved_is_adopted_as_ended() {
+    if !pty_available() {
+        return;
+    }
+    let (_dir, keepers) = keepers_dir();
+    let first = manager(&keepers);
+    let session = program(&first, "kept-ended", "read x; printf bye; exit 5").await;
+    first.release_all();
+    drop(session);
+    let mut found = Vec::new();
+    assert!(
+        wait_until(TIMEOUT, || {
+            found = find(&keepers);
+            found.len() == 1 && !found[0].hello.controlled
+        })
+        .await,
+        "released"
+    );
+    // The program ends while no controller holds the keeper.
+    let mut direct = super::super::dir::connect(&found[0].socket).expect("connect");
+    found.clear();
+    super::super::wire::read_frame(&mut direct).expect("hello");
+    super::Found::claim(&mut direct, false, None).expect("claim");
+    super::super::wire::write_frame(
+        &mut direct,
+        &super::super::wire::Frame::Input {
+            seq: 1,
+            data: b"\n".to_vec(),
+        },
+    )
+    .expect("input");
+    loop {
+        match super::super::wire::read_frame(&mut direct).expect("frame") {
+            Some(super::super::wire::Frame::InputResult { seq: 1, .. }) | None => break,
+            Some(_) => {}
+        }
+    }
+    drop(direct);
+    assert!(
+        wait_until(TIMEOUT, || {
+            found = find(&keepers);
+            found.len() == 1 && !found[0].hello.controlled && found[0].hello.exited.is_some()
+        })
+        .await,
+        "the program ended"
+    );
+
+    let second = manager(&keepers);
+    let found = found.into_iter().next().expect("keeper");
+    let adopted = second
+        .adopt("kept-ended", found.hello.managed, |feed| {
+            found
+                .adopt(feed)
+                .map(|terminal| Box::new(terminal) as Box<dyn crate::pty::terminal::Terminal>)
+                .map_err(|e| crate::pty::PtyError::Other(e.to_string()))
+        })
+        .expect("adopted");
+    assert!(*adopted.done().borrow(), "ended from the start");
+    assert_eq!(adopted.process_result().and_then(|r| r.exit_code), Some(5));
+    assert!(
+        wait_until(TIMEOUT, || shows(&adopted, "bye")
+            && adopted.output_complete())
+        .await,
+        "the replay"
+    );
+    assert!(
+        wait_until(TIMEOUT, || super::super::dir::sockets(&keepers).is_empty()).await,
+        "the acknowledged keeper leaves"
+    );
+}

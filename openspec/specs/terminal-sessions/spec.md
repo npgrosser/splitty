@@ -241,7 +241,7 @@ On `close` with a session `id`, the server SHALL stop the connection's output st
 - **THEN** the server sends an `error` event with that `sessionId`
 
 ### Requirement: Process Exit
-When a session's process exits, the server SHALL send each connection streaming that session a `closed` event with the `sessionId` and the actual `exitCode` when available, and SHALL stop streaming the session after draining its available final output. A nonzero exit code MUST NOT be collapsed to a generic failure value. Signal termination SHALL carry `signal` when available; an unavailable code SHALL be absent rather than falsely zero. The exited session SHALL remain registered until it is closed, including automatic closure according to the owning host policy. The `session.exited` event is a notification and is outside this capability. An ordinary mux pane whose exit matches the owning server close_on_exit setting SHALL be closed after final output has had time to drain, including when no clients are attached.
+When a session's process exits, the server SHALL send each connection streaming that session a `closed` event with the `sessionId` and the actual `exitCode` when available, and SHALL stop streaming the session after draining its available final output. A nonzero exit code MUST NOT be collapsed to a generic failure value. Signal termination SHALL carry `signal` when available; an unavailable code SHALL be absent rather than falsely zero. The exited session SHALL remain registered until it is closed, including automatic closure according to the owning host policy. The `session.exited` event is a notification and is outside this capability. An ordinary mux pane whose exit matches the owning server close_on_exit setting SHALL be closed once its process, seen running by the server, has exited and its output has ended, without waiting for a periodic sample; while its terminal stays open, or for an exit that happened while no server observed it, it SHALL be closed after a bounded grace for final output. This holds also when no clients are attached.
 
 #### Scenario: Shell exits
 - **WHEN** the user types `exit` in a streamed session's shell
@@ -258,6 +258,14 @@ When a session's process exits, the server SHALL send each connection streaming 
 #### Scenario: Exact managed-process result
 - **WHEN** a directly executed job program exits with code 23
 - **THEN** its job state and streamed `closed` event both report 23
+
+#### Scenario: Pane closes with its exit
+- **WHEN** an ordinary pane's shell exits under close_on_exit `always` and its output ends
+- **THEN** the pane is closed at once, with the shell's last output recorded before
+
+#### Scenario: Terminal held open after the exit
+- **WHEN** a pane's shell exits while a process it left behind keeps the terminal open
+- **THEN** the pane is closed after the final-output grace
 
 ### Requirement: Session Metadata Updates
 While a connection streams a session, the server SHALL send `title` events that describe the session's foreground process: process name, working directory, command line, whether the foreground process is the session's original shell (`baseShell`), and the last title the program set with OSC 0 or OSC 2 (`oscTitle`). The server SHALL send a `title` event when streaming starts if process information is available, whenever this information changes (checked about once per second), and immediately when the program sets a new OSC title. Process name, working directory and command line SHALL be provided on Linux and macOS; on other platforms they MAY be empty. Events SHALL also include displayTitle and busy, using the same values as session snapshots. busy denotes a known foreground process other than the original shell, not agent thinking; exited sessions are not busy. displayTitle uses a non-base-shell OSC title when present, else the process name; known shell names include the working directory shortened under the server home. Display titles SHALL be plain text bounded to 500 characters.

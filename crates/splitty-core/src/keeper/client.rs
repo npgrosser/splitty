@@ -250,8 +250,10 @@ impl KeptTerminal {
             next_seq: AtomicU32::new(1),
             pending: Mutex::new(HashMap::new()),
             foreground: AtomicU32::new(0),
-            done_tx: watch::channel(false).0,
-            result: Mutex::new(None),
+            // A program that ended before this process connected has ended
+            // for the session from the start; its `exited` frame follows.
+            done_tx: watch::channel(hello.exited.is_some()).0,
+            result: Mutex::new(hello.exited.clone().map(ProcessResult::from)),
             state: Mutex::new(ClientState {
                 offset,
                 again_end,

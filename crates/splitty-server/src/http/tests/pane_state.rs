@@ -1,6 +1,6 @@
 use super::*;
 use splitty_core::{
-    ids::{PaneId, ScreenId},
+    ids::{PaneId, ScreenId, SessionId},
     mux::{Op, SessionStatus},
     pty::testing::{pty_available, wait_until},
 };
@@ -58,6 +58,8 @@ async fn unattended_exit_uses_the_host_policy_and_removes_an_emptied_screen() {
                 screen_name: None,
             })
             .expect("move");
+        // An exit the observer did not see happen, as one while no daemon
+        // ran, keeps its pane through the final-output grace.
         let mut observer = crate::service::pane_state::Observer::default();
         let now = std::time::Instant::now();
         observer.refresh(&app.service, now).await;
@@ -97,6 +99,115 @@ async fn unattended_exit_uses_the_host_policy_and_removes_an_emptied_screen() {
             backend.close(sid.as_str()).expect("cleanup");
         }
     }
+}
+
+/// The session of a new screen's only pane, running `script`.
+async fn screen_session(
+    app: &AppState,
+    screen: &str,
+    script: &str,
+) -> (SessionId, Arc<dyn splitty_core::pty::SessionHandle>) {
+    app.mux_store
+        .dispatch(Op::CreateScreen {
+            name: None,
+            screen_id: Some(screen.into()),
+            new_pane_id: Some(format!("{screen}-pane").as_str().into()),
+            shell_profile_id: None,
+        })
+        .expect("screen");
+    let sid = app
+        .mux_store
+        .session_id_for_pane(&PaneId::from(format!("{screen}-pane").as_str()))
+        .expect("session");
+    let session = app
+        .client_state
+        .dispatcher
+        .backend()
+        .create(command_opts(sid.as_str(), script))
+        .await
+        .expect("PTY");
+    (sid, session)
+}
+
+/// terminal-sessions, Process Exit (Pane closes with its exit): the running
+/// observer applies the exit policy when the program's exit and the end of its
+/// output are seen, not at its next metadata read: with reads an hour apart,
+/// the pane and its screen go well within the final-output grace, with the
+/// last output recorded.
+#[tokio::test]
+async fn an_exit_whose_output_ended_closes_its_pane_at_once() {
+    if !pty_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let app = state(ADDR, temp.path());
+    let (sid, session) =
+        screen_session(&app, "screen", "read line; printf 'final output'; exit 0").await;
+    crate::service::pane_state::start_every(&app.service, Duration::from_secs(3600));
+    let observed = || {
+        app.mux_store
+            .get_screen(&"screen".into())
+            .is_some_and(|screen| screen.sessions[&sid].display_title.is_some())
+    };
+    assert!(wait_until(WAIT, observed).await, "the first metadata read");
+    session.write(b"\n").await.expect("input");
+    assert!(
+        wait_until(WAIT, || *session.done().borrow()).await,
+        "exited"
+    );
+    let exited = std::time::Instant::now();
+    assert!(
+        wait_until(WAIT, || app
+            .mux_store
+            .get_screen(&"screen".into())
+            .is_none())
+        .await,
+        "the pane closed without another metadata read"
+    );
+    let latency = exited.elapsed();
+    assert!(latency < Duration::from_secs(1), "closed after {latency:?}");
+    let backend = app.client_state.dispatcher.backend();
+    assert!(backend.get(sid.as_str()).is_none(), "session closed");
+    assert!(String::from_utf8_lossy(&session.scrollback()).contains("final output"));
+}
+
+/// terminal-sessions, Process Exit (Terminal held open after the exit): a
+/// program seen to exit whose terminal a surviving process holds open keeps
+/// its pane through the final-output grace, then the policy applies anyway.
+#[tokio::test]
+async fn an_exit_whose_output_continues_closes_after_the_grace() {
+    if !pty_available() {
+        return;
+    }
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let app = state(ADDR, temp.path());
+    // The background process ignores the hangup at the shell's exit and keeps
+    // the terminal open.
+    let (sid, session) = screen_session(
+        &app,
+        "screen",
+        "read line; (trap '' HUP; exec sleep 5) & printf 'final output'; exit 0",
+    )
+    .await;
+    let mut observer = crate::service::pane_state::Observer::default();
+    observer
+        .refresh(&app.service, std::time::Instant::now())
+        .await;
+    session.write(b"\n").await.expect("input");
+    assert!(
+        wait_until(WAIT, || *session.done().borrow()).await,
+        "exited"
+    );
+    assert!(!session.output_complete(), "the terminal is still open");
+    let now = std::time::Instant::now();
+    observer.refresh(&app.service, now).await;
+    let screen = app.mux_store.get_screen(&"screen".into()).expect("screen");
+    assert_eq!(screen.sessions[&sid].status, SessionStatus::Exited);
+    observer
+        .refresh(&app.service, now + Duration::from_secs(4))
+        .await;
+    assert!(app.mux_store.get_screen(&"screen".into()).is_none());
+    assert!(String::from_utf8_lossy(&session.scrollback()).contains("final output"));
 }
 
 #[tokio::test]
