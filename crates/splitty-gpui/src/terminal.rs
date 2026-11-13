@@ -1117,11 +1117,31 @@ impl Terminal {
         self.invalidate_presentation();
         let target = self.target_size();
         if target != self.size {
-            if let Some(pixel_cell) = self.resized_pixel_cell {
-                self.resize_engine(target, pixel_cell, cx);
+            match self.resized_pixel_cell {
+                Some(pixel_cell) => self.resize_engine(target, pixel_cell, cx),
+                None => self.resize_before_layout(target),
             }
         }
         cx.notify();
+    }
+
+    /// A view without a layout yet (new, or reset for a reconnect) takes the
+    /// PTY's grid at once: the replay that follows was written at that size
+    /// and may arrive before the first layout. The layout still resizes the
+    /// emulator with the real cell size and reports the pane's size.
+    fn resize_before_layout(&mut self, size: Size) {
+        let pixel_cell = self.metrics.pixel_cell(self.display_scale);
+        let resized = self
+            .engine
+            .as_mut()
+            .map(|engine| engine.resize(size.cols, size.rows, pixel_cell.0, pixel_cell.1));
+        // The program has this size already: an answer to the resize is not sent.
+        if resized.is_some_and(|reply| self.output(reply).is_some()) {
+            self.size = size;
+            self.grid_shift = self.grid_shift.min(size.rows.saturating_sub(1));
+            self.row_cache.clear();
+            self.content_revision += 1;
+        }
     }
 
     #[cfg(all(test, feature = "ui-test-support"))]
@@ -3557,6 +3577,61 @@ mod presentation_tests {
                 let terminal = terminal.read(cx);
                 assert!(!terminal.engine.as_ref().is_some_and(Engine::frame_held));
                 assert!(terminal.held_frame_release.is_none());
+            });
+        });
+    }
+
+    /// A replay can arrive before a view's first layout, and after a reset for
+    /// a reconnect: it is parsed at the PTY's grid, not at the initial one.
+    #[test]
+    fn a_pty_size_reaches_the_emulator_before_the_first_layout() {
+        fn column_after_a_far_write(terminal: &mut Terminal, cx: &mut Context<Terminal>) -> u16 {
+            terminal.feed(b"\x1b[1;100HX", true, cx);
+            let engine = terminal.engine.as_mut().expect("an engine");
+            engine.cursor().expect("a cursor").col
+        }
+        with_view(|window, view, _| {
+            let pty = PtyGrid {
+                cols: 120,
+                rows: 30,
+                takeover: false,
+            };
+            // A new view that was never laid out.
+            let fresh = window
+                .update(|_, cx| cx.new(|cx| Terminal::new(|_| Ok(()), LinkOrigin::Local, cx)));
+            window.update(|_, cx| {
+                fresh.update(cx, |terminal, cx| {
+                    assert!(!terminal.geometry_ready);
+                    terminal.set_pty_size(Some(pty), cx);
+                    assert_eq!((terminal.size.cols, terminal.size.rows), (120, 30));
+                    assert!(!terminal.geometry_ready, "the layout still sizes the view");
+                    assert_eq!(column_after_a_far_write(terminal, cx), 100);
+                })
+            });
+
+            // A laid-out view that is reset for a reconnect.
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    assert!(terminal.geometry_ready);
+                    terminal.reset(1, cx);
+                    let wider = PtyGrid {
+                        cols: terminal.pane_size.cols + 60,
+                        rows: terminal.pane_size.rows,
+                        takeover: false,
+                    };
+                    terminal.set_pty_size(Some(wider), cx);
+                    assert_eq!(terminal.size.cols, wider.cols);
+                    assert!(!terminal.geometry_ready);
+                })
+            });
+            // The next layout keeps the PTY's grid and reports the pane's size.
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            window.update(|_, cx| {
+                let terminal = terminal.read(cx);
+                assert!(terminal.geometry_ready);
+                assert_eq!(terminal.size.cols, terminal.pane_size.cols + 60);
             });
         });
     }

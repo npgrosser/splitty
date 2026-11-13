@@ -391,6 +391,15 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 
 ### native app
 
+- **Fixed (2026-11-14): a replay before a view's first layout was parsed at 80×24.** A server that decides
+  sizes sends a session's PTY size before its replay, and the terminal view takes that grid so the replay is
+  read at the size it was written at. A view without a layout yet only stored the size (`set_pty_size`,
+  `crates/splitty-gpui/src/terminal.rs`): a new view starts at 80×24 and a view reset for a reconnect keeps
+  its old grid, and the output that streams before the layout, as for a host's Screen that reconnects while
+  another Screen is shown, was parsed at that grid and rewrapped afterwards. Programs that draw with cursor
+  movement showed scattered text. The view now takes the PTY's grid at once; the first layout still sizes it
+  and reports the pane's size (`a_pty_size_reaches_the_emulator_before_the_first_layout`). A server without
+  `pty-size-v1` sends no size, so its replay is still parsed at the view's own grid.
 - **Fixed (2026-11-12): a scratchpad on a host's Screen was never saved and lost its text at once.** The native
   window's gate for commands to a host (`Remotes::command`, `native_workspace/remote.rs`) did not list
   `SetScratchpad`, so every save from a pane of a remote Screen was refused before it reached the host; the
@@ -551,6 +560,11 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-14 in CI on `main` for the v0.4.1 version commit, in the macOS job:
+  `pty::session::tests::managed_stop_escalates_and_retains_final_output` (`splitty-core`), where the first of two
+  stops at once failed with "killpg owned leader group … with SIGKILL: EPERM". Darwin answers `killpg` with
+  EPERM once the leader is a zombie; `group_has_only_exited_leader` (`pty/lifecycle.rs`) accepts that only for a
+  complete, sole-leader group. Not investigated.
 - **Fixed (2026-11-13): the askpass change-feed test read another test's notification.** Seen once, in the
   release run of v0.4.0 (`askpass::tests::publishing_and_settling_a_question_move_the_change_feed`,
   `crates/splitty-remote/src/askpass.rs`): the change feed is the process's, so a question of a parallel test
