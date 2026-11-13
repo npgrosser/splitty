@@ -71,7 +71,7 @@ describe("connection registry", () => {
 
     // Its notifications name the host, which it cannot remove.
     const stop = attachNotifications(conn);
-    socket?.deliver(JSON.stringify({ id: "n-1", timestamp: 0, type: "notification", severity: "info", title: "build done" }));
+    socket?.deliver(JSON.stringify({ id: "n-1", timestamp: 0, type: "notification", notice: { kind: "notification", severity: "info", title: "build done" } }));
     stop();
     expect(getNotifications().find((n) => n.id === "host:me@vm2/n-1")?.title).toBe("me@vm2: build done");
 

@@ -1,24 +1,30 @@
-import { getSettings } from "./settings.ts";
+import { getSettings, subscribe as subscribeSettings, type NotificationSettings } from "./settings.ts";
 import type { ConnKey, ServerConnection } from "./connection/server_connection.ts";
-import { MAX_TEXT, MAX_TITLE, plainText } from "./protocol/untrusted.ts";
-import type { OutgoingMessage, NotificationSeverity, ProcessFinished, ProcessIdle, SessionExited, NotificationMessage } from "./protocol/types.ts";
+import { MAX_TITLE, plainText } from "./protocol/untrusted.ts";
+import type { NotificationSeverity, NotificationSwitch, OutgoingMessage } from "./protocol/types.ts";
 
+/**
+ * A notification of one window. The server classifies each event (`notice`,
+ * `notification-notices-v1`); the window keeps only unread state, which pane
+ * it shows, its own switches and the host's name in the title.
+ */
 export interface SplittyNotification {
   /** `<connection>/<event id>`: two servers may use the same event ids. */
   id: string;
   /** The connection the notification arrived on. */
   conn: ConnKey;
+  /** The server's kind, for example `process.finished`; informational. */
   kind: string;
   severity: NotificationSeverity;
   /** For a server other than the local one, prefixed with its name. */
   title: string;
-  body?: string;
+  /** The `notifications.*` switch that governs it. */
+  setting?: NotificationSwitch;
   sessionId: string;
   /** The key of the pane's screen in this window, or "". */
   screenId: string;
   paneId: string;
   timestamp: number;
-  payload: Record<string, unknown>;
   read: boolean;
   dismissed: boolean;
 }
@@ -42,103 +48,80 @@ export function getRevision(): number {
 }
 
 const SEVERITIES: readonly NotificationSeverity[] = ["info", "success", "warning", "error"];
+const SWITCHES: readonly NotificationSwitch[] = ["processFinished", "processExited", "processCrashed", "programStatus"];
+/** The events an older server sends that a window notifies about. */
+const NOTIFYING = new Set(["process.finished", "process.idle", "session.exited", "notification"]);
 
-type Common = Omit<SplittyNotification, "kind" | "severity" | "body" | "payload">;
+interface Notice { kind: string; severity: NotificationSeverity; title: string; setting?: NotificationSwitch }
 
 /**
- * The fields every notification of `conn` shares. Panes and screens are looked
- * up in `conn`'s own tables only, and the server's strings are plain text; a
- * server other than the local one is named in the title, where it cannot
- * remove it.
+ * The event's notice, unless it is suppressed or malformed. Without one (a
+ * server without `notification-notices-v1`) a notification event gets a
+ * generic notice and `program_status.changed` none.
  */
-function common(conn: ServerConnection, msg: { id: string; timestamp: number }, sessionId: unknown, title: string): Common {
-  const sid = typeof sessionId === "string" ? sessionId : "";
+function noticeOf(msg: OutgoingMessage): Notice | null {
+  const raw = (msg as { notice?: unknown }).notice;
+  if (raw === undefined) {
+    if (!NOTIFYING.has(msg.type)) return null;
+    const process = plainText((msg as { process?: unknown }).process, MAX_TITLE);
+    return { kind: msg.type, severity: "info", title: process ? `Activity in ${process}` : "Session activity" };
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const notice = raw as Record<string, unknown>;
+  if (notice.suppressed !== undefined && notice.suppressed !== null) return null;
+  if (typeof notice.title !== "string") return null;
+  return {
+    kind: typeof notice.kind === "string" ? plainText(notice.kind, MAX_TITLE) : msg.type,
+    severity: SEVERITIES.includes(notice.severity as NotificationSeverity) ? notice.severity as NotificationSeverity : "info",
+    title: notice.title,
+    // A switch this window does not know governs nothing here.
+    setting: SWITCHES.includes(notice.setting as NotificationSwitch) ? notice.setting as NotificationSwitch : undefined,
+  };
+}
+
+/** Whether the window's switches let a notification governed by `setting` through. */
+function switchedOn(ns: NotificationSettings, setting: NotificationSwitch | undefined): boolean {
+  // An older server's settings lack `programStatus`, which is on there.
+  return ns.enabled && (!setting || ns[setting] !== false);
+}
+
+/**
+ * The notification for `msg` of `conn`. Panes and screens are looked up in
+ * `conn`'s own tables only, and the server's strings are plain text; a server
+ * other than the local one is named in the title, where it cannot remove it.
+ */
+function fromMessage(conn: ServerConnection, msg: OutgoingMessage, notice: Notice): SplittyNotification {
+  const raw = msg as { id?: unknown; timestamp?: unknown; sessionId?: unknown };
+  const sid = typeof raw.sessionId === "string" ? raw.sessionId : "";
   const paneId = sid ? conn.sessions.paneForSession(sid) ?? "" : "";
   const screenId = paneId ? conn.sessions.screenForPane(paneId) ?? "" : "";
-  const text = plainText(title, MAX_TITLE);
+  const text = plainText(notice.title, MAX_TITLE);
   return {
-    id: `${conn.key}/${String(msg.id)}`,
+    id: `${conn.key}/${String(raw.id)}`,
     conn: conn.key,
+    kind: notice.kind,
+    severity: notice.severity,
     title: conn.kind === "local" ? text : `${plainText(conn.label, MAX_TITLE)}: ${text}`,
+    setting: notice.setting,
     sessionId: sid,
     screenId,
     paneId,
-    timestamp: typeof msg.timestamp === "number" ? msg.timestamp : Date.now(),
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : Date.now(),
     read: false,
     dismissed: false,
   };
 }
 
-function fromProcessFinished(conn: ServerConnection, msg: ProcessFinished): SplittyNotification {
-  const process = plainText(msg.process, MAX_TITLE);
-  return {
-    ...common(conn, msg, msg.sessionId, `${process} finished`),
-    kind: "process.finished",
-    severity: "info",
-    payload: { process, cmdline: plainText(msg.cmdline, MAX_TEXT) },
-  };
-}
-
-function fromProcessIdle(conn: ServerConnection, msg: ProcessIdle): SplittyNotification {
-  const process = plainText(msg.process, MAX_TITLE);
-  return {
-    ...common(conn, msg, msg.sessionId, process ? `${process} is waiting` : "Command finished"),
-    kind: "process.idle",
-    severity: "info",
-    payload: { process, exitCode: msg.exitCode },
-  };
-}
-
-function fromSessionExited(conn: ServerConnection, msg: SessionExited): SplittyNotification {
-  const crashed = msg.exitCode !== 0;
-  const process = plainText(msg.process, MAX_TITLE);
-  return {
-    ...common(conn, msg, msg.sessionId, crashed ? `${process || "session"} failed` : `${process || "session"} exited`),
-    kind: crashed ? "session.crashed" : "session.exited",
-    severity: crashed ? "error" : "info",
-    payload: {
-      exitCode: msg.exitCode,
-      process,
-      command: plainText(msg.command, MAX_TEXT),
-      userInitiated: msg.userInitiated === true,
-    },
-  };
-}
-
-function fromGenericNotification(conn: ServerConnection, msg: NotificationMessage): SplittyNotification {
-  return {
-    ...common(conn, msg, msg.sessionId, msg.title),
-    kind: "notification",
-    severity: SEVERITIES.includes(msg.severity) ? msg.severity : "info",
-    body: typeof msg.body === "string" ? plainText(msg.body, MAX_TEXT) : undefined,
-    payload: {},
-  };
-}
-
-function shouldDesktopNotify(n: SplittyNotification): boolean {
+function shouldDesktopNotify(ns: NotificationSettings): boolean {
   if (typeof document === "undefined" || !document.hidden) return false;
   if (typeof Notification === "undefined") return false;
   if (Notification.permission !== "granted") return false;
-
-  const ns = getSettings().notifications;
-  if (!ns.enabled || !ns.desktop) return false;
-
-  // Check per-type settings
-  if (n.kind === "process.finished" && !ns.processFinished) return false;
-  if (n.kind === "session.exited" && !ns.processExited) return false;
-  if (n.kind === "session.crashed" && !ns.processCrashed) return false;
-  // Skip user-initiated session exits
-  if ((n.kind === "session.exited" || n.kind === "session.crashed") && n.payload?.userInitiated) {
-    return false;
-  }
-
-  return true;
+  return ns.desktop;
 }
 
 function showDesktopNotification(n: SplittyNotification) {
   try {
     const sysNotif = new Notification(n.title, {
-      body: n.body,
       tag: n.id, // prevents duplicates
     });
     sysNotif.onclick = () => {
@@ -153,18 +136,12 @@ function showDesktopNotification(n: SplittyNotification) {
   }
 }
 
-function ingest(n: SplittyNotification | undefined) {
-  if (!n) return;
-
+function handleMessage(conn: ServerConnection, msg: OutgoingMessage) {
+  const notice = noticeOf(msg);
+  if (!notice) return;
   const ns = getSettings().notifications;
-
-  // Master toggle off → discard completely (no badges, no toasts, no desktop)
-  if (!ns.enabled) return;
-
-  // Per-type settings → discard if the specific notification type is disabled
-  if (n.kind === "process.finished" && !ns.processFinished) return;
-  if (n.kind === "session.exited" && !ns.processExited) return;
-  if (n.kind === "session.crashed" && !ns.processCrashed) return;
+  if (!ns || !switchedOn(ns, notice.setting)) return;
+  const n = fromMessage(conn, msg, notice);
 
   // Dedup by id
   if (notifications.some((existing) => existing.id === n.id)) return;
@@ -180,30 +157,23 @@ function ingest(n: SplittyNotification | undefined) {
   }
 
   notify();
+  if (n.read) return;
 
-  // Fire toast listeners for new notifications
-  for (const cb of toastListeners) cb(n);
-
-  // Desktop/system notification when window not focused
-  if (shouldDesktopNotify(n)) {
-    showDesktopNotification(n);
-  }
+  // A notice in the window, and from the system while the window is hidden.
+  if (ns.toasts) for (const cb of toastListeners) cb(n);
+  if (shouldDesktopNotify(ns)) showDesktopNotification(n);
 }
 
-function handleMessage(conn: ServerConnection, msg: OutgoingMessage) {
-  switch (msg.type) {
-    case "process.finished":
-      return ingest(fromProcessFinished(conn, msg));
-    case "process.idle":
-      return ingest(fromProcessIdle(conn, msg));
-    case "session.exited":
-      return ingest(fromSessionExited(conn, msg));
-    case "notification":
-      return ingest(fromGenericNotification(conn, msg));
-    default:
-      return;
-  }
+/** A switch turned off also removes the notifications it governs. */
+function applySwitches(): void {
+  const ns = getSettings().notifications;
+  if (!ns) return;
+  const kept = notifications.filter((n) => switchedOn(ns, n.setting));
+  if (kept.length === notifications.length) return;
+  notifications.splice(0, notifications.length, ...kept);
+  notify();
 }
+subscribeSettings(applySwitches);
 
 /** Collect the notifications of a connection. Returns unsubscribe. */
 export function attachNotifications(conn: ServerConnection): () => void {
@@ -216,7 +186,7 @@ export function subscribe(cb: () => void): () => void {
   return () => listeners.delete(cb);
 }
 
-/** Subscribe to new notifications (for toasts). */
+/** Subscribe to new notifications that show a notice in the window (toasts). */
 export function onNewNotification(cb: (n: SplittyNotification) => void): () => void {
   toastListeners.add(cb);
   return () => toastListeners.delete(cb);

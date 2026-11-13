@@ -6,7 +6,7 @@ export function seedSettingsForTest(): void {
     drawer: { pinned: false, edgeReveal: false, showTips: false, resizable: false, sidebarWidth: 200 },
     notifications: {
       enabled: true, toasts: true, desktop: false,
-      processFinished: true, processExited: true, processCrashed: true,
+      processFinished: true, processExited: true, processCrashed: true, programStatus: true,
     },
   } as SplittySettings);
 }

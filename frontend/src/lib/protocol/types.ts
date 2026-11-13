@@ -186,13 +186,40 @@ export interface SessionSize extends SessionEvent { type: "size"; cols: number; 
 
 // --- Server -> Client: Process Events ---
 
-export interface ProcessFinished extends SessionEvent { type: "process.finished"; process: string; cmdline?: string }
-export interface ProcessIdle extends SessionEvent { type: "process.idle"; process: string; exitCode?: number }
-export interface SessionExited extends SessionEvent { type: "session.exited"; exitCode: number; process?: string; command?: string; userInitiated: boolean }
+export type NotificationSeverity = "info" | "success" | "warning" | "error";
+/** A `notifications.*` switch besides `enabled`. */
+export type NotificationSwitch = "processFinished" | "processExited" | "processCrashed" | "programStatus";
+
+/**
+ * What a window shows for a notification event, as the server classified it
+ * (`notification-notices-v1`). Untrusted host data: the title is shown as
+ * plain text, unknown values are ignored.
+ */
+export interface Notice {
+  kind: string;
+  severity: NotificationSeverity;
+  title: string;
+  setting?: NotificationSwitch;
+  /** Why no window notifies, for example `user-initiated`. */
+  suppressed?: string;
+}
+
+export interface ProcessFinished extends SessionEvent { type: "process.finished"; process: string; cmdline?: string; notice?: Notice }
+export interface ProcessIdle extends SessionEvent { type: "process.idle"; process: string; exitCode?: number; notice?: Notice }
+export interface SessionExited extends SessionEvent { type: "session.exited"; exitCode: number; process?: string; command?: string; userInitiated: boolean; notice?: Notice }
+
+/** A session's root program status record changed; the web client follows only its notice. */
+export interface ProgramStatusChanged extends ServerEvent {
+  type: "program_status.changed";
+  sessionId: string;
+  paneId?: string;
+  screenId?: string;
+  status: Record<string, unknown> | null;
+  notify?: boolean;
+  notice?: Notice;
+}
 
 // --- Server -> Client: Notification (generic fallback) ---
-
-export type NotificationSeverity = "info" | "success" | "warning" | "error";
 
 export interface NotificationMessage extends ServerEvent {
   type: "notification";
@@ -200,6 +227,7 @@ export interface NotificationMessage extends ServerEvent {
   title: string;
   body?: string;
   sessionId?: string;
+  notice?: Notice;
 }
 
 // --- Server -> Client: Mux ---
@@ -257,6 +285,7 @@ export type OutgoingMessage =
   | ProcessFinished
   | ProcessIdle
   | SessionExited
+  | ProgramStatusChanged
   // Notification
   | NotificationMessage
   // Mux

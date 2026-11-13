@@ -121,6 +121,8 @@ export interface NotificationSettings {
   processFinished: boolean;
   processExited: boolean;
   processCrashed: boolean;
+  /** Notifications for program status reports; absent from an older server, where it is on. */
+  programStatus?: boolean;
 }
 
 export interface ExperimentalSettings {

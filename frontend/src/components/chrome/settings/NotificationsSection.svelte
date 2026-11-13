@@ -94,4 +94,17 @@
     />
   </SettingRow>
 
+  <!-- Program Status -->
+  <SettingRow
+    label="Program Status"
+    hint="Notify when a program reports that it waits, is done or failed"
+    showReset={(s.notifications.programStatus !== false) !== (defaults.notifications.programStatus !== false)}
+    onReset={() => updateSetting("notifications", "programStatus", defaults.notifications.programStatus !== false)}
+  >
+    <ToggleSwitch
+      checked={s.notifications.programStatus !== false}
+      onchange={() => updateSetting("notifications", "programStatus", s.notifications.programStatus === false)}
+    />
+  </SettingRow>
+
 </SettingsSection>

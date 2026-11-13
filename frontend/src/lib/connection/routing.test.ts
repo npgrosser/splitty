@@ -247,8 +247,9 @@ describe("a hostile second connection reusing the local ids", () => {
   });
 
   it("tags its notifications with the host, on its own pane", async () => {
-    w.host.socket.message({ id: "n-7", type: "process.finished", sessionId: "sess-1", process: "make" });
-    w.local.socket.message({ id: "n-7", type: "process.finished", sessionId: "sess-1", process: "make" });
+    const notice = { kind: "process.finished", severity: "info", title: "make finished", setting: "processFinished" };
+    w.host.socket.message({ id: "n-7", type: "process.finished", sessionId: "sess-1", process: "make", notice });
+    w.local.socket.message({ id: "n-7", type: "process.finished", sessionId: "sess-1", process: "make", notice });
     await flush();
 
     const both = getNotifications().filter((n) => n.id.endsWith("/n-7"));
@@ -308,7 +309,7 @@ describe("a hostile second connection reusing the local ids", () => {
 describe("crafted strings", () => {
   it("stay plain data with length caps", async () => {
     const crafted = `<img src=x onerror=alert(1)>\u001b[31m‮${"y".repeat(5000)}`;
-    w.host.socket.message({ id: "n-crafted", type: "notification", severity: "<script>", title: crafted, body: crafted, sessionId: "sess-1" });
+    w.host.socket.message({ id: "n-crafted", type: "notification", sessionId: "sess-1", notice: { kind: crafted, severity: "<script>", title: crafted, setting: crafted } });
     const snapshots: ScreenState[] = [];
     w.host.conn.mux.setHandlers({ onSnapshot: (s) => snapshots.push(s) });
     w.host.socket.message({ type: "mux.screen_snapshot", screen: { ...snapshot("screen-1"), name: crafted } });
@@ -317,7 +318,8 @@ describe("crafted strings", () => {
     const n = getNotifications().find((x) => x.id === "host:evil/n-crafted");
     expect(n?.title.startsWith("evil: <img src=x onerror=alert(1)>[31m")).toBe(true);
     expect(n?.title).toHaveLength("evil: ".length + MAX_TITLE);
-    expect(n?.body).not.toMatch(/[\u0000-\u001f‮]/);
+    expect(n?.kind).not.toMatch(/[\u0000-\u001f‮]/);
+    expect(n?.setting).toBeUndefined();
     expect(n?.severity).toBe("info");
     expect(snapshots[0].name).toHaveLength(MAX_NAME);
     expect(snapshots[0].name).not.toMatch(/[\u0000-\u001f‮]/);

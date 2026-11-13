@@ -49,19 +49,13 @@
     initAuth();
     const cleanupNotifications = forEachConnection(attachNotifications);
 
+    // The store decides which notifications show a toast (`notifications.toasts`).
     const unsubToast = onNewNotification((n) => {
-      const ns = settings().notifications;
-      if (!ns.enabled || !ns.toasts) return;
-      if (n.kind === "process.finished" && !ns.processFinished) return;
-      if (n.kind === "session.exited" && !ns.processExited) return;
-      if (n.kind === "session.crashed" && !ns.processCrashed) return;
-
-      const opts = { description: n.body };
       switch (n.severity) {
-        case "error": toast.error(n.title, opts); break;
-        case "warning": toast.warning(n.title, opts); break;
-        case "success": toast.success(n.title, opts); break;
-        default: toast.info(n.title, opts); break;
+        case "error": toast.error(n.title); break;
+        case "warning": toast.warning(n.title); break;
+        case "success": toast.success(n.title); break;
+        default: toast.info(n.title); break;
       }
     });
 
