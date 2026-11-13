@@ -1060,7 +1060,14 @@ impl SourceRuntime {
                         {
                             Ok(applied) => {
                                 delta = applied;
-                                if let Some(close) = &mut self.pending_close {
+                                // A catalog that would end routes starts a
+                                // refresh instead of being applied; a closed
+                                // Screen is gone only once that commits.
+                                let unapplied = self.workspace_refresh.observation_active();
+                                if let Some(close) = self.pending_close.as_mut().filter(|close| {
+                                    !(unapplied
+                                        && matches!(close.target, CloseTarget::Screen { .. }))
+                                }) {
                                     if close.observe_catalog(response_generation) {
                                         if let CloseTarget::Pane { screen, .. } = &close.target {
                                             if model.screen(screen).is_some() {

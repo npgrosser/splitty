@@ -2,6 +2,7 @@
 mod auto_forward;
 mod editors;
 mod files;
+mod host_catalog;
 mod remembered;
 mod remote;
 mod shares;
@@ -1439,6 +1440,7 @@ async fn run_service(
     let mut ports = None::<PortsClient<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
     let mut remembered = None::<remembered::RuntimeRemembered<'_>>;
+    let mut host_reports = host_catalog::HostCatalogReports::default();
     let mut shares = None::<shares::RuntimeShares<'_>>;
     // `remote.reconnectHosts` as first read; those hosts are reconnected once.
     let mut reconnect = None::<Vec<String>>;
@@ -1740,6 +1742,9 @@ async fn run_service(
             let effects=remotes.reconcile(&mut window)?;
             publish_source_effects(&mut window,effects,&updates,&stop).await?;
             if let Some(memory)=&mut remembered {memory.sync(&window);}
+            if hub.is_some() {
+                host_reports.sync(&window,known.as_deref().map(HostDirectorySnapshot::directory),|target,screens|local.client.report_host_screens(target,screens));
+            }
             if let Some(ports)=&mut ports {
                 // Their results are not published: an automatic forward brings no notice.
                 for request in auto_forward.appeared(auto_forward_enabled,&window,forwards.as_deref()) {

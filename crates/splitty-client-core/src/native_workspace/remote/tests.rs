@@ -1730,17 +1730,25 @@ async fn close_last_pane(
     pane: &str,
     report: impl Fn(&serde_json::Value) -> Option<serde_json::Value>,
 ) {
-    let plan = window
-        .source(id)
-        .unwrap()
-        .assess_close(
-            1,
-            CloseTarget::Pane {
-                screen: screen.to_owned(),
-                pane: pane.to_owned(),
-            },
-        )
-        .unwrap();
+    let target = CloseTarget::Pane {
+        screen: screen.to_owned(),
+        pane: pane.to_owned(),
+    };
+    close_settled(remotes, window, id, token, target, report).await;
+}
+
+/// Close `target` on the host and drive the host until the close settled
+/// and the host has no Screen left in the window.
+#[cfg(not(target_os = "windows"))]
+async fn close_settled(
+    remotes: &mut Remotes<'_>,
+    window: &mut WindowWorkspace,
+    id: SourceId,
+    token: SourceToken,
+    target: CloseTarget,
+    report: impl Fn(&serde_json::Value) -> Option<serde_json::Value>,
+) {
+    let plan = window.source(id).unwrap().assess_close(1, target).unwrap();
     let close = Command::new(
         token,
         CommandKind::RequestClose {
@@ -1751,7 +1759,7 @@ async fn close_last_pane(
     let effects = remotes.command(window, close).unwrap();
     assert!(
         matches!(effects.updates.as_slice(), [Update::CloseSubmitted { .. }]),
-        "a pane of a host's Screen closes through the remote command gate"
+        "a host's Screen or pane closes through the remote command gate"
     );
     let mut settled = false;
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -1770,6 +1778,12 @@ async fn close_last_pane(
                 None => event,
             };
             let effects = source.event(window, Box::new(event)).unwrap();
+            if let Some(reason) = effects.updates.iter().find_map(|update| match update {
+                Update::CloseRejected { reason, .. } => Some(reason),
+                _ => None,
+            }) {
+                panic!("the close was not settled: {reason}");
+            }
             settled |= effects
                 .updates
                 .iter()
@@ -1777,7 +1791,7 @@ async fn close_last_pane(
         }
     })
     .await
-    .expect("the emptied Screen leaves the window");
+    .expect("the closed Screen leaves the window");
 }
 
 /// workspace-model, Closing a Pane (Close the last pane of a screen), seen
@@ -2060,6 +2074,80 @@ async fn a_tab_of_a_host_screen_is_placed_exactly() {
             && tabs(window).is_some_and(|(_, panes)| panes == moved)
     })
     .await;
+
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// remote-screens, Host Screen Directory Cache (A Screen that left a
+/// connected host): once the host confirmed the terminate of a Screen, the
+/// window reports the host's remaining Screens over its local connection and
+/// the local service stores them, so the host's next connection does not
+/// list the Screen while it is not ready yet.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn a_terminated_host_screen_leaves_the_stored_directory() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let hub = runtime.state.hub.clone();
+    let service: OwnedService = crate::EmbeddedService::from_runtime(runtime).into();
+    let mut local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let ids = client.create_screen("Host screen").unwrap();
+    // What the service stored when the host's connection became ready.
+    hub.update_catalog(serde_json::json!({"target":"close.test","screens":[
+        {"id":ids.screen_id,"name":"Host screen","panes":1}
+    ]}))
+    .unwrap();
+    let stored = |hub: &splitty_server::hub::Hub| {
+        hub.directory()
+            .hosts
+            .into_iter()
+            .find(|host| host.target == "close.test")
+            .map(|host| host.screens)
+            .unwrap_or_default()
+    };
+    let mut window = WindowWorkspace::new(local.connection_id());
+    window
+        .ui_test_screen_order_fixture(&[("local", "Local")], None)
+        .unwrap();
+    let (mut remotes, id, token) =
+        opened_host_screen(&service, &mut window, client, &ids.screen_id).await;
+    let mut reports = super::super::host_catalog::HostCatalogReports::default();
+    let mut sent = 0;
+    reports.sync(&window, Some(&hub.directory()), |_, _| {
+        sent += 1;
+        Ok(())
+    });
+    assert_eq!(sent, 0, "the stored Screen is live");
+
+    let screen = CloseTarget::Screen {
+        screen: ids.screen_id.clone(),
+    };
+    close_settled(&mut remotes, &mut window, id, token, screen, |_| None).await;
+    assert!(
+        listed_screens(&mut local).await.is_empty(),
+        "the host ended the Screen"
+    );
+    assert_eq!(stored(&hub).len(), 1, "nothing but the window reports it");
+    reports.sync(&window, Some(&hub.directory()), |target, screens| {
+        sent += 1;
+        local.report_host_screens(target, screens)
+    });
+    assert_eq!(sent, 1);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !stored(&hub).is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the local service stores the report");
 
     remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
     remotes.finish(&mut window).await.unwrap();

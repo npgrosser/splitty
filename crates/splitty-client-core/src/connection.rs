@@ -407,6 +407,22 @@ impl Client {
         })
     }
 
+    /// Tell the local service which of a host's stored Screens remain, as
+    /// `hub.catalog.observe`; only a main window's local connection may.
+    pub(crate) fn report_host_screens(
+        &self,
+        target: &str,
+        screens: &[splitty_core::native_api::directory::DirectoryScreen],
+    ) -> io::Result<()> {
+        let text = screens.iter().fold(target.len(), |bytes, screen| {
+            bytes + screen.id.len() + screen.name.as_ref().map_or(0, String::len) + 64
+        });
+        self.command(
+            text,
+            || json!({"type":"hub.catalog.observe", "target":target, "screens":screens}),
+        )
+    }
+
     pub fn set_active_screen(&self, screen_id: &str) -> io::Result<()> {
         identifier(screen_id)?;
         self.command(0, || {

@@ -283,6 +283,8 @@ The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the
 
 After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub; legacy PUT remains available.
 
+While a host is connected, the native workspace SHALL report its stored directory without the screens that a valid live catalog of the current connection no longer lists, such as a screen terminated from the window once the host confirmed it, or one that closed with its last pane. A later connection to the host SHALL therefore not list such a screen while it is being established. A terminate the host has not confirmed or has refused, and a detached screen, SHALL leave the stored directory unchanged.
+
 #### Scenario: Host directories survive a local restart
 - **WHEN** directories for `vm1` and `vm2` are saved and `vm1` is updated
 - **THEN** a subsequent read after server reconstruction returns the updated `vm1` directory and the unchanged `vm2` directory
@@ -306,6 +308,11 @@ After successful host readiness the hub SHALL store the handshake screen directo
 #### Scenario: Ordered observations
 - **WHEN** one local connection reports a screen rename and then removal
 - **THEN** the final cache reflects the removal and late hidden-host observations cannot recreate a forgotten directory
+
+#### Scenario: A screen that left a connected host
+- **WHEN** the native window terminates a screen on `vm1`, the host confirms it, and `vm1` later reconnects
+- **THEN** the host's last observed screens do not include it while the connection is being established
+- **AND** an unconfirmed or refused terminate and a detach leave the screen listed
 
 ### Requirement: Screen Default Names Per Host
 The client SHALL assign new default screen names as `Screen N`, using the smallest unused positive integer independently for local screens and for each remote host. Known unopened screens on that same host SHALL reserve their names. Existing server, restored and user-selected names SHALL remain unchanged. A pending default name that collides with a newly discovered screen on its host SHALL be adjusted before creation; names on another host SHALL NOT affect it.
