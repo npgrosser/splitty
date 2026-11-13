@@ -6,75 +6,104 @@ use syn::visit::{self, Visit};
 #[derive(Default)]
 struct Routes(BTreeSet<(String, String)>);
 
+const VERBS: [&str; 5] = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+
+/// The HTTP methods a method router registers. Layers and other builder
+/// calls on it are not routes.
 fn methods(expression: &syn::Expr, found: &mut Vec<String>) {
-    match expression {
+    let name = match expression {
         syn::Expr::MethodCall(call) => {
             methods(&call.receiver, found);
-            found.push(call.method.to_string().to_uppercase());
+            call.method.to_string()
         }
         syn::Expr::Call(call) => {
             let syn::Expr::Path(path) = &*call.func else {
                 panic!("unexpected routing expression")
             };
-            found.push(
-                path.path
-                    .segments
-                    .last()
-                    .expect("routing method")
-                    .ident
-                    .to_string()
-                    .to_uppercase(),
-            );
+            path.path
+                .segments
+                .last()
+                .expect("routing method")
+                .ident
+                .to_string()
         }
         _ => panic!("route methods must be explicitly classified"),
+    }
+    .to_uppercase();
+    if VERBS.contains(&name.as_str()) {
+        found.push(name);
     }
 }
 
 impl<'ast> Visit<'ast> for Routes {
     fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
         if call.method == "route" {
-            let syn::Expr::Lit(path) = &call.args[0] else {
-                panic!("route path must be classified")
-            };
-            let syn::Lit::Str(path) = &path.lit else {
-                panic!("route path must be a string")
+            let path = match &call.args[0] {
+                syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(path),
+                    ..
+                }) => path.value(),
+                // The gateway's loop that serves every catalog operation.
+                syn::Expr::Field(field) if matches!(&field.member, syn::Member::Named(name) if name == "path") =>
+                {
+                    visit::visit_expr_method_call(self, call);
+                    return;
+                }
+                _ => panic!("route path must be a string literal"),
             };
             let mut verbs = Vec::new();
             methods(&call.args[1], &mut verbs);
+            assert!(!verbs.is_empty(), "{path} has no classified method");
             for method in verbs {
-                self.0.insert((method, path.value()));
+                self.0.insert((method, path.clone()));
             }
         }
         visit::visit_expr_method_call(self, call);
     }
 }
 
+/// Every hand-registered route (the browser gateway's own routes, the
+/// control socket's and the job routes) is either a catalog operation or an
+/// adapter route, and every adapter route is registered; the gateway serves
+/// the catalog's operations from the catalog itself.
 #[test]
 fn every_registered_method_and_path_has_an_explicit_classification() {
     let mut routes = Routes::default();
     for source in [
+        include_str!("../../http/gateway.rs"),
         include_str!("../../http/routes.rs"),
         include_str!("../../http/jobs.rs"),
     ] {
         routes.visit_file(&syn::parse_file(source).expect("valid Rust routes"));
     }
-    let classified: BTreeSet<_> = OPERATIONS
+    let operations: BTreeSet<_> = OPERATIONS
         .iter()
         .map(|entry| (entry.method.to_owned(), entry.path.to_owned()))
-        .chain(
-            ADAPTER_ROUTES
-                .iter()
-                .map(|(method, path)| ((*method).into(), (*path).into())),
-        )
         .collect();
-    assert_eq!(
-        routes.0, classified,
-        "a route was added/removed without reviewing native authority"
+    let adapter: BTreeSet<(String, String)> = ADAPTER_ROUTES
+        .iter()
+        .map(|(method, path)| ((*method).into(), (*path).into()))
+        .collect();
+    assert_eq!(operations.len(), OPERATIONS.len(), "duplicate mapping");
+    assert_eq!(adapter.len(), ADAPTER_ROUTES.len(), "duplicate mapping");
+    assert!(operations.is_disjoint(&adapter), "duplicate mapping");
+    let unclassified: Vec<_> = routes
+        .0
+        .iter()
+        .filter(|route| !operations.contains(*route) && !adapter.contains(*route))
+        .collect();
+    assert!(
+        unclassified.is_empty(),
+        "a route was added without reviewing native authority: {unclassified:?}"
     );
-    assert_eq!(
-        classified.len(),
-        OPERATIONS.len() + ADAPTER_ROUTES.len(),
-        "duplicate mapping"
+    let unregistered: Vec<_> = adapter.difference(&routes.0).collect();
+    assert!(
+        unregistered.is_empty(),
+        "an adapter route was removed without updating its classification: {unregistered:?}"
+    );
+    assert!(
+        include_str!("../../http/gateway.rs").contains("for entry in catalog::OPERATIONS"),
+        "the gateway serves the catalog's operations"
     );
 }
 

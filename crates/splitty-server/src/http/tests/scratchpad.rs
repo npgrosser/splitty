@@ -7,7 +7,7 @@ use splitty_core::mux::{Op, ScreenOp};
 
 /// A screen `s1` whose session holds scratch text, built in the store directly
 /// (a window saves it over its mux connection); no shell is started.
-fn with_scratchpad(state: &AppState) -> String {
+fn with_scratchpad(state: &TestState) -> String {
     state
         .mux_store
         .dispatch(Op::CreateScreen {
@@ -49,7 +49,7 @@ async fn the_control_api_neither_shows_nor_sets_a_scratchpad() {
         ("HTTP", router(&state, hub(&host, dir.path()))),
         (
             "control socket",
-            crate::http::build_control_router(state.clone()),
+            crate::http::build_control_router(state.service.clone()),
         ),
     ];
     for (channel, app) in channels {

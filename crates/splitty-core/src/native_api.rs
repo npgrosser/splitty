@@ -185,6 +185,7 @@ pub const ADAPTER_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/session"),
     ("POST", "/api/ws-ticket"),
     ("POST", "/api/bootstrap"),
+    ("GET", "/api/client-assignment"),
     ("GET", "/ws"),
     ("GET", "/ws/remote"),
     ("GET", "/api/agents"),

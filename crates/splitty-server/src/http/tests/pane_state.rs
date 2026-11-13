@@ -103,7 +103,7 @@ async fn unattended_exit_uses_the_host_policy_and_removes_an_emptied_screen() {
 
 /// The session of a new screen's only pane, running `script`.
 async fn screen_session(
-    app: &AppState,
+    app: &TestState,
     screen: &str,
     script: &str,
 ) -> (SessionId, Arc<dyn splitty_core::pty::SessionHandle>) {
@@ -407,7 +407,7 @@ async fn the_mux_state_replies_carry_the_root_program_status() {
         ("HTTP", router(&app, hub(&host, temp.path()))),
         (
             "control socket",
-            crate::http::build_control_router(app.clone()),
+            crate::http::build_control_router(app.service.clone()),
         ),
     ];
     for (channel, router) in channels {

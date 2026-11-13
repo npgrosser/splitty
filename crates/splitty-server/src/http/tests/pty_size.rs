@@ -135,7 +135,7 @@ async fn updated_settings_reconfigure_the_size_policy() {
     let mut updated = splitty_core::config::HomeConfig::default();
     updated.terminal.size_policy = "latest".into();
     updated.terminal.size_idle_seconds = 30;
-    routes::apply_home_settings(&state, updated);
+    crate::service::operations::apply_home_settings(&state.service, updated);
     assert_eq!(
         state.client_state.dispatcher.size_config(),
         SizeConfig {

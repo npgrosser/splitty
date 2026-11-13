@@ -1,20 +1,22 @@
-//! The remote screen hub: `/ws/remote` gives the window a WebSocket to a
-//! host's daemon, so local and remote screens share one window.
+//! The remote screen hub: a native host stream gives a window a connection
+//! to a host's daemon, so local and remote screens share one window. Desktop
+//! clients open such a stream themselves; the browser gateway opens one for
+//! each `/ws/remote` socket.
 //!
-//! For each socket the hub reaches the host as `splitty connect` does
+//! For each stream the hub reaches the host as `splitty connect` does
 //! (install, then the handshake with `--ensure-daemon`), checks the daemon's
 //! protocol version, starts `splitty remote-bridge` there over SSH and relays
 //! the daemon's messages both ways, text as text and binary as binary, without
-//! reading them. Until the relay starts it speaks for itself: `remote.progress`
-//! per step, then exactly one `remote.ready` or a `remote.error`
+//! reading them. Until the relay starts it speaks for itself: preparation
+//! progress per step, then exactly one `remote.ready` or a `remote.error`
 //! (`docs/protocol.ts`). Afterwards it sends nothing of its own, and when the
-//! host side ends it closes the socket with [`HOST_LOST`].
+//! host side ends the stream ends.
 //!
 //! With `update=1`, a daemon of another version than this server's is stopped
 //! before the bridge starts, and the handshake starts this version instead.
 //! That ends the daemon's sessions, so a client asks the user first.
 //!
-//! Every socket has `ssh` processes of its own; closing the socket ends them,
+//! Every stream has `ssh` processes of its own; closing it ends them,
 //! and the host's daemon keeps running. Nothing goes to the host but the
 //! commands of the install, the handshake, the update's `daemon stop` and the
 //! bridge and the client's relayed messages: no cookie, ticket or token.
@@ -44,10 +46,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use std::{collections::HashMap, io, path::PathBuf};
 
-use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use futures::future::BoxFuture;
-use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use splitty_core::protocol::PROTOCOL_VERSION;
 use splitty_remote::bridge::{Ended, NativeBridge};
@@ -57,10 +56,10 @@ pub use splitty_remote::hosts::{HostOrder, HostPreference, PreferenceError};
 use splitty_remote::install::{Prepared, Server};
 use splitty_remote::ssh::{self, SshError, SshTarget};
 use splitty_remote::tunnel::PortReservation;
-use splitty_remote::tunnel::{migration_offer, update_plan, UpdatePlan, PREPARE_TIMEOUT};
+use splitty_remote::tunnel::{migration_offer, update_plan, UpdatePlan};
 use splitty_transport::{
     admission,
-    budget::{Charged, ConnectionBudget},
+    budget::Charged,
     peer::Incoming,
     wire::{self, Kind},
 };
@@ -85,17 +84,6 @@ pub const AUTO_FORWARD_CAPABILITY: &str = "hub-auto-forward-v1";
 /// Remembered Screens written per host and observations without pane counts
 /// (`remoteScreens.updateHost`, `hub.catalog.observe`).
 pub use splitty_core::native_api::HOST_STATE_CAPABILITY;
-
-/// The close code of a relaying socket whose host side ended. The client
-/// treats it like a dropped connection and reconnects.
-pub const HOST_LOST: u16 = 4001;
-
-/// The largest message a client may send: what one bridge frame carries.
-pub const MAX_MESSAGE: usize = wire::MAX_FRAME_BYTES - wire::HEADER_BYTES - wire::DELIVERY_BYTES;
-
-/// How many messages a client may send before `remote.ready`; they are
-/// relayed after it. A client that sends more is disconnected.
-const MAX_EARLY: usize = 64;
 
 /// How long the bridge may take to deliver the daemon's first message.
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -241,7 +229,7 @@ struct ReadyDaemon<'a> {
     started: bool,
 }
 
-/// A socket that reached the host: its bridge delivered the daemon's first
+/// A stream that reached the host: its bridge delivered the daemon's first
 /// message.
 struct Reached {
     target: SshTarget,
@@ -253,25 +241,6 @@ struct Reached {
     _metadata: splitty_transport::budget::Lease,
     _authentication: Arc<splitty_remote::askpass::Session>,
 }
-
-/// What became of a socket before its relay.
-enum Setup {
-    Reached(Box<Reached>),
-    Failed(HubError),
-    /// The client closed the socket, or it broke.
-    Gone,
-}
-
-/// How a relay ended.
-enum End {
-    /// The bridge's output ended, or the bridge stopped taking input.
-    Host,
-    /// The client closed the socket, or it broke.
-    Client,
-}
-
-type Sink = SplitSink<WebSocket, Message>;
-type Stream = SplitStream<WebSocket>;
 
 /// Coalesced passive invalidation. Receivers read current state after a signal.
 #[derive(Clone)]
@@ -623,154 +592,6 @@ impl Hub {
         self.reverses.forget(target, port).await
     }
 
-    /// Serve one upgraded `/ws/remote` socket for `target`, as the client
-    /// sent it, until either side ends. With `update`, a daemon of another
-    /// version is replaced by one of this version first.
-    pub async fn serve(&self, socket: WebSocket, target: String, update: bool) {
-        let (mut sink, mut stream) = socket.split();
-        let mut early = Vec::new();
-        let budget = ConnectionBudget::default();
-        match self
-            .setup(&target, update, &mut sink, &mut stream, &mut early, &budget)
-            .await
-        {
-            Setup::Gone => {}
-            Setup::Failed(error) => {
-                let Ok(failure) = error.failure_budgeted(&target, &budget) else {
-                    return;
-                };
-                tracing::info!(
-                    "remote screen hub: {target:?} failed ({}): {}",
-                    failure.code.as_str(),
-                    failure.message
-                );
-                if say(&mut sink, &HubMessage::Error(&failure), &budget).await {
-                    let _ = sink
-                        .send(Message::Close(Some(CloseFrame {
-                            code: close_code::NORMAL,
-                            reason: failure.code.as_str().into(),
-                        })))
-                        .await;
-                }
-            }
-            Setup::Reached(reached) => {
-                let Reached {
-                    target,
-                    bridge,
-                    first,
-                    daemon,
-                    update,
-                    screens,
-                    _metadata,
-                    _authentication,
-                } = *reached;
-                let ready = HubMessage::Ready {
-                    target: target.as_str(),
-                    daemon: ReadyDaemon {
-                        version: &daemon.version,
-                        protocol: daemon.protocol,
-                        keeps_sessions: daemon.keeps_sessions,
-                        started: daemon.started,
-                    },
-                    update,
-                    screens: &screens,
-                };
-                // Keep the attachment's cleanup inside this client lifetime.
-                if !say(&mut sink, &ready, &budget).await {
-                    let _ = bridge.finish().await;
-                    return;
-                }
-                tracing::info!(
-                    "remote screen hub: relaying {} (Splitty {}, protocol {})",
-                    target.as_str(),
-                    daemon.version,
-                    daemon.protocol
-                );
-                if let Err(error) = hosts::record_recent_if_visible(&self.config_dir, &target) {
-                    tracing::warn!(
-                        "remote screen hub: could not record {} as a recent host: {error}",
-                        target.as_str()
-                    );
-                }
-                self.observe_handshake(target.as_str(), &screens);
-                self.forwards.restore(target.as_str());
-                self.reverses.restore(target.as_str());
-                let mut ports = self.auto_forwards.watch(target.as_str());
-                let observe =
-                    |frame: &splitty_transport::codec::Frame| self.observe_ports(&mut ports, frame);
-                relay(target.as_str(), sink, stream, bridge, first, early, observe).await;
-            }
-        }
-    }
-
-    /// Reach the host while the client hears of each step. The client's
-    /// messages in the meantime are kept in `early`; closing the socket
-    /// cancels the setup, which ends every `ssh` it started.
-    async fn setup(
-        &self,
-        target: &str,
-        update: bool,
-        sink: &mut Sink,
-        stream: &mut Stream,
-        early: &mut Vec<Charged<Message>>,
-        budget: &ConnectionBudget,
-    ) -> Setup {
-        let target = match SshTarget::parse(target) {
-            Ok(target) => target,
-            Err(error) => return Setup::Failed(error.into()),
-        };
-        let (progress, mut reports) = mpsc::channel(8);
-        let context = splitty_transport::queue::Context::new(budget.clone());
-        let reach = self.reach(target, update, progress, &context);
-        tokio::pin!(reach);
-        let mut completed = false;
-        let deadline = tokio::time::Instant::now() + PREPARE_TIMEOUT;
-        let outcome = async {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(deadline) => return Setup::Failed(HubError::PreparationTimeout),
-                result = &mut reach => {
-                    completed = true;
-                    // Every step before the outcome.
-                    while let Ok(report) = reports.try_recv() {
-                        if !report_progress(sink, &report, budget).await {
-                            if let Ok(reached) = result { let _ = reached.bridge.finish().await; }
-                            return Setup::Gone;
-                        }
-                    }
-                    return match result {
-                        Ok(reached) => Setup::Reached(Box::new(reached)),
-                        Err(error) => Setup::Failed(error),
-                    };
-                }
-                Some(report) = reports.recv() => {
-                    if !report_progress(sink, &report, budget).await {
-                        return Setup::Gone;
-                    }
-                }
-                message = stream.next() => match message {
-                    Some(Ok(message @ (Message::Text(_) | Message::Binary(_))))
-                        if early.len() < MAX_EARLY =>
-                    {
-                        let size = match &message { Message::Text(text) => text.len(), Message::Binary(bytes) => bytes.len(), _ => 0 };
-                        let Ok(message) = budget.charge(size + wire::HEADER_BYTES, false, || message) else { return Setup::Gone; };
-                        early.push(message);
-                    }
-                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                    _ => return Setup::Gone,
-                },
-            }
-        }
-        }.await;
-        if !completed {
-            context.close();
-            if let Ok(reached) = reach.await {
-                let _ = reached.bridge.finish().await;
-            }
-        }
-        outcome
-    }
-
     /// Install, handshake, the update when asked for, protocol check and
     /// bridge, until the daemon's first message arrived through the bridge.
     async fn reach(
@@ -1098,177 +919,6 @@ fn bridge_failure(host: &str, ended: Ended) -> SshError {
                 stderr,
                 hint: None,
             }
-        }
-    }
-}
-
-/// Relay until either side ends, then end the other: a bridge whose host
-/// side ended closes the socket with [`HOST_LOST`], a closed socket ends the
-/// bridge.
-async fn relay(
-    host: &str,
-    mut sink: Sink,
-    mut stream: Stream,
-    bridge: NativeBridge,
-    first: Charged<Incoming>,
-    early: Vec<Charged<Message>>,
-    mut observe: impl FnMut(&splitty_transport::codec::Frame),
-) {
-    let to_host = bridge.sender();
-    let budget = to_host.context().budget.clone();
-    let mut bridge = bridge;
-    let downstream = async {
-        let mut frame = first;
-        loop {
-            observe(&frame.frame);
-            let message = match message_of(&frame, &budget) {
-                Ok(message) => message,
-                Err(error) => {
-                    tracing::warn!(%error, "invalid host session event");
-                    return End::Host;
-                }
-            };
-            let (message, _delivery) = message.into_parts();
-            if !matches!(
-                tokio::time::timeout(wire::LIVENESS_TIMEOUT, sink.send(message)).await,
-                Ok(Ok(()))
-            ) {
-                return End::Client;
-            }
-            // The host's receipt is credited only after browser delivery.
-            drop(frame);
-            frame = match bridge.recv().await {
-                Some(frame) => frame,
-                None => return End::Host,
-            };
-        }
-    };
-    let upstream = async {
-        for message in early {
-            if forward_message(&to_host, &message).is_err() {
-                return End::Host;
-            }
-        }
-        loop {
-            match stream.next().await {
-                Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => {
-                    if forward_message(&to_host, &message).is_err() {
-                        return End::Host;
-                    }
-                }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_)) | Err(_)) | None => return End::Client,
-            }
-        }
-    };
-    let end = tokio::select! { end = downstream => end, end = upstream => end };
-    to_host.close();
-    let (_, ended) = bridge.finish().await;
-    match end {
-        End::Host => {
-            let _ = tokio::time::timeout(
-                wire::HANDSHAKE_TIMEOUT,
-                sink.send(Message::Close(Some(CloseFrame {
-                    code: HOST_LOST,
-                    reason: "host connection lost".into(),
-                }))),
-            )
-            .await;
-            tracing::info!(
-                "remote screen hub: the connection to {host} ended ({})",
-                describe(&ended)
-            );
-        }
-        End::Client => {
-            let _ = tokio::time::timeout(wire::HANDSHAKE_TIMEOUT, sink.close()).await;
-        }
-    }
-}
-
-fn describe(ended: &Ended) -> String {
-    let status = match &ended.status {
-        Ok(status) => status.to_string(),
-        Err(error) => format!("not watched: {error}"),
-    };
-    if ended.stderr.is_empty() {
-        format!("ssh {status}")
-    } else {
-        format!("ssh {status}: {}", ended.stderr)
-    }
-}
-
-fn message_of(frame: &Incoming, budget: &ConnectionBudget) -> io::Result<Charged<Message>> {
-    let bytes = frame.frame.application()?.1;
-    match frame.frame.kind {
-        Kind::Text => {
-            let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
-            budget
-                .charge(bytes.len(), false, || Message::Text(text.to_owned().into()))
-                .map_err(io::Error::other)
-        }
-        Kind::Binary => budget
-            .charge(bytes.len(), false, || {
-                Message::Binary(bytes.to_vec().into())
-            })
-            .map_err(io::Error::other),
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "unexpected host session frame",
-        )),
-    }
-}
-
-fn forward_message(sender: &splitty_transport::peer::Sender, message: &Message) -> io::Result<()> {
-    match message {
-        Message::Text(text) => {
-            crate::service::catalog::validate_session(text.as_bytes(), &sender.context().budget)
-                .map_err(io::Error::other)?;
-            sender.data(Kind::Text, text.as_bytes())
-        }
-        Message::Binary(_) => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "binary client input is not a session operation",
-        )),
-        _ => Ok(()),
-    }
-}
-
-async fn report_progress(sink: &mut Sink, progress: &Progress, budget: &ConnectionBudget) -> bool {
-    say(
-        sink,
-        &HubMessage::Progress {
-            step: progress.step,
-            message: &progress.message,
-        },
-        budget,
-    )
-    .await
-}
-async fn say(sink: &mut Sink, message: &HubMessage<'_>, budget: &ConnectionBudget) -> bool {
-    let limit = wire::MAX_FRAME_BYTES - wire::HEADER_BYTES - wire::DELIVERY_BYTES;
-    let result = (|| {
-        let size = splitty_transport::codec::json_size(message, limit)?;
-        // JSON storage plus the WebSocket writer's encoded copy coexist until
-        // the physical send completes; neither is an unbounded hidden queue.
-        let storage = budget
-            .reserve(2 * size + wire::HEADER_BYTES, false)
-            .map_err(io::Error::other)?;
-        let bytes = splitty_transport::codec::json_bytes(message, limit)?;
-        let text = String::from_utf8(bytes).map_err(io::Error::other)?;
-        Ok::<_, io::Error>((text, storage))
-    })();
-    match result {
-        Ok((text, _storage)) => matches!(
-            tokio::time::timeout(
-                wire::HANDSHAKE_TIMEOUT,
-                sink.send(Message::Text(text.into()))
-            )
-            .await,
-            Ok(Ok(()))
-        ),
-        Err(error) => {
-            tracing::warn!("remote screen hub: cannot encode a message: {error}");
-            false
         }
     }
 }

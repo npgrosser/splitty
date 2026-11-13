@@ -15,7 +15,7 @@ const WAIT_PATH: &str = "/api/viewer/review/wait";
 
 /// Screen `s1` with the terminal `p1` and the viewer `v1` of PLAN.md, whose
 /// annotation #1 the user handed over.
-fn workspace(state: &AppState) {
+fn workspace(state: &TestState) {
     state
         .mux_store
         .dispatch(Op::CreateScreen {
@@ -184,7 +184,7 @@ async fn a_wait_ends_with_the_first_answer() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = serve(&host, dir.path()).await;
-    let control = crate::http::build_control_router(served.state.clone());
+    let control = crate::http::build_control_router(served.state.service.clone());
     let v1 = PaneId::from("v1");
     let mut a = window(&served).await;
     let mut b = window(&served).await;
@@ -300,7 +300,7 @@ async fn a_wait_ends_with_its_caller_or_its_pane() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = serve(&host, dir.path()).await;
-    let control = crate::http::build_control_router(served.state.clone());
+    let control = crate::http::build_control_router(served.state.service.clone());
     let v1 = PaneId::from("v1");
     let reviews = served.state.client_state.reviews.clone();
     let mut window = window(&served).await;
@@ -414,7 +414,7 @@ async fn a_wait_on_a_replaced_text_is_refused() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = serve(&host, dir.path()).await;
-    let control = crate::http::build_control_router(served.state.clone());
+    let control = crate::http::build_control_router(served.state.service.clone());
     let reviews = served.state.client_state.reviews.clone();
     let show = |text: &str| {
         json!({"screenId": "s1", "op": {
@@ -473,7 +473,7 @@ async fn an_agents_reply_nudges_every_window() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = serve(&host, dir.path()).await;
-    let control = crate::http::build_control_router(served.state.clone());
+    let control = crate::http::build_control_router(served.state.service.clone());
     let mut a = window(&served).await;
     let mut b = window(&served).await;
     let body = json!({

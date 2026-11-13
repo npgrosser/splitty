@@ -12,7 +12,7 @@ async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_in
     let dir = tempfile::tempdir().unwrap();
     let mut state = state(ADDR, dir.path());
     Arc::make_mut(&mut state.service).server_mode = "daemon".into();
-    let owner = crate::http::build_control_router(state.clone());
+    let owner = crate::http::build_control_router(state.service.clone());
     let request = |instance: &str| {
         axum::http::Request::builder()
             .method("POST")
@@ -58,7 +58,7 @@ async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_in
 }
 
 async fn framed(
-    state: &AppState,
+    state: &TestState,
     role: Role,
 ) -> (
     splitty_transport::peer::Peer,
@@ -496,7 +496,7 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
             "seed {operation:?}: {response:?}"
         );
     }
-    async fn management_state(state: &AppState) -> Vec<(&'static str, (StatusCode, Value))> {
+    async fn management_state(state: &TestState) -> Vec<(&'static str, (StatusCode, Value))> {
         let mut snapshot = Vec::new();
         for operation in crate::service::catalog::OPERATIONS.iter().filter(|entry| {
             entry.scope == crate::service::catalog::Scope::LocalHub && entry.method == "GET"
@@ -853,7 +853,7 @@ async fn an_immediate_abort_cannot_be_lost_when_control_overtakes_the_request() 
 }
 
 pub(super) async fn native(
-    state: &AppState,
+    state: &TestState,
     operation: Operation,
     args: Value,
 ) -> (StatusCode, Value) {
@@ -1057,11 +1057,11 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
         "queries must not establish SSH connections"
     );
 
-    let other = AppState {
+    let other = TestState {
         listen_addr: "127.0.0.1:1".into(),
         ..state.clone()
     };
-    let owner = crate::http::build_control_router(other);
+    let owner = crate::http::build_control_router(other.service);
     assert_eq!(
         exchange(
             &owner,
@@ -1111,7 +1111,7 @@ async fn native_mutations_are_visible_to_cli_without_exposing_scratchpads() {
             .0,
         StatusCode::OK
     );
-    let owner = crate::http::build_control_router(state.clone());
+    let owner = crate::http::build_control_router(state.service.clone());
     let (_, screen) = exchange(
         &owner,
         Request::get("/api/mux/screen/shared")
@@ -1186,14 +1186,14 @@ async fn relative_screen_placement_matches_native_and_control_decoders() {
         .0,
         StatusCode::OK
     );
-    let control = crate::http::build_control_router(control_state.clone());
+    let control = crate::http::build_control_router(control_state.service.clone());
     assert_eq!(
         exchange(&control, api("POST", "/api/mux/op", Some(&request)))
             .await
             .0,
         StatusCode::OK
     );
-    let order = |service: &AppState| {
+    let order = |service: &TestState| {
         service
             .mux_store
             .get_workspace_state()
@@ -1432,7 +1432,7 @@ async fn a_native_reverse_request_cannot_share_a_fresh_browser_gateway() {
         .await
         .expect("second gateway listener");
     let other_address = other_listener.local_addr().expect("address");
-    let _other_gateway = browser_router(&AppState {
+    let _other_gateway = browser_router(&TestState {
         listen_addr: other_address.to_string(),
         ..served.state.clone()
     });
@@ -1896,7 +1896,7 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
             .unwrap();
     }
     let browser = browser_router(&state);
-    let owner = crate::http::build_control_router(state.clone());
+    let owner = crate::http::build_control_router(state.service.clone());
     let (mut peer, task) = framed(&state, Role::Remote).await;
     for (id, screen_id, expected) in [(1, "screen", 200), (2, "missing", 404), (3, "empty", 400)] {
         let body = json!({"screenId":screen_id,"name":"Saved","root":"/project"});

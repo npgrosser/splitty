@@ -3,7 +3,7 @@ use crate::jobs::Actor;
 use splitty_core::ids::{AgentId, JobId};
 use splitty_core::pty::testing::{pty_available, wait_until};
 
-fn job_state(dir: &Path) -> AppState {
+fn job_state(dir: &Path) -> TestState {
     let mut state = state(ADDR, dir);
     let old = &state.client_state;
     let events = splitty_core::protocol::notify::NotificationBus::default();
@@ -43,7 +43,7 @@ async fn managed_jobs_routes_enforce_transport_scope_and_payload_bounds() {
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
     let tcp = browser_router(&state);
-    let owner = super::super::build_control_router(state.clone());
+    let owner = super::super::build_control_router(state.service.clone());
     let (status, grant) = call(
         &owner,
         "POST",
@@ -212,7 +212,7 @@ async fn managed_job_spawn_events_and_mux_queries_use_actual_ids_and_outcomes() 
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let app = super::super::build_control_router(state.clone());
+    let app = super::super::build_control_router(state.service.clone());
     let (_, ordinary) = call(
         &app,
         "POST",
@@ -427,7 +427,7 @@ async fn invalid_launches_and_rejected_closes_have_no_effects() {
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let app = super::super::build_control_router(state.clone());
+    let app = super::super::build_control_router(state.service.clone());
     let base = launch(dir.path(), "read line");
     for (field, value) in [
         ("argv", json!([])),
@@ -513,7 +513,7 @@ async fn log_handlers_page_independently_report_loss_and_keep_draining_output() 
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let app = super::super::build_control_router(state.clone());
+    let app = super::super::build_control_router(state.service.clone());
     let (_,job)=call(&app,"POST","/api/jobs",Some(&launch(dir.path(),"stty -echo; printf READY; read line; head -c 1100000 /dev/zero | tr '\\000' x; printf '\\nTAIL\\n'; read line"))).await;
     let id = job["jobId"].as_str().expect("id");
     let url = format!("/api/jobs/{id}/logs");
@@ -590,7 +590,7 @@ async fn grants_filter_every_route_and_anchors_never_grant_terminal_access() {
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let app = super::super::build_control_router(state.clone());
+    let app = super::super::build_control_router(state.service.clone());
     let (_, anchor) = call(
         &app,
         "POST",
@@ -736,7 +736,7 @@ async fn disconnected_router_reads_release_quota_without_stopping_the_job() {
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let app = super::super::build_control_router(state.clone());
+    let app = super::super::build_control_router(state.service.clone());
     let (_, job) = call(
         &app,
         "POST",
@@ -797,7 +797,7 @@ async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allo
         .as_array()
         .expect("capabilities")
         .contains(&json!("managed-jobs-v1")));
-    let owner = super::super::build_control_router(served.state.clone());
+    let owner = super::super::build_control_router(served.state.service.clone());
     assert_eq!(
         call(&owner, "GET", "/api/mux/status", None).await.1["capabilities"],
         json!(["managed-jobs-v1"])

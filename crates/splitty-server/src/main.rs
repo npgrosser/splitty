@@ -7,9 +7,9 @@
 //!   `--forward`, to ports of the host), with text or (`--json`) one JSON event
 //!   per line for the desktop shells.
 //!
-//! Handles token resolution (flag, token file, or random one-shot), constructs the
-//! shared `AppState`, wires up the PTY manager, notification engine, and mux store,
-//! then launches the Axum HTTP server with graceful shutdown on Ctrl+C.
+//! Handles token resolution (flag, token file, or random one-shot), builds the
+//! terminal service, its control socket and, for `serve`, the browser gateway
+//! with graceful shutdown on Ctrl+C.
 
 use splitty_server::{cli, control, http};
 
@@ -2094,14 +2094,6 @@ async fn run_daemon(lock_fd: i32) {
     );
     let pty_manager = runtime.pty;
     let service = runtime.state;
-    // The owner-control adapter has no HTTP listener or browser credentials.
-    let state = http::AppState {
-        service: service.clone(),
-        token: String::new(),
-        listen_addr: String::new(),
-        sessions: Arc::new(http::session::SessionStore::new()),
-        allowed_origins: Arc::new(Vec::new()),
-    };
 
     // Sessions on the adopted keepers, with their buffered output, before any
     // client can attach. A keeper the workspace does not know becomes a
@@ -2124,11 +2116,12 @@ async fn run_daemon(lock_fd: i32) {
             tracing::warn!(%session, "cannot adopt a kept session: {e}");
         }
     }
-    state.client_state.jobs.resume_adopted();
+    service.client_state.jobs.resume_adopted();
 
     // The daemon is the case where the control socket matters most: it is
     // the long-lived server the in-shell CLI discovers through daemon.json.
-    let control_task = control::spawn_at(state.clone(), control_path.clone());
+    // The owner-control adapter has no HTTP listener or browser credentials.
+    let control_task = control::spawn_at(service.clone(), control_path.clone());
 
     let info = daemon::DaemonInfo {
         pid: std::process::id(),
@@ -2170,8 +2163,8 @@ async fn run_daemon(lock_fd: i32) {
         }
     }
 
-    let mux_store = state.mux_store.clone();
-    let jobs = state.client_state.jobs.clone();
+    let mux_store = service.mux_store.clone();
+    let jobs = service.client_state.jobs.clone();
     if let Err(e) = daemon::write_info(&info) {
         jobs.release().await;
         if let Err(error) = pty_manager.shutdown(true).await {
@@ -2380,14 +2373,7 @@ async fn serve_embedded_gateway(
         Arc::new(splitty_core::pty::terminal::LocalTerminals),
         &control::socket_path(),
     );
-    let state = http::AppState {
-        service: runtime.state.clone(),
-        token: String::new(),
-        sessions: Arc::new(http::session::SessionStore::new()),
-        listen_addr: String::new(),
-        allowed_origins: Arc::new(Vec::new()),
-    };
-    let control_task = control::spawn(state);
+    let control_task = control::spawn(runtime.state.clone());
     let backend = http::gateway::Backend::embedded(runtime.state.clone());
     let bootstrap = browser.sessions.issue_bootstrap();
     let url = format!("http://{address}/?bootstrap={bootstrap}&desktop=1");

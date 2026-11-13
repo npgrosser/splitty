@@ -1,7 +1,8 @@
-//! In-process tests of the router: the remote screen hub's routes through the
-//! real middleware and handlers. The host is scripted (`hub::testing`), its
-//! bridge a local `sh`, so the relay runs over real pipes; the WebSocket tests
-//! serve the router on a loopback port of their own.
+//! In-process tests of the browser gateway and the control socket: the
+//! `/api` routes through the gateway's guards and the native operations of an
+//! in-process service, as `serve` composes them. The host is scripted
+//! (`hub::testing`), its bridge a local `sh`, so the relay runs over real
+//! pipes; the WebSocket tests serve the gateway on a loopback port of their own.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
@@ -21,10 +22,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tower::ServiceExt;
 
-use super::{allowed_origins, routes, session::SessionStore, AppState};
+use super::{session::SessionStore, BrowserState};
 use crate::client_session::ports::{PortWatch, Scan};
 use crate::hub::testing::{free_port, Prepare, ScriptedHost, WELCOME};
-use crate::hub::{Hub, HOST_LOST, VERSION};
+use crate::hub::{Hub, VERSION};
+
+/// The close code of a browser socket whose host side ended; the client
+/// reconnects.
+const HOST_LOST: u16 = 4001;
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -43,14 +48,54 @@ mod reviews;
 mod scratchpad;
 mod viewer;
 
+/// The service `serve` builds and the browser credentials of its gateway.
+#[derive(Clone)]
+pub(super) struct TestState {
+    /// The process token, for requests as the CLI sends them.
+    pub token: String,
+    pub sessions: Arc<SessionStore>,
+    pub allowed_origins: Arc<Vec<String>>,
+    pub service: Arc<crate::service::State>,
+    /// The gateway's address, for its Host, origin and CSP checks.
+    pub listen_addr: String,
+}
+
+impl std::ops::Deref for TestState {
+    type Target = crate::service::State;
+
+    fn deref(&self) -> &Self::Target {
+        &self.service
+    }
+}
+
+impl axum::extract::FromRef<TestState> for BrowserState {
+    fn from_ref(state: &TestState) -> Self {
+        Self {
+            token: state.token.clone(),
+            sessions: state.sessions.clone(),
+            allowed_origins: state.allowed_origins.clone(),
+            listen_addr: state.listen_addr.clone(),
+        }
+    }
+}
+
+/// The origins of a gateway on `listen_addr`, as `BrowserState::new` derives
+/// them from the address bound.
+fn allowed_origins(listen_addr: &str) -> Vec<String> {
+    listen_addr
+        .parse::<std::net::SocketAddr>()
+        .map(super::canonical_origins)
+        .unwrap_or_default()
+}
+
 /// The state `serve` builds, for a server on `listen_addr` with its files in
 /// `dir`.
-pub(super) fn state(listen_addr: &str, dir: &Path) -> AppState {
+pub(super) fn state(listen_addr: &str, dir: &Path) -> TestState {
     state_with(listen_addr, dir, None)
 }
 
 /// [`state`], with the listening ports found by `ports` when given.
-fn state_with(listen_addr: &str, dir: &Path, ports: Option<PortWatch>) -> AppState {
+fn state_with(listen_addr: &str, dir: &Path, ports: Option<PortWatch>) -> TestState {
     state_on(
         listen_addr,
         dir,
@@ -65,7 +110,7 @@ fn state_on(
     dir: &Path,
     ports: Option<PortWatch>,
     terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
-) -> AppState {
+) -> TestState {
     use splitty_core::mux::effect_runner::{EffectRunner, EnvContext};
 
     let shell_profiles = Arc::new(RwLock::new(
@@ -93,7 +138,7 @@ fn state_on(
         client_state = client_state.with_ports(ports);
     }
     let client_state = Arc::new(client_state);
-    AppState {
+    TestState {
         token: "process-token".to_owned(),
         sessions: Arc::new(SessionStore::new()),
         allowed_origins: Arc::new(allowed_origins(listen_addr)),
@@ -136,7 +181,7 @@ fn command_opts(id: &str, script: &str) -> splitty_core::pty::CreateSessionOpts 
 
 /// The browser gateway `serve` builds, with the hub given: every `/api`
 /// route becomes a native request to the in-process service of `state`.
-fn router(state: &AppState, hub: Hub) -> axum::Router {
+fn router(state: &TestState, hub: Hub) -> axum::Router {
     let mut state = state.clone();
     Arc::make_mut(&mut state.service).hub = Arc::new(hub);
     browser_router(&state)
@@ -144,7 +189,7 @@ fn router(state: &AppState, hub: Hub) -> axum::Router {
 
 /// The browser gateway `serve` builds over the service of `state`, with the
 /// browser credentials of `state`.
-fn browser_router(state: &AppState) -> axum::Router {
+fn browser_router(state: &TestState) -> axum::Router {
     super::gateway::router(
         super::gateway::Backend::embedded(state.service.clone()),
         axum::extract::FromRef::from_ref(state),
@@ -238,7 +283,7 @@ async fn the_hub_refuses_an_upgrade_before_it_reaches_a_host() {
 #[tokio::test]
 async fn the_hubs_routes_are_not_on_the_control_socket() {
     let dir = tempfile::tempdir().expect("dir");
-    let control = super::build_control_router(state(ADDR, dir.path()));
+    let control = super::build_control_router(state(ADDR, dir.path()).service);
     for (method, path) in [
         ("GET", "/ws/remote?target=vm1"),
         ("GET", "/ws/remote?target=vm1&update=1"),
@@ -687,10 +732,7 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
     broken
         .headers_mut()
         .insert("content-type", "application/json".parse().expect("header"));
-    assert_eq!(
-        status(&app, broken).await,
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
+    assert_eq!(status(&app, broken).await, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(
         status(&app, api("PUT", CATALOG, None)).await,
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -1222,7 +1264,7 @@ impl Socket {
 struct Served {
     hub: Arc<Hub>,
     port: u16,
-    state: AppState,
+    state: TestState,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -1232,7 +1274,7 @@ impl Served {
     }
 
     /// Serve the state `state_of` builds for the address bound.
-    async fn start_with(hub: Hub, state_of: impl FnOnce(&str) -> AppState) -> Self {
+    async fn start_with(hub: Hub, state_of: impl FnOnce(&str) -> TestState) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -1241,15 +1283,14 @@ impl Served {
 
     async fn start_on(
         hub: Hub,
-        state_of: impl FnOnce(&str) -> AppState,
+        state_of: impl FnOnce(&str) -> TestState,
         listener: tokio::net::TcpListener,
     ) -> Self {
         let addr = listener.local_addr().expect("address");
         let mut state = state_of(&addr.to_string());
         let hub = Arc::new(hub);
         Arc::make_mut(&mut state.service).hub = hub.clone();
-        let mut browser =
-            super::BrowserState::new(addr, state.token.clone()).expect("browser origin");
+        let mut browser = BrowserState::new(addr, state.token.clone()).expect("browser origin");
         browser.sessions = state.sessions.clone();
         let app = super::gateway::router(
             super::gateway::Backend::embedded(state.service.clone()),
@@ -2936,17 +2977,18 @@ async fn forward_preferences_return_json_for_malformed_json() {
 /// control-api, Build Info: the WSL distribution only when the server runs in one.
 #[test]
 fn build_info_names_the_wsl_distribution_only_inside_wsl() {
-    let plain = routes::build_body("0.1.0", "abc", "unknown", None);
+    let plain = crate::service::operations::build_body("0.1.0", "abc", "unknown", None);
     assert_eq!(
         plain,
         json!({"version": "0.1.0", "commit": "abc", "buildTime": "unknown"})
     );
     assert_eq!(
-        routes::build_body("0.1.0", "abc", "unknown", Some("")),
+        crate::service::operations::build_body("0.1.0", "abc", "unknown", Some("")),
         plain
     );
     assert_eq!(
-        routes::build_body("0.1.0", "abc", "unknown", Some("Ubuntu"))["wslDistro"],
+        crate::service::operations::build_body("0.1.0", "abc", "unknown", Some("Ubuntu"))
+            ["wslDistro"],
         "Ubuntu"
     );
 }

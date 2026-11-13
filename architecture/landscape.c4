@@ -88,7 +88,7 @@ model {
   splitty.web -> splitty.server.http 'loads the app, signs in with a bootstrap code, calls the API, including passive forward preferences and explicit forward/Stop intents' {
     technology 'HTTP'
   }
-  splitty.web -> splitty.server.ws 'session and mux protocols' {
+  splitty.web -> splitty.server.http 'session and mux protocols, and host screens through /ws/remote, translated into native connections' {
     technology 'WebSocket'
   }
   splitty.desktop -> splitty.web 'shows'

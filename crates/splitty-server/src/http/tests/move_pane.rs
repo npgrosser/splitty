@@ -23,7 +23,7 @@ async fn message_type(socket: &mut Socket, expected: &str) -> serde_json::Value 
 }
 
 /// The state `serve` builds, with the detected shell profiles, so panes start shells.
-fn shell_state(addr: &str, dir: &Path) -> AppState {
+fn shell_state(addr: &str, dir: &Path) -> TestState {
     let state = state(addr, dir);
     *state.shell_profiles.write().expect("profiles") =
         splitty_core::shell_profiles::state_from_settings(&Default::default());
@@ -63,7 +63,7 @@ async fn a_cli_move_nudges_both_screens_and_a_moved_shell_still_splits() {
     let served =
         Served::start_with(hub(&host, dir.path()), |addr| shell_state(addr, dir.path())).await;
     // The CLI's own gateway over the same service.
-    let cli = AppState {
+    let cli = TestState {
         listen_addr: ADDR.into(),
         allowed_origins: Arc::new(allowed_origins(ADDR)),
         ..served.state.clone()
@@ -113,7 +113,7 @@ async fn an_owner_placement_follows_a_moved_pane_and_an_agent_anchor_does_not() 
 
     let launch = |placement: serde_json::Value| json!({"requestId":JobId::new(),"argv":["/bin/sh","-c","read line"],"cwd":dir.path(),"placement":placement,"background":true});
     let owner = launch(json!({"kind":"tab","screenId":"s1","paneId":"p3"}));
-    let control = super::super::build_control_router(state.clone());
+    let control = super::super::build_control_router(state.service.clone());
     let (code, job) = exchange(&control, api("POST", "/api/jobs", Some(&owner))).await;
     assert_eq!(code, StatusCode::CREATED, "{job}");
     assert_eq!(job["screenId"], "s2");
@@ -222,7 +222,7 @@ async fn exact_tab_placement_via_control_preserves_records_and_rejects_stale_sou
     let body = json!({"screenId":"screen", "op":{
         "type":"move_tab", "paneId":"p2", "sourceSlotId":source, "targetSlotId":target, "beforePaneId":"p1"
     }});
-    let control = super::super::build_control_router(state.clone());
+    let control = super::super::build_control_router(state.service.clone());
     let (code, reply) = exchange(&control, api("POST", "/api/mux/op", Some(&body))).await;
     assert_eq!(code, StatusCode::OK, "{reply}");
     let after = state.mux_store.get_screen(&screen_id).expect("screen");

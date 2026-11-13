@@ -9,14 +9,14 @@ model {
 
 
     main = component 'main' {
-      description 'Entry point and composition root of the splitty binary (main.rs): the clap command line, serve, daemon start/stop (--end-sessions)/restart/status and the internal daemon run with the adoption of kept sessions, the session-keeper subcommand before the runtime starts, connect (text, or JSON events with --json) and remote-hosts, and control commands with safely rendered process metadata, including confirmed client editor requests and file downloads to a window. Wires the PTY manager, dispatcher, notification engine, effect runner, store, WebSocket and HTTP state and the control socket.'
+      description 'Entry point and composition root of the splitty binary (main.rs): the clap command line, serve, daemon start/stop (--end-sessions)/restart/status and the internal daemon run with the adoption of kept sessions, the session-keeper subcommand before the runtime starts, connect (text, or JSON events with --json) and remote-hosts, and control commands with safely rendered process metadata, including confirmed client editor requests and file downloads to a window. Wires the PTY manager, dispatcher, notification engine, effect runner, store, the browser gateway and the control socket.'
       metadata {
         module 'splitty'
       }
     }
 
     http = component 'http' {
-      description 'Axum router and AppState: loopback, Host, Origin and Fetch Metadata guards, authentication, browser sessions and bootstrap codes, the REST and control API, guarded saved-forward metadata and explicit forwarding intents, the WebSocket upgrades (/ws, and /ws/remote handed to the hub after the same checks), the embedded app, the control-socket router and bounded editor open endpoint.'
+      description 'The explicit browser gateway and the control-socket router. The gateway: exact Host, Origin and Fetch Metadata guards, authentication, browser sessions and bootstrap codes, the /api routes derived from the native operation catalog and sent as native requests to its one assigned backend, the WebSocket upgrades (/ws as a native client connection, /ws/remote as a native host stream of the backend\'s hub, after the same checks), and the embedded app with its security headers. The control-socket router (ControlState, the service only): the narrow CLI subset, job routes and grant administration, and the bounded editor open endpoint.'
       metadata {
         module 'splitty_server::http'
       }
@@ -39,14 +39,8 @@ model {
       }
     }
 
-    ws = component 'ws' {
-      description 'WebSocket carrier: translates text/binary/control frames to the common client loop, with independent identity and cleanup for every upgraded browser connection.'
-      metadata { module 'splitty_server::ws' spec 'mux-protocol' }
-    }
-
     client_session -> hub 'Passive change feed, validated catalog observations and the hub-auto-forward-v1 capability'
     client_session -> splitty.remote.ssh_askpass 'Change feed and pending questions, announced to local hub connections'
-    ws -> client_session 'One common service connection per WebSocket'
     native -> service 'Validated operation catalog, shared dispatch and bounded response serialization'
     native -> hub 'Owner-endpoint host streams use the same assigned service hub and forwarding lifetime'
     native -> splitty.remote.ssh 'Validate an explicit host-open intent before preparing SSH'
@@ -65,7 +59,6 @@ model {
     native -> splitty.transport.wire 'Explicit request, reply and session frame envelopes'
     service -> splitty.transport.budget 'Retain decoded session objects and response capacity'
     service -> splitty.transport.wire 'Maximum serialized response size'
-    http -> ws 'Authenticated WebSocket upgrade'
     main -> splitty.transport.admission 'Trusted quota keys for the explicit SSH browser gateway'
     main -> splitty.transport.negotiation 'Recognize stale daemon discovery during browser gateway recovery'
     main -> hub 'Own and stop the deliberately requested development forwards'
@@ -115,7 +108,7 @@ model {
     }
 
     hub = component 'hub' {
-      description 'The remote screen hub (/ws/remote, /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each socket its own ssh connections, carrying only stdio, which install the server, run the port-free format-2 handshake with --ensure-daemon, with one-shot update=1 conditionally stop only a checked older native daemon through its owner socket or a positively verified legacy Linux daemon through remote-migrate, then refresh discovery, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; remote.progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a bounded native relay with independent delivery credit; native host streams carry the same prelude after verified host-purpose admission, closed with 4001 when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. hub::auto_forward implements remote.autoForwardPorts (hub-auto-forward-v1): it reads only the ports.changed the relays carry, takes each relay\'s first list as a baseline and opens a port that appears as an automatic request once for all relays of the host, skipping ports with a forward, a paused rule or a scheduled open. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError. hub::reverse shares local ports with hosts on request (/api/remote/reverse-forwards, /api/remote/reverse-forward-preferences): one relay-only ssh -R to a Unix socket in the host\'s relay directory plus remote-relay serve each, Linux hosts only, never the server\'s own port, the same lanes, supervision, limits and opt-in restore after remote.ready as forwards, saved in remote-reverse-forwards.json. Optional enabled metadata and preserveRestore opening retain legacy defaults while allowing native restore consent to remain independent of live tunnel state.'
+      description 'The remote screen hub (native host streams, also the one the browser gateway opens for /ws/remote; /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each stream its own ssh connections, carrying only stdio, which install the server, run the port-free format-2 handshake with --ensure-daemon, with one-shot update=1 conditionally stop only a checked older native daemon through its owner socket or a positively verified legacy Linux daemon through remote-migrate, then refresh discovery, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; after verified host-purpose admission, preparation progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a bounded native relay with independent delivery credit that ends when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. hub::auto_forward implements remote.autoForwardPorts (hub-auto-forward-v1): it reads only the ports.changed the relays carry, takes each relay\'s first list as a baseline and opens a port that appears as an automatic request once for all relays of the host, skipping ports with a forward, a paused rule or a scheduled open. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError. hub::reverse shares local ports with hosts on request (/api/remote/reverse-forwards, /api/remote/reverse-forward-preferences): one relay-only ssh -R to a Unix socket in the host\'s relay directory plus remote-relay serve each, Linux hosts only, never the server\'s own port, the same lanes, supervision, limits and opt-in restore after remote.ready as forwards, saved in remote-reverse-forwards.json. Optional enabled metadata and preserveRestore opening retain legacy defaults while allowing native restore consent to remain independent of live tunnel state.'
       metadata {
         module 'splitty_server::hub'
         spec 'remote-screens'
@@ -161,21 +154,21 @@ model {
     control -> splitty.core.ids 'AgentId'
 
     http -> embed 'FrontendAssets, themed_index_html'
-    http -> client_session 'WebSocket upgrade, WsState; PortWatch in tests'
-    http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, reserve_local_port, open_reverse, reverses, stop_reverse, reverse_preferences, save_reverse, forget_reverse, ForwardError, Code, MAX_MESSAGE; a scripted host, its fixture ports, HOST_LOST and VERSION in tests'
-    control -> http 'AppState, build_control_router'
+    http -> client_session 'Native client connections, PortWatch and review limits in tests'
+    http -> hub 'Hub, a scripted host, its fixture ports, forwards, reverse forwards and VERSION in tests'
+    control -> http 'build_control_router'
     control -> service 'Compose owner control without browser credentials'
 
     // Into the core
 
     http -> splitty.core.auth 'token validation, single-use codes'
-    http -> splitty.core.config 'HomeConfig, ServerConfig, save, update'
+    http -> splitty.core.config 'HomeConfig, ServerConfig in tests'
     http -> splitty.core.ids 'ids'
-    http -> splitty.core.mux 'Store, ScreenOp, Direction, Effect'
-    http -> splitty.core.native_api 'Check shared directory response conformance for HTTP and native requests'
-    http -> splitty.core.protocol 'ClientCommand, ServerEvent, SizeConfig (settings updates); sizing types in tests'
-    http -> splitty.core.shell_profiles 'ShellProfilesState, detection, updates'
-    http -> splitty.core.template 'TemplateStore, FileStore, Template'
+    http -> splitty.core.mux 'JobLaunch; Store, ops and EffectRunner in tests'
+    http -> splitty.core.native_api 'Check shared directory response conformance for gateway and native requests'
+    http -> splitty.core.protocol 'Protocol version, notifications and sizing types in tests'
+    http -> splitty.core.shell_profiles 'ShellProfilesState and detection in tests'
+    http -> splitty.core.template 'FileStore in tests'
     http -> splitty.core.effect_runner 'EffectRunner, EnvContext in tests'
     http -> splitty.core.pty 'pty::manager::Manager, ListeningPort and CreateSessionOpts in tests'
     client_session -> splitty.core.ids 'ids'
@@ -234,9 +227,8 @@ model {
     hub -> splitty.remote.hosts 'known, record_recent_if_visible, preferences, update_preference, host_order, set_host_order, forget_locked, lock, default_ssh_dir, write_private (atomic private catalog/screens/forward preferences)'
     hub -> splitty.remote.tunnel 'PortReservation, reserve, reserve_exact, check_forward_address, backoff, PortTunnel, PortTunnelError, ReverseTunnel, ReverseTunnelError, prepare_command, parse_prepared'
     hub -> native 'Fixed-host input validation and bounded preparation over native pipes'
-    hub -> service 'Validate relayed session operations before forwarding'
     hub -> splitty.transport.admission 'Reserve process, domain and host capacity before setup'
-    hub -> splitty.transport.budget 'Hold browser relay and early-message bytes through delivery'
+    hub -> splitty.transport.budget 'Charged progress, metadata and relayed frames through delivery'
     hub -> splitty.transport.codec 'Bounded preparation and native failure frames; relayed host frames read for ports.changed'
     hub -> splitty.transport.negotiation 'Verify fixed-host service purpose before admission'
     hub -> splitty.transport.peer 'Independent native host stream, ordered relay and credits'
@@ -253,7 +245,7 @@ model {
 
     main -> splitty.remote.ssh_askpass 'Run the authenticated browser SSH prompt helper before CLI startup'
     service -> splitty.remote.ssh_askpass 'Enable SSH questions and serve the shared prompt operations'
-    http -> splitty.remote.ssh_askpass 'Expose authenticated local browser prompt reads and one-use answers'
+    http -> splitty.remote.ssh_askpass 'Scripted SSH questions in the native and gateway conformance tests'
     main -> splitty.remote.ssh 'SshTarget, Ssh'
     main -> splitty.remote.install 'payload_for'
     main -> splitty.remote.tunnel 'open, supervise, GIVE_UP_AFTER, ConnectEvent'
@@ -264,7 +256,7 @@ model {
 
     main -> cli 'discover, api calls'
     main -> control 'socket_path, spawn'
-    main -> http 'AppState, routers'
+    main -> http 'BrowserState, the gateway router and its backends'
     main -> service 'Explicit embedded or persistent runtime construction'
     main -> native 'Private instance-lock inheritance, daemon socket binding/accept loop and owned desktop child pipes'
     main -> splitty.transport.wire 'Native discovery transport version'

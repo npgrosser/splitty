@@ -15,7 +15,7 @@ struct Native {
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
 impl Native {
-    async fn start(state: &AppState, path: &Path) -> Self {
+    async fn start(state: &TestState, path: &Path) -> Self {
         std::fs::set_permissions(
             path.parent().unwrap(),
             std::fs::Permissions::from_mode(0o700),
@@ -37,7 +37,7 @@ impl Native {
     }
 }
 
-fn discovery(state: &AppState, path: &Path) -> DaemonInfo {
+fn discovery(state: &TestState, path: &Path) -> DaemonInfo {
     DaemonInfo {
         pid: std::process::id(),
         format: Some(2),
@@ -1253,7 +1253,7 @@ async fn fake_api_peer(
         .unwrap();
     Peer::start(read, write, &ready, context)
 }
-fn fake_api_listener(state: &AppState, path: &Path) -> (tokio::net::UnixListener, DaemonInfo) {
+fn fake_api_listener(state: &TestState, path: &Path) -> (tokio::net::UnixListener, DaemonInfo) {
     std::fs::set_permissions(
         path.parent().unwrap(),
         std::fs::Permissions::from_mode(0o700),

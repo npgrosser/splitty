@@ -1,9 +1,9 @@
-//! Axum middleware for authentication, origin enforcement and the localhost guard.
+//! Axum middleware of the browser gateway for authentication and origin
+//! enforcement. The gateway's own Host guard admits only the address it bound.
 //!
 //! - `require_token` — accepts an `HttpOnly` session cookie or a `Bearer` token.
 //! - `require_origin` — rejects cross-origin browser requests, including ones
 //!   from other loopback ports (`Origin` plus Fetch Metadata).
-//! - `require_localhost` — rejects requests whose Host header is not loopback.
 
 use axum::{
     extract::{Request, State},
@@ -191,54 +191,6 @@ pub fn fetch_site_allowed(request: &Request) -> bool {
     match request.headers().get("sec-fetch-site") {
         None => true,
         Some(value) => value.as_bytes() == b"same-origin",
-    }
-}
-
-/// Localhost-only middleware. Rejects requests whose `Host` header is not a
-/// loopback name.
-///
-/// This is a **DNS-rebinding guard, not a binding control** (security review
-/// SR-07). It only inspects a header the client chose to send, so a
-/// raw network client can trivially set `Host: localhost`. What actually keeps
-/// the service off the network is the loopback bind invariant enforced at
-/// startup; do not document or rely on this function as if it replaced that.
-pub async fn require_localhost(request: Request, next: Next) -> Response {
-    let host = request
-        .headers()
-        .get("host")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("");
-
-    // Strip port if present
-    let host = if let Some(idx) = host.rfind(':') {
-        // Check if this is an IPv6 address like [::1]:3000
-        if host.starts_with('[') {
-            // IPv6 with port: [::1]:3000
-            if let Some(bracket_end) = host.find(']') {
-                if idx > bracket_end {
-                    &host[..idx]
-                } else {
-                    host
-                }
-            } else {
-                host
-            }
-        } else {
-            &host[..idx]
-        }
-    } else {
-        host
-    };
-
-    // Strip brackets from IPv6
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-
-    // An empty Host used to be accepted. Nothing legitimate produces one here —
-    // HTTP/1.1 requires the header and browsers never omit it — so it is now
-    // rejected rather than treated as loopback.
-    match host {
-        "localhost" | "127.0.0.1" | "::1" => next.run(request).await,
-        _ => (StatusCode::FORBIDDEN, "Forbidden").into_response(),
     }
 }
 

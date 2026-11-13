@@ -16,7 +16,7 @@ const ANNOTATION: &str = "ann-0123456789abcdef";
 /// Screen `s1` with the terminal `p1` and the viewer `v1`, which holds one
 /// annotation, built in the store directly (a window saves annotations over
 /// its mux connection); no shell is started.
-fn with_annotation(state: &AppState) {
+fn with_annotation(state: &TestState) {
     state
         .mux_store
         .dispatch(Op::CreateScreen {
@@ -88,7 +88,7 @@ async fn the_control_api_neither_shows_nor_changes_annotations() {
         ("HTTP", router(&state, hub(&host, dir.path()))),
         (
             "control socket",
-            crate::http::build_control_router(state.clone()),
+            crate::http::build_control_router(state.service.clone()),
         ),
     ];
     for (channel, app) in channels {
@@ -201,7 +201,7 @@ fn comment(id: &str, remark: &str, line: u32) -> Value {
     })
 }
 
-fn dispatch(state: &AppState, screen: &str, op: Value) {
+fn dispatch(state: &TestState, screen: &str, op: Value) {
     let op: ScreenOp = serde_json::from_value(op).expect("wire op");
     state
         .mux_store
@@ -215,7 +215,7 @@ fn dispatch(state: &AppState, screen: &str, op: Value) {
 /// did not, a draft reply of the user under #1, and #4, handed over and
 /// resolved. An agent replied to #1. `v2` holds a handed-over comment on a
 /// passage of its text.
-fn with_review(state: &AppState) {
+fn with_review(state: &TestState) {
     for (screen, pane) in [("s1", "p1"), ("s2", "p2")] {
         state
             .mux_store
@@ -292,7 +292,7 @@ fn with_review(state: &AppState) {
 
 /// The comment endpoints on the three transports the control API has.
 fn channels(
-    state: &AppState,
+    state: &TestState,
     host: &ScriptedHost,
     dir: &Path,
 ) -> Vec<(&'static str, axum::Router)> {
@@ -300,7 +300,7 @@ fn channels(
         ("HTTP", router(state, hub(host, dir))),
         (
             "control socket",
-            crate::http::build_control_router(state.clone()),
+            crate::http::build_control_router(state.service.clone()),
         ),
     ]
 }
@@ -308,7 +308,7 @@ fn channels(
 /// `GET /api/viewer/comments` with `query`, on `channel`, or natively.
 async fn comments(
     channel: Option<&axum::Router>,
-    state: &AppState,
+    state: &TestState,
     query: &[(&str, &str)],
 ) -> (StatusCode, Value) {
     match channel {
@@ -483,7 +483,7 @@ async fn an_agent_reads_what_the_user_handed_over_on_its_screen() {
 /// `POST /api/viewer/comments/reply` with `body`, on `channel`, or natively.
 async fn reply(
     channel: Option<&axum::Router>,
-    state: &AppState,
+    state: &TestState,
     body: Value,
 ) -> (StatusCode, Value) {
     match channel {
@@ -493,7 +493,7 @@ async fn reply(
 }
 
 /// The replies of annotation `number` of `v1`.
-fn thread(state: &AppState, number: u32) -> Vec<splitty_core::mux::AnnotationReply> {
+fn thread(state: &TestState, number: u32) -> Vec<splitty_core::mux::AnnotationReply> {
     let screen = state
         .mux_store
         .get_screen(&ScreenId::from("s1"))

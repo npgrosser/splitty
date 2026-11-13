@@ -62,7 +62,7 @@ async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(n
     message_type(&mut socket, "attached").await;
     let file = dir.path().join("file #? 界.rs");
     std::fs::write(&file, "text").expect("file");
-    let control = crate::http::build_control_router(served.state.clone());
+    let control = crate::http::build_control_router(served.state.service.clone());
     let input = json!({"sessionId":session,"path":file,"editor":"zed"});
     let worker = {
         let app = control.clone();

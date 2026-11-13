@@ -60,7 +60,7 @@ async fn send(socket: &mut Socket, value: serde_json::Value) {
 /// The screen `screen` with the pane `pane`, whose session the backend
 /// starts with `opts` of that session's id.
 async fn pane_session(
-    state: &AppState,
+    state: &TestState,
     screen: &str,
     pane: &str,
     opts: impl FnOnce(&str) -> splitty_core::pty::CreateSessionOpts,

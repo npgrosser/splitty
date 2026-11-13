@@ -74,16 +74,7 @@ pub fn spawn_service(
     service: std::sync::Arc<crate::service::State>,
     path: PathBuf,
 ) -> ControlChannel {
-    spawn_at(
-        crate::http::AppState {
-            service,
-            token: String::new(),
-            listen_addr: String::new(),
-            sessions: std::sync::Arc::new(crate::http::session::SessionStore::new()),
-            allowed_origins: std::sync::Arc::new(Vec::new()),
-        },
-        path,
-    )
+    spawn_at(service, path)
 }
 
 fn runtime_dir() -> PathBuf {
@@ -274,16 +265,16 @@ impl Drop for ControlChannel {
 /// Lives here rather than in the binary so the Tauri app's embedded server uses
 /// the identical implementation; two copies of an authorisation boundary is one
 /// too many.
-pub fn spawn(state: crate::http::AppState) -> ControlChannel {
-    spawn_at(state, socket_path())
+pub fn spawn(service: std::sync::Arc<crate::service::State>) -> ControlChannel {
+    spawn_at(service, socket_path())
 }
 
 /// Serve the control socket at `path` (a daemon's [`daemon_socket_path`]).
-pub fn spawn_at(state: crate::http::AppState, path: PathBuf) -> ControlChannel {
+pub fn spawn_at(service: std::sync::Arc<crate::service::State>, path: PathBuf) -> ControlChannel {
     match bind_at(path) {
         Ok((listener, path)) => {
             tracing::debug!("control socket listening on {}", path.display());
-            let router = crate::http::build_control_router(state);
+            let router = crate::http::build_control_router(service);
             let task = tokio::spawn(async move {
                 let listener = PeerCheckedListener::new(listener);
                 if let Err(error) = axum::serve(listener, router).await {

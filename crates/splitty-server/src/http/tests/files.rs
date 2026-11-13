@@ -116,7 +116,7 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
     let file = dir.path().join("report 界.pdf");
     let bytes: Vec<u8> = (0..1_500_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(&file, &bytes).expect("file");
-    let control = crate::http::build_control_router(served.state.clone());
+    let control = crate::http::build_control_router(served.state.service.clone());
 
     let (status, body) = offer(
         control.clone(),

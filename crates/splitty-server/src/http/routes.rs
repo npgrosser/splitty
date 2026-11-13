@@ -1,265 +1,24 @@
-//! All HTTP and WebSocket route definitions for the Splitty API.
+//! Routes of the local control socket, the WebSocket upgrade checks the
+//! browser gateway applies, and the embedded frontend with its security
+//! headers.
 //!
-//! Registers endpoints for health checks, WebSocket upgrade, the remote screen
-//! hub, home/server settings, theme resolution, templates CRUD, build info,
-//! command broadcast, mux state/operations, stats, and the embedded frontend
-//! SPA fallback.
+//! Browser API routes are not defined here: the gateway (`super::gateway`)
+//! derives them from the native operation catalog.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::{
-    extract::{rejection::JsonRejection, Path, Query, State, WebSocketUpgrade},
+    extract::{rejection::JsonRejection, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post, put},
-    Json, RequestExt, Router,
+    routing::{get, post},
+    Json, Router,
 };
 use serde_json::{json, Value};
 
-use super::AppState;
-use crate::hub::Hub;
+use super::ControlState;
 use crate::service::operations::{self, MuxOpRequest, SessionSendRequest};
 use crate::service::review;
-use crate::ws;
-
-/// Build the API router with all endpoints.
-///
-/// GET handlers must stay free of side effects. The Fetch Metadata check in
-/// `require_origin` stops cross-port GETs in current engines, but an engine that
-/// sends no `Sec-Fetch-Site` falls back to the `Origin` rules, and a no-cors GET
-/// carries no `Origin`. For such an engine, a state-changing GET would be
-/// reachable with the user's cookie from any page on another loopback port.
-/// The service owns the hub; tests can assign a scripted host to it.
-pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
-    let upgrade_hub = hub.clone();
-    let hosts_hub = hub.clone();
-    let directory_hub = hub.clone();
-    let forgetting_host_hub = hub.clone();
-    let host_preferences_hub = hub.clone();
-    let updating_host_preferences_hub = hub.clone();
-    let host_order_hub = hub.clone();
-    let updating_host_order_hub = hub.clone();
-    let remembering_hub = hub.clone();
-    let remembering_host_hub = hub.clone();
-    let catalog_hub = hub.clone();
-    let updating_catalog_hub = hub.clone();
-    let listing_hub = hub.clone();
-    let forwarding_hub = hub.clone();
-    let stopping_hub = hub.clone();
-    let preferences_hub = hub.clone();
-    let saving_forward_hub = hub.clone();
-    let forgetting_forward_hub = hub.clone();
-    let listing_reverse_hub = hub.clone();
-    let reversing_hub = hub.clone();
-    let stopping_reverse_hub = hub.clone();
-    let reverse_preferences_hub = hub.clone();
-    let saving_reverse_hub = hub.clone();
-    let forgetting_reverse_hub = hub.clone();
-    Router::new()
-        // Health (no auth required — middleware skips /health)
-        .route("/health", get(health))
-        // Session bootstrap and WebSocket tickets
-        .route("/api/session", post(super::session::exchange_bootstrap))
-        .route("/api/ws-ticket", post(super::session::issue_ws_ticket))
-        // Deliberately not in `control_routes`: see the handler's documentation.
-        .route("/api/bootstrap", post(super::session::issue_bootstrap))
-        // WebSocket
-        .route("/ws", get(ws_upgrade))
-        // The remote screen hub. Not in `control_routes`: a pane process must
-        // not open SSH connections or forwards, stop a host's daemon, or read
-        // the user's hosts, cached directories or remembered screens through it.
-        .route(
-            "/ws/remote",
-            get(
-                move |State(state): State<AppState>,
-                      Query(params): Query<HashMap<String, String>>,
-                      request: axum::extract::Request| {
-                    remote_upgrade(upgrade_hub, state, params, request)
-                },
-            ),
-        )
-        .route(
-            "/api/remote/directory",
-            get(move || async move { Json(directory_hub.directory()) }),
-        )
-        .route("/api/remote/ssh-prompts", get(|| async { Json(splitty_remote::askpass::prompts()) }).post(
-            |Json(body): Json<Value>| async move {
-                Json(serde_json::json!({"accepted": splitty_remote::askpass::respond_document(&body)}))
-            }
-        ))
-        .route(
-            "/api/remote/hosts",
-            get(move || async move { Json(hosts_hub.known_hosts()) }).delete(
-                move |Json(document): Json<Value>| async move {
-                    host_preference_response(
-                        forgetting_host_hub.forget_host(document).map(|()| None),
-                    )
-                },
-            ),
-        )
-        .route(
-            "/api/remote/host-preferences",
-            get(move || async move { Json(host_preferences_hub.host_preferences()) }).put(
-                move |Json(document): Json<Value>| async move {
-                    host_preference_response(
-                        updating_host_preferences_hub
-                            .update_host_preference(document)
-                            .map(Some),
-                    )
-                },
-            ),
-        )
-        .route(
-            "/api/remote/host-order",
-            get(move || async move { Json(host_order_hub.host_order()) }).put(
-                move |Json(document): Json<Value>| async move {
-                    match updating_host_order_hub.set_host_order(document) {
-                        Ok(order) => Json(order).into_response(),
-                        Err(error) => host_preference_response(Err(error)),
-                    }
-                },
-            ),
-        )
-        .route(
-            "/api/remote/screens",
-            get(move || async move { Json(hub.remembered_screens()) }).put(
-                move |Json(document): Json<Value>| async move {
-                    remember_screens(&remembering_hub, document)
-                },
-            ),
-        )
-        .route(
-            "/api/remote/screens/host",
-            put(move |Json(document): Json<Value>| async move {
-                operations::remember_host_screens(&remembering_host_hub, document).into_response()
-            }),
-        )
-        .route(
-            "/api/remote/catalog",
-            get(move || async move { Json(catalog_hub.catalog()) }).put(
-                move |Json(document): Json<Value>| async move {
-                    update_catalog(&updating_catalog_hub, document)
-                },
-            ),
-        )
-        .route(
-            "/api/remote/forwards",
-            get(move || async move { Json(listing_hub.forwards()) })
-                .post(move |Json(body): Json<Value>| async move {
-                    open_forward(&forwarding_hub, body).await
-                })
-                .delete(move |Json(body): Json<Value>| async move {
-                    stop_forward(&stopping_hub, body).await
-                }),
-        )
-        .route(
-            "/api/remote/forward-preferences",
-            get(move || async move { Json(preferences_hub.forward_preferences()) })
-                .put(move |body: Result<Json<Value>, JsonRejection>| async move {
-                    match body {
-                        Ok(Json(body)) => save_forward(&saving_forward_hub, body).await,
-                        Err(error) => preference_rejected(error),
-                    }
-                })
-                .delete(move |body: Result<Json<Value>, JsonRejection>| async move {
-                    match body {
-                        Ok(Json(body)) => forget_forward(&forgetting_forward_hub, body).await,
-                        Err(error) => preference_rejected(error),
-                    }
-                }),
-        )
-        // Reverse forwards: ports of this machine shared with hosts. The
-        // local server's own port is never shared.
-        .route(
-            "/api/remote/reverse-forwards",
-            get(move || async move { Json(listing_reverse_hub.reverses()) })
-                .post(move |body: Result<Json<Value>, JsonRejection>| async move {
-                    match body {
-                        Ok(Json(body)) => open_reverse(&reversing_hub, body).await,
-                        Err(error) => preference_rejected(error),
-                    }
-                })
-                .delete(move |body: Result<Json<Value>, JsonRejection>| async move {
-                    match body {
-                        Ok(Json(body)) => stop_reverse(&stopping_reverse_hub, body).await,
-                        Err(error) => preference_rejected(error),
-                    }
-                }),
-        )
-        .route(
-            "/api/remote/reverse-forward-preferences",
-            get(move || async move { Json(reverse_preferences_hub.reverse_preferences()) })
-                .put(move |body: Result<Json<Value>, JsonRejection>| async move {
-                    match body {
-                        Ok(Json(body)) => save_reverse(&saving_reverse_hub, body).await,
-                        Err(error) => preference_rejected(error),
-                    }
-                })
-                .delete(move |body: Result<Json<Value>, JsonRejection>| async move {
-                    match body {
-                        Ok(Json(body)) => forget_reverse(&forgetting_reverse_hub, body).await,
-                        Err(error) => preference_rejected(error),
-                    }
-                }),
-        )
-        // Home (personal preferences)
-        .route(
-            "/api/home/settings",
-            get(get_home_settings).patch(patch_home_settings),
-        )
-        .route("/api/home/settings/metadata", get(get_home_metadata))
-        .route("/api/home/theme", get(get_resolved_theme))
-        .route("/api/home/themes", get(list_available_themes))
-        .route(
-            "/api/shell-profiles",
-            get(get_shell_profiles).put(put_shell_profiles),
-        )
-        // Server (placeholder)
-        .route(
-            "/api/server/settings",
-            get(get_server_settings).patch(patch_server_settings),
-        )
-        // Templates
-        .route("/api/templates", get(list_templates).post(create_template))
-        .route("/api/templates/extract/screen", post(extract_template))
-        .route(
-            "/api/templates/{slug}",
-            get(get_template)
-                .post(save_template)
-                .delete(delete_template),
-        )
-        // Build info
-        .route("/api/build", get(get_build))
-        // Command broadcast
-        .route("/api/command", post(post_command))
-        // Mux API
-        .route("/api/mux/state", get(get_mux_state))
-        .route("/api/mux/screens", get(get_mux_screens))
-        .route("/api/mux/screen/{id}", get(get_mux_screen))
-        .route("/api/mux/op", post(post_mux_op))
-        .route("/api/mux/neighbor", get(get_mux_neighbor))
-        .route("/api/mux/status", get(get_mux_status))
-        // Session API
-        .route("/api/session/{id}/send", post(post_session_send))
-        .route("/api/editor/open", post(post_editor_open))
-        .route("/api/file/offer", post(post_file_offer))
-        // The agent channel of viewer panes
-        .route("/api/viewer/comments", get(get_viewer_comments))
-        .route("/api/viewer/comments/reply", post(post_comment_reply))
-        .route("/api/viewer/review/wait", post(post_review_wait))
-        // Stats
-        .route("/api/stats", get(get_stats))
-
-    // REMOVED (security review SR-01/SR-02/SR-08, see docs/security/findings.md):
-    // the `/proxy/{port}` reverse proxy, `/api/favicon`, `/api/frame-check` and
-    // `/api/webapps`. They existed only to render foreign web content inside the
-    // application, which let a web context with no local privileges reach the
-    // parent DOM, the auth cookie and the terminal API; the two fetchers also
-    // reached arbitrary loopback and internal services. Their paths stay in
-    // `SERVER_PATH_PREFIXES` so they answer 404 instead of the app shell. Web
-    // content must not come back without its own origin and process.
-}
 
 /// Routes reachable over the local control socket.
 ///
@@ -284,9 +43,9 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
 /// credential is handed to panes implicitly, so nothing portable leaks through
 /// `env` output, crash reports or CI logs.
 ///
-/// These handlers are the same functions the HTTP router uses; only the set of
-/// registered paths differs.
-pub fn control_routes() -> Router<AppState> {
+/// The handlers call the same service operations as the native catalog the
+/// browser gateway serves; only the set of registered paths differs.
+pub fn control_routes() -> Router<ControlState> {
     Router::new()
         .route("/api/daemon/stop", post(stop_daemon_instance))
         .route("/api/mux/state", get(get_mux_state))
@@ -314,7 +73,7 @@ struct StopDaemonInstance {
 /// Owner socket only. Address the service that accepted this connection,
 /// never a PID read earlier from a discovery file.
 async fn stop_daemon_instance(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Json(request): Json<StopDaemonInstance>,
 ) -> Response {
     if state.server_mode != "daemon" || request.instance != state.instance {
@@ -328,17 +87,12 @@ async fn stop_daemon_instance(
     Json(json!({"stopping":state.instance})).into_response()
 }
 
-// ── Health ──────────────────────────────────────────────────────────────────
-
-async fn health() -> &'static str {
-    "ok"
-}
-
 // ── WebSocket ───────────────────────────────────────────────────────────────
 
 /// Why a WebSocket upgrade is refused, before anything else happens for it:
 /// a foreign or missing `Origin`, a `Sec-Fetch-Site` other than same-origin,
-/// or no valid single-use ticket. `/ws` and `/ws/remote` both pass it.
+/// or no valid single-use ticket. The gateway's `/ws` and `/ws/remote` both
+/// pass it.
 pub(crate) fn refuse_upgrade(
     state: &super::BrowserState,
     params: &HashMap<String, String>,
@@ -370,243 +124,26 @@ pub(crate) fn refuse_upgrade(
     None
 }
 
-async fn ws_upgrade(
-    State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
-    request: axum::extract::Request,
-) -> Response {
-    if let Some(refused) =
-        refuse_upgrade(&axum::extract::FromRef::from_ref(&state), &params, &request)
-    {
-        return refused;
-    }
+// ── Control-socket handlers ──────────────────────────────────────────────────
 
-    let ws = match request.extract::<WebSocketUpgrade, _>().await {
-        Ok(ws) => ws,
-        Err(rejection) => return rejection.into_response(),
-    };
-
-    ws.on_upgrade(move |socket| ws::handle_socket(socket, state.client_state.clone()))
-}
-
-/// `/ws/remote?ticket=…&target=…[&update=1]`: the checks of `/ws`, then the
-/// hub serves the socket. The target is validated after the upgrade, so the
-/// client reads why it is refused; no `ssh` starts for an invalid one.
-async fn remote_upgrade(
-    hub: Arc<Hub>,
-    state: AppState,
-    params: HashMap<String, String>,
-    request: axum::extract::Request,
-) -> Response {
-    if let Some(refused) =
-        refuse_upgrade(&axum::extract::FromRef::from_ref(&state), &params, &request)
-    {
-        return refused;
-    }
-    // Saved reverse forwards are restored on this socket's readiness.
-
-    let ws = match request.extract::<WebSocketUpgrade, _>().await {
-        Ok(ws) => ws,
-        Err(rejection) => return rejection.into_response(),
-    };
-
-    let target = params.get("target").cloned().unwrap_or_default();
-    // Stopping a daemon ends its sessions: only the exact value asks for it.
-    let update = params.get("update").is_some_and(|value| value == "1");
-    // Larger messages are refused by the WebSocket itself.
-    ws.max_message_size(crate::hub::MAX_MESSAGE)
-        .max_frame_size(crate::hub::MAX_MESSAGE)
-        .on_upgrade(move |socket| async move { hub.serve(socket, target, update).await })
-}
-
-/// `PUT /api/remote/screens`: 200 with the stored list, 400 for a list
-/// without the shape (nothing is written), 500 when the file cannot be
-/// written. The body is taken as any JSON first, so a wrong shape is a 400
-/// with its reason like a syntax error, not the extractor's 422.
-fn remember_screens(hub: &Hub, document: Value) -> Response {
-    operations::remember_screens(hub, document).into_response()
-}
-
-fn update_catalog(hub: &Hub, document: Value) -> Response {
-    operations::update_catalog(hub, document).into_response()
-}
-
-fn host_preference_response(
-    result: Result<Option<crate::hub::HostPreference>, crate::hub::PreferenceError>,
-) -> Response {
-    operations::host_preference_response(result).into_response()
-}
-
-async fn save_forward(hub: &Hub, body: Value) -> Response {
-    operations::save_forward(hub, body).await.into_response()
-}
-
-async fn forget_forward(hub: &Hub, body: Value) -> Response {
-    operations::forget_forward(hub, body).await.into_response()
-}
-
-async fn open_forward(hub: &Hub, body: Value) -> Response {
-    operations::open_forward(hub, body).await.into_response()
-}
-
-async fn stop_forward(hub: &Hub, body: Value) -> Response {
-    operations::stop_forward(hub, body).await.into_response()
-}
-
-async fn open_reverse(hub: &Hub, body: Value) -> Response {
-    operations::open_reverse(hub, body).await.into_response()
-}
-
-async fn stop_reverse(hub: &Hub, body: Value) -> Response {
-    operations::stop_reverse(hub, body).await.into_response()
-}
-
-async fn save_reverse(hub: &Hub, body: Value) -> Response {
-    operations::save_reverse(hub, body).await.into_response()
-}
-
-async fn forget_reverse(hub: &Hub, body: Value) -> Response {
-    operations::forget_reverse(hub, body).await.into_response()
-}
-
-async fn get_resolved_theme(
-    State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Json<Value> {
-    Json(
-        operations::get_resolved_theme(&state.service, params)
-            .await
-            .0,
-    )
-}
-
-async fn list_available_themes(State(state): State<AppState>) -> Json<Vec<String>> {
-    Json(operations::list_available_themes(&state.service).await.0)
-}
-
-async fn get_home_settings(State(state): State<AppState>) -> Json<Value> {
-    Json(operations::get_home_settings(&state.service).await.0)
-}
-
-async fn get_home_metadata() -> Json<Value> {
-    Json(operations::get_home_metadata().0)
-}
-
-async fn patch_home_settings(
-    State(state): State<AppState>,
-    Json(partial): Json<Value>,
-) -> Response {
-    operations::patch_home_settings(&state.service, partial)
-        .await
-        .into_response()
-}
-
-#[cfg(test)]
-pub(super) fn apply_home_settings(state: &AppState, updated: splitty_core::config::HomeConfig) {
-    operations::apply_home_settings(&state.service, updated);
-}
-
-async fn get_shell_profiles(State(state): State<AppState>) -> Json<Value> {
-    Json(operations::get_shell_profiles(&state.service).await.0)
-}
-
-async fn put_shell_profiles(
-    State(state): State<AppState>,
-    Json(update): Json<splitty_core::shell_profiles::ShellProfilesState>,
-) -> Response {
-    operations::put_shell_profiles(&state.service, update)
-        .await
-        .into_response()
-}
-
-async fn get_server_settings(State(state): State<AppState>) -> Json<Value> {
-    Json(operations::get_server_settings(&state.service).await.0)
-}
-
-async fn patch_server_settings(
-    State(_state): State<AppState>,
-    Json(_partial): Json<Value>,
-) -> Response {
-    operations::patch_server_settings(&_state.service, _partial)
-        .await
-        .into_response()
-}
-
-async fn extract_template(
-    State(state): State<AppState>,
-    Json(body): Json<operations::ExtractTemplateRequest>,
-) -> Response {
-    operations::extract_template(&state.service, body)
-        .await
-        .into_response()
-}
-
-async fn list_templates(State(state): State<AppState>) -> Response {
-    operations::list_templates(&state.service)
-        .await
-        .into_response()
-}
-
-async fn get_template(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
-    operations::get_template(&state.service, slug)
-        .await
-        .into_response()
-}
-
-async fn save_template(
-    State(state): State<AppState>,
-    Path(slug): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    operations::save_template(&state.service, slug, body)
-        .await
-        .into_response()
-}
-
-async fn create_template(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
-    operations::create_template(&state.service, body)
-        .await
-        .into_response()
-}
-
-async fn delete_template(State(state): State<AppState>, Path(slug): Path<String>) -> Response {
-    operations::delete_template(&state.service, slug)
-        .await
-        .into_response()
-}
-
-async fn get_build(State(state): State<AppState>) -> Json<Value> {
-    Json(operations::get_build(&state.service).await.0)
-}
-
-#[cfg(test)]
-pub(super) use crate::service::operations::build_body;
-
-async fn post_command(
-    State(state): State<AppState>,
-    Json(cmd): Json<splitty_core::protocol::ClientCommand>,
-) -> Json<Value> {
-    Json(operations::post_command(&state.service, cmd).await.0)
-}
-
-async fn get_mux_state(State(state): State<AppState>) -> Json<Value> {
+async fn get_mux_state(State(state): State<ControlState>) -> Json<Value> {
     Json(operations::get_mux_state(&state.service).await.0)
 }
 
-async fn get_mux_screen(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+async fn get_mux_screen(State(state): State<ControlState>, Path(id): Path<String>) -> Response {
     operations::get_mux_screen(&state.service, id)
         .await
         .into_response()
 }
 
-async fn post_mux_op(State(state): State<AppState>, Json(req): Json<MuxOpRequest>) -> Response {
+async fn post_mux_op(State(state): State<ControlState>, Json(req): Json<MuxOpRequest>) -> Response {
     operations::post_mux_op(&state.service, req)
         .await
         .into_response()
 }
 
 async fn get_mux_neighbor(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     operations::get_mux_neighbor(&state.service, params)
@@ -614,16 +151,16 @@ async fn get_mux_neighbor(
         .into_response()
 }
 
-async fn get_mux_screens(State(state): State<AppState>) -> Json<Value> {
+async fn get_mux_screens(State(state): State<ControlState>) -> Json<Value> {
     Json(operations::get_mux_screens(&state.service).await.0)
 }
 
-async fn get_mux_status(State(state): State<AppState>) -> Json<Value> {
+async fn get_mux_status(State(state): State<ControlState>) -> Json<Value> {
     Json(operations::get_mux_status(&state.service).await.0)
 }
 
 async fn post_session_send(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Path(id): Path<String>,
     Json(req): Json<SessionSendRequest>,
 ) -> Response {
@@ -632,12 +169,8 @@ async fn post_session_send(
         .into_response()
 }
 
-async fn get_stats(State(state): State<AppState>) -> Json<Value> {
-    Json(operations::get_stats(&state.service).await.0)
-}
-
 async fn post_file_offer(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Json(input): Json<crate::client_session::files::OfferRequest>,
 ) -> Response {
     operations::post_file_offer(&state.service, input)
@@ -646,7 +179,7 @@ async fn post_file_offer(
 }
 
 async fn post_editor_open(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Json(input): Json<crate::client_session::editor::OpenRequest>,
 ) -> Response {
     operations::post_editor_open(&state.service, input)
@@ -655,7 +188,7 @@ async fn post_editor_open(
 }
 
 async fn get_viewer_comments(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     review::get_viewer_comments(&state.service, params)
@@ -664,7 +197,7 @@ async fn get_viewer_comments(
 }
 
 async fn post_comment_reply(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     match body {
@@ -677,7 +210,7 @@ async fn post_comment_reply(
 /// Held until the user answers or the viewer pane closes; a closed
 /// connection drops the handler, which ends the wait.
 async fn post_review_wait(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     match body {
@@ -685,20 +218,6 @@ async fn post_review_wait(
         Err(error) => review::invalid_body(error.body_text()),
     }
     .into_response()
-}
-
-fn preference_rejected(error: JsonRejection) -> Response {
-    if error.status() == StatusCode::BAD_REQUEST
-        || error.status() == StatusCode::UNPROCESSABLE_ENTITY
-    {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": error.body_text()})),
-        )
-            .into_response()
-    } else {
-        error.into_response()
-    }
 }
 
 // ── Frontend static files ───────────────────────────────────────────────────
@@ -710,6 +229,14 @@ fn preference_rejected(error: JsonRejection) -> Response {
 /// exists. That matters beyond tidiness: the routes disabled in SR-01
 /// (`/proxy/...`, `/api/favicon`, ...) must be observably absent, and an API
 /// client must be able to tell "no such endpoint" from "here is the app shell".
+///
+/// Removed for good (security review SR-01/SR-02/SR-08, see
+/// docs/security/findings.md): the `/proxy/{port}` reverse proxy,
+/// `/api/favicon`, `/api/frame-check` and `/api/webapps`. They existed only to
+/// render foreign web content inside the application, which let a web context
+/// with no local privileges reach the parent DOM, the auth cookie and the
+/// terminal API; the two fetchers also reached arbitrary loopback and internal
+/// services. Web content must not come back without its own origin and process.
 const SERVER_PATH_PREFIXES: [&str; 3] = ["api/", "proxy/", "ws"];
 
 /// Content-Security-Policy for the application document.

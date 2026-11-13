@@ -1,5 +1,5 @@
 //! Both local agent sockets and the trusted API use these same handlers.
-use super::AppState;
+use super::ControlState;
 use crate::jobs::{Access, Actor, Anchor, JobError, WeakJobs};
 use crate::service::jobs::{Context, Input, Logs};
 use axum::{
@@ -28,7 +28,7 @@ pub fn routes<S: Clone + Send + Sync + 'static>(jobs: WeakJobs, actor: Actor) ->
         .layer(DefaultBodyLimit::max(128 * 1024))
         .with_state(Context { jobs, actor })
 }
-pub fn admin_routes() -> Router<AppState> {
+pub fn admin_routes() -> Router<ControlState> {
     Router::new()
         .route("/api/agents", get(agents).post(create_agent))
         .route("/api/agents/{id}", get(agent))
@@ -111,7 +111,7 @@ struct CreateAgent {
     anchor: Option<Anchor>,
 }
 async fn create_agent(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     payload: Result<Json<CreateAgent>, JsonRejection>,
 ) -> Result<Json<Value>, JobError> {
     let args = body(payload)?;
@@ -129,11 +129,11 @@ async fn create_agent(
         ))
     }
 }
-async fn agents(State(state): State<AppState>) -> Json<Value> {
+async fn agents(State(state): State<ControlState>) -> Json<Value> {
     Json(state.client_state.jobs.grants())
 }
 async fn agent(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, JobError> {
     state
@@ -143,7 +143,7 @@ async fn agent(
         .map(Json)
 }
 async fn revoke(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, JobError> {
     state
@@ -159,7 +159,7 @@ struct Owner {
     agent_id: Value,
 }
 async fn owner(
-    State(state): State<AppState>,
+    State(state): State<ControlState>,
     Path(id): Path<String>,
     payload: Result<Json<Owner>, JsonRejection>,
 ) -> Result<Response, JobError> {

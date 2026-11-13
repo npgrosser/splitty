@@ -11,7 +11,7 @@ use splitty_core::mux::{Op, ScreenOp, ViewerSource};
 const PLAN: &str = "/home/me/app/PLAN.md";
 
 /// Screen `s1` with the terminal pane `p1`.
-fn with_screen(state: &AppState) {
+fn with_screen(state: &TestState) {
     state
         .mux_store
         .dispatch(Op::CreateScreen {
@@ -24,7 +24,7 @@ fn with_screen(state: &AppState) {
 }
 
 /// Open a viewer on `s1` as a window does, with the op's wire form.
-fn open_viewer(state: &AppState, op: serde_json::Value) {
+fn open_viewer(state: &TestState, op: serde_json::Value) {
     let op: ScreenOp = serde_json::from_value(op).expect("wire op");
     state
         .mux_store
@@ -32,7 +32,7 @@ fn open_viewer(state: &AppState, op: serde_json::Value) {
         .expect("viewer");
 }
 
-fn viewer_panes(state: &AppState) -> usize {
+fn viewer_panes(state: &TestState) -> usize {
     state
         .mux_store
         .get_workspace_state()
@@ -56,7 +56,7 @@ async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
         let app = if channel == "HTTP" {
             router(&state, hub(&host, dir.path()))
         } else {
-            crate::http::build_control_router(state.clone())
+            crate::http::build_control_router(state.service.clone())
         };
         let op = json!({"screenId": "s1", "op": {"type": "open_viewer", "paneId": "p1", "source": {"kind": "file", "path": PLAN}}});
 
@@ -125,7 +125,7 @@ async fn the_control_api_leaves_out_the_text_a_viewer_shows() {
         ("HTTP", router(&state, hub(&host, dir.path()))),
         (
             "control socket",
-            crate::http::build_control_router(state.clone()),
+            crate::http::build_control_router(state.service.clone()),
         ),
     ];
     for (channel, app) in channels {
@@ -292,7 +292,10 @@ async fn splitty_open_shows_a_file_beside_its_pane_and_again_in_the_same_pane() 
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
     with_screen(&state);
-    let server = control_socket(dir.path(), crate::http::build_control_router(state.clone()));
+    let server = control_socket(
+        dir.path(),
+        crate::http::build_control_router(state.service.clone()),
+    );
     let plan = dir.path().join("PLAN.md");
     std::fs::write(&plan, "# Plan").expect("file");
     let resolved = crate::cli::viewer::resolve(&plan).expect("resolved");

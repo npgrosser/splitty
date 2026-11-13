@@ -245,6 +245,7 @@ mod tests {
     use super::*;
     use crate::hub::testing::ScriptedHost;
     use serde_json::{json, Value};
+    use splitty_transport::budget::ConnectionBudget;
 
     fn legacy_ready() -> splitty_remote::handshake::LegacyMigration {
         splitty_remote::handshake::LegacyMigration::Ready {
