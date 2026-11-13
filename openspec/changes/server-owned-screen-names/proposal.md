@@ -35,6 +35,6 @@ none (no new crate, top-level module or dependency between components).
 ## Decisions
 
 - SSN-1: the first Screen is an idempotent create (`onlyIfEmpty: true`) that each client sends, not a Screen the server creates by itself on connect or start: a host reached through the hub, the CLI and tests connect to the same servers and must not get a Screen nobody asked for (provisional, tbd).
-- SSN-2: against an older server the client names the Screen with the smallest free "Screen N" it knows of when the create goes out; a pending host Screen is no longer renamed when the host's list arrives later (provisional, tbd).
+- SSN-2: against an older server the client names the Screen with the smallest free "Screen N" it knows of when the create goes out; a pending host Screen is no longer renamed when the host's list arrives later. The native window's host Screens keep going out without a name, as they did before (provisional, tbd).
 - SSN-3: until the server's name arrives a window shows a placeholder label that it never sends ("New Screen" on the web, "Creating Screen…" natively); a Screen without a name shows as "Unnamed Screen" (provisional, tbd).
 - SSN-4: an explicitly empty name (create or rename) stays empty on the server, as before; only the clients' label for it changes.

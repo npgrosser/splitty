@@ -986,7 +986,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1" and "notification-notices-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1" and "screen-names-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1386,12 +1386,24 @@ interface CreateScreenOp {
   type: "create_screen";
   /** Client-set screen ID. Server generates one if omitted. */
   screenId?: string;
-  /** Omitted: the host assigns its first unused Screen N atomically. */
+  /**
+   * Omitted: the server assigns its first unused Screen N (from 1)
+   * atomically. Clients omit it when mux.welcome lists "screen-names-v1" and
+   * learn the name from mux.workspace_snapshot or a screen snapshot; for an
+   * older server they send the smallest free Screen N they know of.
+   */
   name?: string;
   /** Client-set ID for the initial pane. Server generates one if omitted. */
   newPaneId?: string;
   /** Explicit profile, otherwise use the backend default. */
   shellProfileId?: string;
+  /**
+   * The client's first screen of an empty workspace ("screen-names-v1"):
+   * applied only while the workspace has no screen, otherwise refused with
+   * mux.op_failed ("the workspace already has screens") and nothing changes,
+   * so windows that start together end with one. Older servers ignore it.
+   */
+  onlyIfEmpty?: boolean;
   ownership?: OwnershipMode;
 }
 

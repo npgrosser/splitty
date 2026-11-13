@@ -40,6 +40,8 @@ Keep temporary fixture paths short enough for Unix sockets.
 
 - Real local terminals, Screens, splits, tabs, pane movement and existing local
   floating/transfer/template tools; the native model projects the shared mux.
+  The service names new Screens (`screen-names-v1`; the window sends no name)
+  and the first Screen of an empty workspace goes out with `onlyIfEmpty`.
 - Drawer navigation, wheel gestures, pin/autohide, Screen placement, transitions,
   live full titles and leading application symbols, notifications and settings.
 - Exact-host Drawer navigation/Ports, explicit remote Screen creation with
