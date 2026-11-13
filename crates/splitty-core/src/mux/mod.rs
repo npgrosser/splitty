@@ -33,11 +33,6 @@ pub use templates::{
 };
 
 pub use anchoring::{anchor_annotations, viewer_source_text, Anchorer, Passage};
-pub use review::{
-    anchors_in_list_order, build_review, is_pending, review_safe_text, AnchorState,
-    AnnotationAnchor, RenderedPassage, Review, ReviewRequest, Verdict, RENDERED_PASSAGE_LIMIT,
-    VIEWER_REVIEWS_CAPABILITY,
-};
 pub use close_assessment::{
     assess_close, CloseAssessment, CloseLoss, CloseScope, CLOSE_ASSESSMENT_CAPABILITY,
     CLOSE_SCOPE_LIMIT,
@@ -45,6 +40,11 @@ pub use close_assessment::{
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
 pub use ops::{Arrangement, Direction, Op, ScreenOp, ViewerPlacement};
+pub use review::{
+    anchors_in_list_order, build_review, is_pending, review_safe_text, AnchorState,
+    AnnotationAnchor, RenderedPassage, Review, ReviewRequest, Verdict, RENDERED_PASSAGE_LIMIT,
+    VIEWER_REVIEWS_CAPABILITY,
+};
 pub use state::{
     equal_sizes, replace_node, AnnotationKind, AnnotationReply, AnnotationStatus, AnnotationTarget,
     AnnotationView, Axis, FloatBounds, FloatingEntry, LayoutNode, PaneRole, PaneState, ParentInfo,

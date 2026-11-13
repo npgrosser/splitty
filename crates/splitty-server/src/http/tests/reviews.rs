@@ -527,10 +527,22 @@ async fn a_review_holds_the_comment_a_window_saved_just_before() {
                             "startLine": 1, "endLine": 1}},
             ]}),
         ] {
-            send(&mut socket, json!({"type": "mux.op", "screenId": "s1", "op": op})).await;
+            send(
+                &mut socket,
+                json!({"type": "mux.op", "screenId": "s1", "op": op}),
+            )
+            .await;
         }
-        send(&mut socket, json!({"type": "viewer.anchor", "requestId": "a1", "paneId": pane})).await;
-        send(&mut socket, json!({"type": "viewer.review", "requestId": "r1", "paneId": pane})).await;
+        send(
+            &mut socket,
+            json!({"type": "viewer.anchor", "requestId": "a1", "paneId": pane}),
+        )
+        .await;
+        send(
+            &mut socket,
+            json!({"type": "viewer.review", "requestId": "r1", "paneId": pane}),
+        )
+        .await;
         let [anchored, reviewed] = <[Value; 2]>::try_from(
             messages(&mut socket, &["viewer.anchored", "viewer.reviewed"]).await,
         )

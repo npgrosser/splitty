@@ -301,9 +301,10 @@ impl Reads {
         tokio::spawn(async move {
             let budget = sender.context().budget;
             let request_id = request.request_id.clone();
-            let answer = tokio::task::spawn_blocking(move || answer_whole(&request, &record, &budget))
-                .await
-                .unwrap_or(Answer::Failed(Code::Unreadable));
+            let answer =
+                tokio::task::spawn_blocking(move || answer_whole(&request, &record, &budget))
+                    .await
+                    .unwrap_or(Answer::Failed(Code::Unreadable));
             send(&sender, &request_id, answer);
             drop(permit);
         });
@@ -446,12 +447,11 @@ fn whole_document(
             }
             let version = file_version(&metadata);
             let lease = reserve(metadata.len())?;
-            let bytes = files::read_at(&file, 0, metadata.len()).map_err(|error| {
-                match error.kind() {
+            let bytes =
+                files::read_at(&file, 0, metadata.len()).map_err(|error| match error.kind() {
                     io::ErrorKind::UnexpectedEof => Code::Changed,
                     _ => Code::Unreadable,
-                }
-            })?;
+                })?;
             match file.metadata() {
                 Ok(after) if file_version(&after) == version => Ok((version, bytes, lease)),
                 Ok(_) => Err(Code::Changed),
@@ -1010,7 +1010,9 @@ mod tests {
         assert_eq!(anchored["type"], "viewer.anchored", "{anchored}");
         assert_eq!(anchored["requestId"], "a1");
         assert_eq!(anchored["paneId"], "v1");
-        assert!(anchored["version"].as_str().is_some_and(|version| version.starts_with("f-")));
+        assert!(anchored["version"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("f-")));
         assert_eq!(
             anchored["anchors"],
             json!([
@@ -1050,15 +1052,23 @@ mod tests {
         let reviewed = answer(&mut rx).await;
         assert_eq!(reviewed["type"], "viewer.reviewed", "{reviewed}");
         assert_eq!(reviewed["requestId"], "r1");
-        assert!(reviewed["version"].as_str().is_some_and(|version| version.starts_with("t-")));
+        assert!(reviewed["version"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("t-")));
         assert_eq!(
             reviewed["text"],
             "# Review of Plan\n\nVerdict: changes requested\n\n## #1 Line 3, comment\n> Retry three times.\n\nWhy three?\n\n## #2 Line 5, suggested change\n> Ship it.\n\nReplace with:\n```\nShip it today.\n```\n\nReply in a thread: splitty comments reply v1 <number> '<text>'\n"
         );
         assert_eq!(reviewed["count"], 2);
         assert_eq!(
-            reviewed["entries"].as_array().map(|entries| entries.iter().map(|entry| entry["id"].clone()).collect::<Vec<_>>()),
-            Some(vec![json!("ann-0000000000000001"), json!("ann-0000000000000002")])
+            reviewed["entries"].as_array().map(|entries| entries
+                .iter()
+                .map(|entry| entry["id"].clone())
+                .collect::<Vec<_>>()),
+            Some(vec![
+                json!("ann-0000000000000001"),
+                json!("ann-0000000000000002")
+            ])
         );
         assert_eq!(reviewed["entries"][1]["replacement"], "Ship it today.");
         // Without the window's passage the server anchors in the source,
@@ -1066,9 +1076,8 @@ mod tests {
         reads.review(&json!({"type": "viewer.review", "requestId": "r2", "paneId": "v1"}));
         let reviewed = answer(&mut rx).await;
         assert!(
-            reviewed["text"]
-                .as_str()
-                .is_some_and(|text| text.contains("## #1 Line 3, comment (passage changed in the current version)")),
+            reviewed["text"].as_str().is_some_and(|text| text
+                .contains("## #1 Line 3, comment (passage changed in the current version)")),
             "{reviewed}"
         );
     }
@@ -1085,18 +1094,40 @@ mod tests {
         let (reads, mut rx) = reads(store);
         reads.review(&json!({"type": "viewer.review", "requestId": "r1", "paneId": "nope"}));
         let failed = answer(&mut rx).await;
-        assert_eq!((failed["type"].clone(), failed["code"].clone(), failed["requestId"].clone()), (json!("viewer.failed"), json!("unknown_pane"), json!("r1")));
+        assert_eq!(
+            (
+                failed["type"].clone(),
+                failed["code"].clone(),
+                failed["requestId"].clone()
+            ),
+            (json!("viewer.failed"), json!("unknown_pane"), json!("r1"))
+        );
         reads.anchor(&json!({"type": "viewer.anchor", "requestId": "r2", "paneId": "v2"}));
         assert_eq!(answer(&mut rx).await["code"], "not_found");
         for (id, request) in [
             ("m1", json!({"type": "viewer.anchor", "requestId": "m1"})),
-            ("m2", json!({"type": "viewer.review", "requestId": "m2", "paneId": "v1", "verdict": "maybe"})),
-            ("m3", json!({"type": "viewer.review", "requestId": "m3", "paneId": "v1",
-                          "passages": [{"id": "ann-0000000000000001", "state": "anchored", "startLine": 0, "endLine": 1}]})),
-            ("m4", json!({"type": "viewer.review", "requestId": "m4", "paneId": "v1",
-                          "passages": [{"id": "ann-0000000000000001", "state": "anchored", "startLine": 1, "endLine": 1, "extra": 1}]})),
-            ("m5", json!({"type": "viewer.anchor", "requestId": "m5", "paneId": "v1", "verdict": "approved"})),
-            ("", json!({"type": "viewer.review", "requestId": 5, "paneId": "v1"})),
+            (
+                "m2",
+                json!({"type": "viewer.review", "requestId": "m2", "paneId": "v1", "verdict": "maybe"}),
+            ),
+            (
+                "m3",
+                json!({"type": "viewer.review", "requestId": "m3", "paneId": "v1",
+                          "passages": [{"id": "ann-0000000000000001", "state": "anchored", "startLine": 0, "endLine": 1}]}),
+            ),
+            (
+                "m4",
+                json!({"type": "viewer.review", "requestId": "m4", "paneId": "v1",
+                          "passages": [{"id": "ann-0000000000000001", "state": "anchored", "startLine": 1, "endLine": 1, "extra": 1}]}),
+            ),
+            (
+                "m5",
+                json!({"type": "viewer.anchor", "requestId": "m5", "paneId": "v1", "verdict": "approved"}),
+            ),
+            (
+                "",
+                json!({"type": "viewer.review", "requestId": 5, "paneId": "v1"}),
+            ),
         ] {
             if request["type"] == "viewer.anchor" {
                 reads.anchor(&request);
