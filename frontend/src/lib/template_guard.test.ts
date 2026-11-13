@@ -50,6 +50,10 @@ describe("commandsIn", () => {
     });
   });
 
+  it("does not count a blank command as a command", () => {
+    expect(commandsIn(template({ a: { command: "   " }, b: { command: "\t\n" }, c: { command: " ls " } })).map((c) => c.paneName)).toEqual(["c"]);
+  });
+
   it("reports nothing for a pure layout template", () => {
     expect(commandsIn(template({ a: {}, b: { dir: "/tmp" } }))).toEqual([]);
   });

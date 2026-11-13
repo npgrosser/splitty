@@ -56,7 +56,8 @@ export function onTemplateApprovalRequest(fn: Listener): () => void {
 /** Every command the template would execute, in pane order. */
 export function commandsIn(template: Template): TemplateCommand[] {
   return Object.entries(template.panes ?? {})
-    .filter(([, pane]) => !!(pane as TemplatePane)?.command)
+    // A blank command is no command, as in the native client.
+    .filter(([, pane]) => !!(pane as TemplatePane)?.command?.trim())
     .map(([paneName, pane]) => {
       const p = pane as TemplatePane;
       return {
