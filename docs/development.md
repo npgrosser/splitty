@@ -413,6 +413,14 @@ Splitty to update it, and uninstall it from Windows' installed apps. The
 the static servers and the native installer for any commit, as workflow
 artifacts; its `web` input adds the web app's installer.
 
+The static servers are built once per run (`server-payloads.yml`); the
+Windows, Linux and macOS jobs start from them side by side. The Release
+workflow also runs on `main` every week and when started by hand, where it
+builds everything and publishes nothing. A tagged run cannot use a
+dependency cache another tag saved, so the release jobs only restore caches
+saved on `main`: by that weekly run, and for Linux by CI's native package
+job. Pull requests restore caches and save none.
+
 For a branch preview without a release tag, set a distinct prerelease such as
 `0.2.0-dev.1` in `Cargo.toml`, `crates/splitty-tauri/tauri.conf.json` and
 `frontend-electron/package.json`, then run `cargo update --workspace --offline`

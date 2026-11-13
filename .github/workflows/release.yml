@@ -4,8 +4,9 @@ name: Release
 # with SHA256SUMS and, for a public repository, build provenance attestations.
 # Each platform gets the native app (crates/splitty-gpui). The legacy web
 # apps (Tauri, Electron) are not released; ci.yml keeps them building.
-# The release is published only once every platform has built and the last
-# release has run against this build (version-skew); a tag with a suffix
+# A weekly run on main and a run started by hand build everything and publish
+# nothing. The release is published only once every platform has built and
+# the last release has run against this build (version-skew); a tag with a suffix
 # (`v0.2.0-rc.1`) becomes a prerelease. The binaries are not code-signed
 # (macOS builds are ad-hoc signed so they run on Apple silicon); the README
 # explains how to verify downloads.
@@ -15,6 +16,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # A rehearsal on main that publishes nothing: it shows a broken release
+  # build before a tag does and fills the dependency caches the tagged runs
+  # restore.
+  schedule:
+    - cron: "43 4 * * 2"
   workflow_dispatch:
 
 # Third-party actions are pinned to commit SHAs; Dependabot keeps the pins and
@@ -44,10 +50,21 @@ jobs:
         if: github.ref_type == 'tag'
         run: scripts/release.sh --check "$GITHUB_REF_NAME"
 
+  # The static servers every desktop app carries for hosts; every platform
+  # job waits for them.
+  payloads:
+    name: Server payloads
+    needs: version
+    uses: ./.github/workflows/server-payloads.yml
+    permissions:
+      contents: read
+
   windows:
     name: Windows
-    needs: version
+    needs: payloads
     uses: ./.github/workflows/windows-tauri.yml
+    with:
+      payloads: false
     permissions:
       contents: read
 
@@ -84,9 +101,7 @@ jobs:
 
   linux:
     name: Linux
-    # Waits for the Windows workflow, whose first job builds the static
-    # servers that every desktop app carries for remote hosts.
-    needs: windows
+    needs: payloads
     # The oldest supported runner, so the packages work on older glibc too.
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -150,6 +165,15 @@ jobs:
         with:
           toolchain: stable
 
+      # Restored from the default branch: a cache saved by a tag's run is
+      # visible to that tag only. The weekly run on main keeps it filled.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The cache of ci.yml's native-linux job, which builds the same
+          # packages on the same runner for every push to main.
+          shared-key: native-linux
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       - name: Build pinned native terminal library
         run: |
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
@@ -199,8 +223,7 @@ jobs:
 
   macos:
     name: macOS (${{ matrix.arch }})
-    # Waits for the static servers of the Windows workflow, like the Linux job.
-    needs: windows
+    needs: payloads
     # The app is built on a runner of its own architecture: Apple silicon
     # and Intel each get a dmg.
     strategy:
@@ -269,6 +292,13 @@ jobs:
         with:
           toolchain: stable
 
+      # Restored from the default branch: a cache saved by a tag's run is
+      # visible to that tag only. The weekly run on main keeps it filled.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: release-macos-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
       # The server linked into the native app embeds the frontend's assets.
       - name: Build frontend
         working-directory: frontend
@@ -308,6 +338,9 @@ jobs:
 
   publish:
     name: Publish release
+    # A run on a branch (the weekly rehearsal, or one started by hand) builds
+    # everything and publishes nothing.
+    if: github.ref_type == 'tag'
     needs: [windows, linux, macos, version-skew]
     runs-on: ubuntu-24.04
     timeout-minutes: 15

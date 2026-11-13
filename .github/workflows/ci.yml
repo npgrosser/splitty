@@ -77,6 +77,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: rust
+          # Pull requests restore the default branch's cache and save none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -197,7 +199,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: native-linux
+          # Shared with the Linux job of release.yml.
+          shared-key: native-linux
+          # Pull requests restore the default branch's cache and save none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install rpm tooling and native app build libraries
         timeout-minutes: 10
@@ -270,6 +275,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: native-windows
+          # Pull requests restore the default branch's cache and save none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build pinned native terminal library
         shell: pwsh
@@ -312,6 +319,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: aarch64
+          # Pull requests restore the default branch's cache and save none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build frontend
         working-directory: frontend
@@ -358,6 +367,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: tauri-linux
+          # Pull requests restore the default branch's cache and save none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build frontend
         working-directory: frontend
@@ -493,6 +504,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: tauri-macos
+          # Pull requests restore the default branch's cache and save none.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           # Preserve compiled dependencies while platform checks are diagnosed.
           cache-on-failure: true
 
