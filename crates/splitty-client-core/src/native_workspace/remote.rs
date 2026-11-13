@@ -267,6 +267,8 @@ pub(super) struct Remotes<'a> {
     /// Hosts connected at start, each with the Screens to open once its
     /// catalog is known. This demand is not a view's to release.
     restoring: Vec<(HostActionTarget, Vec<String>)>,
+    /// The window's presence, which each host connection greets its welcome with.
+    presence: super::WindowPresenceCell,
 }
 impl<'a> Remotes<'a> {
     pub fn new(service: &'a OwnedService) -> Self {
@@ -277,6 +279,32 @@ impl<'a> Remotes<'a> {
             cursor: 0,
             cleanup_error: None,
             restoring: Vec::new(),
+            presence: super::WindowPresenceCell::default(),
+        }
+    }
+    pub fn with_window_presence(mut self, presence: super::WindowPresenceCell) -> Self {
+        self.presence = presence;
+        self
+    }
+    /// The user acted while the window showed a Screen of the source `id`.
+    pub fn acted(&mut self, id: SourceId) {
+        if let Some(source) = self
+            .hosts
+            .iter_mut()
+            .find(|host| host.action.source_id() == id)
+            .and_then(|host| host.source.as_mut())
+        {
+            source.acted();
+        }
+    }
+    /// The window was hidden: no host connection is in use.
+    pub fn hidden(&mut self) {
+        for source in self
+            .hosts
+            .iter_mut()
+            .filter_map(|host| host.source.as_mut())
+        {
+            source.hidden();
         }
     }
     pub async fn next(&mut self) -> Step {
@@ -646,6 +674,7 @@ impl<'a> Remotes<'a> {
                 | CommandKind::AnswerFileOffer { .. }
                 | CommandKind::AnswerEditorRequest { .. }
                 | CommandKind::ResizePane { .. }
+                | CommandKind::TakeOverSize { .. }
                 | CommandKind::Visible { .. }
                 | CommandKind::ResizeSplit { .. }
                 | CommandKind::CycleTab { .. }
@@ -837,7 +866,10 @@ impl<'a> Remotes<'a> {
                             let _ = window.disconnect(id);
                         } else {
                             let owner = window.source(id).expect("bound source").source_token();
-                            host.source = Some(SourceRuntime::new(client, owner));
+                            host.source = Some(
+                                SourceRuntime::new(client, owner)
+                                    .with_window_presence(self.presence.clone()),
+                            );
                             host.prelude_deadline = Some(Instant::now() + Duration::from_secs(15));
                         }
                     }

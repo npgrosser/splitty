@@ -16,6 +16,7 @@ mod popover;
 mod ports;
 mod program_status;
 mod prompt;
+mod pty_size;
 mod remote_screen_create;
 mod scratchpad;
 mod screen_drag;
@@ -48,7 +49,7 @@ use splitty_client_core::appearance::{
     AppearanceSnapshot, ColorScheme, DrawerVisibilityOutcome, DrawerVisibilityResult,
 };
 use splitty_client_core::native_workspace::{
-    Command as WorkerCommand, CommandKind as Command, Update, Worker,
+    Command as WorkerCommand, CommandKind as Command, PtySize, Update, WindowPresenceCell, Worker,
 };
 use splitty_client_core::notifications::NotificationCenter;
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
@@ -703,6 +704,9 @@ fn terminal_commands(
                 cols,
                 rows,
             },
+            terminal::Command::TakeOver => Command::TakeOverSize {
+                route: capture.route.clone(),
+            },
         };
         match sender.try_send(WorkerCommand::new(capture.route.source_token(), command)) {
             Ok(()) => {
@@ -1120,6 +1124,10 @@ pub struct Workspace {
     notification_settings_error: Option<String>,
     notification_window_active: bool,
     notification_window_visible: bool,
+    /// The window's visibility and focus, shared with the worker.
+    presence: WindowPresenceCell,
+    /// The latest PTY size of each session a route shows, by its connection.
+    pty_sizes: HashMap<(SourceToken, String), PtySize>,
     _drawer_bounds_subscription: Subscription,
     ui_family: String,
     mono_family: String,
@@ -1234,6 +1242,11 @@ impl Workspace {
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
         let worker = start_worker(receiver, sender, initial_scheme);
+        let presence = worker.presence.clone();
+        presence.set(splitty_client_core::native_workspace::WindowPresence {
+            visible: window.is_visible(),
+            focused: window.is_window_active(),
+        });
         let stopping = worker.stop.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
             let maintenance = Duration::from_millis(16);
@@ -1320,6 +1333,10 @@ impl Workspace {
         .detach();
         let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
             this.notification_window_active = window.is_window_active();
+            this.window_presence_changed(window);
+            if window.is_window_active() {
+                this.user_acted();
+            }
             this.refresh_notification_watch(cx);
             if !window.is_window_active() && this.cancel_screen_drag() {
                 cx.stop_active_drag(window);
@@ -1336,9 +1353,11 @@ impl Workspace {
         let notification_visibility_subscription =
             cx.observe_window_visibility(window, |this, _, window, cx| {
                 this.notification_window_visible = window.is_visible();
+                this.window_presence_changed(window);
                 this.refresh_notification_watch(cx);
             });
         let drawer_bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
+            this.user_acted();
             if this.cancel_screen_drag() {
                 cx.stop_active_drag(window);
                 cx.notify();
@@ -1493,6 +1512,8 @@ impl Workspace {
                 notification_settings_error: None,
                 notification_window_active: window.is_window_active(),
                 notification_window_visible: window.is_visible(),
+                presence,
+                pty_sizes: HashMap::new(),
                 _drawer_bounds_subscription: drawer_bounds_subscription,
                 ui_family,
                 mono_family,
@@ -2665,6 +2686,7 @@ impl Workspace {
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, origin, cx));
+        self.apply_known_pty_size(&route, &terminal, cx);
         let link_route = route.clone();
         let link_subscription = cx.subscribe(
             &terminal,
@@ -2898,6 +2920,7 @@ impl Workspace {
             self.tab_voids.clear();
             self.tab_scrolls.clear();
         }
+        self.retain_pty_sizes(&window_model);
         self.panes.retain(|pane, view| {
             let retained = *pane == view.route.pane_key()
                 && window_model.contains_terminal_binding(&view.route);
@@ -4048,6 +4071,11 @@ impl Workspace {
                         });
                     }
                 }
+                Update::PtySize {
+                    source,
+                    session,
+                    size,
+                } => self.pty_size_changed(source, session, size, cx),
                 Update::NotificationSettings { owner, read } => {
                     self.apply_notification_settings(owner, read, cx);
                 }
@@ -6120,6 +6148,9 @@ impl Render for Workspace {
             .text_size(chrome_rems(self.appearance.font_size))
             .capture_key_down(cx.listener(Self::key))
             .capture_any_mouse_down(cx.listener(Self::preserve_screen_motion_focus))
+            // The user's own interaction, for the servers' PTY size policy.
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, _| this.user_acted()))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, _| this.user_acted()))
             .id("workspace-root")
             .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
             .on_hover(cx.listener(|this, hovered: &bool, _, _| {

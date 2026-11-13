@@ -305,8 +305,92 @@ struct SearchPaint<'a> {
 
 #[derive(Clone, Copy)]
 struct PaintGeometry {
+    /// The pane: what is painted, and clipped to.
     bounds: Bounds<Pixels>,
     metrics: TerminalMetrics,
+    /// The emulator's grid, the session's PTY size, at the pane's origin.
+    grid: Size,
+    /// Rows a taller grid is moved up by, so that its cursor row stays in view.
+    shift: u16,
+    /// The pane's area outside a narrower or shorter grid is marked.
+    marked: Marked,
+}
+
+impl PaintGeometry {
+    /// Where the grid's rows and columns lie, moved up by `shift` rows.
+    fn grid_bounds(&self) -> Bounds<Pixels> {
+        Bounds::new(
+            self.bounds.origin - point(px(0.), self.metrics.line_height * f32::from(self.shift)),
+            size(
+                self.metrics.cell_width * f32::from(self.grid.cols),
+                self.metrics.line_height * f32::from(self.grid.rows),
+            ),
+        )
+    }
+}
+
+/// A session's PTY size as its server set it, when the server decides sizes,
+/// and whether this window may take it over (not under `smallest`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PtyGrid {
+    pub cols: u16,
+    pub rows: u16,
+    pub takeover: bool,
+}
+
+/// Which parts of the pane lie outside the session's grid and are marked as
+/// sized by another client.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Marked {
+    right: bool,
+    bottom: bool,
+}
+
+/// What the pane shows of a PTY size that differs from its own
+/// (terminal-sessions, Client Display of the PTY Size).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SizeMarker {
+    marked: Marked,
+    pub label: String,
+    pub takeover: bool,
+}
+
+impl SizeMarker {
+    /// The marker for `pty` in a pane of `pane`; none while the session has
+    /// the pane's size or its PTY size is unknown.
+    fn new(pane: Size, pty: Option<PtyGrid>) -> Option<Self> {
+        let pty = pty?;
+        if (pty.cols, pty.rows) == (pane.cols, pane.rows) {
+            return None;
+        }
+        Some(Self {
+            marked: Marked {
+                right: pty.cols < pane.cols,
+                bottom: pty.rows < pane.rows,
+            },
+            label: format!("{}×{}", pty.cols, pty.rows),
+            takeover: pty.takeover,
+        })
+    }
+
+    pub(crate) fn tooltip(&self) -> String {
+        if self.takeover {
+            format!(
+                "Another client set this terminal to {}. Click to use this window's size.",
+                self.label
+            )
+        } else {
+            format!("Another client shows this terminal at {}.", self.label)
+        }
+    }
+}
+
+/// How many rows a grid of `grid_rows` moves up in a pane of `pane_rows`, so
+/// that the cursor on `cursor_row` stays in view, as tmux does.
+fn grid_shift(pane_rows: u16, grid_rows: u16, cursor_row: u16) -> u16 {
+    (cursor_row.saturating_add(1))
+        .saturating_sub(pane_rows)
+        .min(grid_rows.saturating_sub(pane_rows))
 }
 
 /// A retained terminal's drawing surface, without its input or layout behavior.
@@ -346,7 +430,7 @@ impl RenderOnce for TerminalPresentation {
                     // Translation belongs to the outgoing viewport. Its size
                     // and cell metrics remain those of the last live layout.
                     bounds: Bounds::new(bounds.origin, self.geometry.bounds.size),
-                    metrics: self.geometry.metrics,
+                    ..self.geometry
                 };
                 window.with_content_mask(
                     Some(ContentMask {
@@ -568,8 +652,13 @@ fn mouse_modifiers(modifiers: Modifiers) -> MouseModifiers {
 
 #[derive(Debug)]
 pub enum Command {
-    Input { generation: u64, bytes: Vec<u8> },
+    Input {
+        generation: u64,
+        bytes: Vec<u8>,
+    },
     Resize(u16, u16),
+    /// Make the session's PTY follow this window's sizes.
+    TakeOver,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -634,7 +723,15 @@ pub struct Terminal {
     /// releases it when that update, known by its number, takes too long.
     held_frame_release: Option<(u64, Task<()>)>,
     face: Font,
+    /// The emulator's grid: the session's PTY size when its server decides
+    /// sizes and told it, else the pane's.
     size: Size,
+    /// The grid the pane holds, as last measured; this is what is reported.
+    pane_size: Size,
+    /// The session's PTY size from its server's latest `size` event.
+    pty: Option<PtyGrid>,
+    /// Rows the grid was moved up by in the last paint (a taller PTY).
+    grid_shift: u16,
     generation: u64,
     composition: String,
     pointer: PointerGestures,
@@ -713,6 +810,9 @@ impl Terminal {
             // GPUI font lookup takes concrete family names, not CSS generic families.
             face: font(terminal_family(cx)),
             size,
+            pane_size: size,
+            pty: None,
+            grid_shift: 0,
             generation: 0,
             composition: String::new(),
             pointer: PointerGestures::default(),
@@ -772,17 +872,15 @@ impl Terminal {
     pub(crate) fn presentation(&self, cx: &Context<Self>) -> Option<TerminalPresentation> {
         (self.geometry_ready
             && self.engine.is_some()
-            && self.size
+            && self.pane_size
                 == self
                     .metrics
                     .grid_size(self.bounds.size.width, self.bounds.size.height)
+            && self.size == self.target_size()
             && self.resized_pixel_cell == Some(self.metrics.pixel_cell(self.display_scale)))
         .then(|| TerminalPresentation {
             terminal: cx.entity(),
-            geometry: PaintGeometry {
-                bounds: self.bounds,
-                metrics: self.metrics,
-            },
+            geometry: self.paint_geometry(),
             epoch: self.presentation_epoch,
             display_scale: self.display_scale,
         })
@@ -1001,13 +1099,102 @@ impl Terminal {
     }
 
     pub fn report_size(&mut self) {
-        if self.geometry_ready && self.send(Command::Resize(self.size.cols, self.size.rows)) {
+        if self.geometry_ready
+            && self.send(Command::Resize(self.pane_size.cols, self.pane_size.rows))
+        {
             self.size_report_pending = false;
         }
     }
 
+    /// The session's PTY size changed, as its server's policy set it. The
+    /// emulator takes it now, before the output written at that size.
+    pub(crate) fn set_pty_size(&mut self, pty: Option<PtyGrid>, cx: &mut Context<Self>) {
+        if self.pty == pty {
+            return;
+        }
+        self.pty = pty;
+        self.invalidate_presentation();
+        let target = self.target_size();
+        if target != self.size {
+            if let Some(pixel_cell) = self.resized_pixel_cell {
+                self.resize_engine(target, pixel_cell, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    #[cfg(all(test, feature = "ui-test-support"))]
+    pub(crate) fn pty_size(&self) -> Option<PtyGrid> {
+        self.pty
+    }
+
+    /// What the pane shows of a PTY size that differs from its own.
+    pub(crate) fn size_marker(&self) -> Option<SizeMarker> {
+        SizeMarker::new(self.pane_size, self.pty)
+    }
+
+    /// Ask the server to use this window's sizes for the session.
+    fn take_over_size(&mut self) {
+        if self.size_marker().is_some_and(|marker| marker.takeover) {
+            self.send(Command::TakeOver);
+        }
+    }
+
+    /// The grid the emulator should have: the PTY's, else the pane's.
+    fn target_size(&self) -> Size {
+        self.pty.map_or(self.pane_size, |pty| Size {
+            cols: pty.cols,
+            rows: pty.rows,
+        })
+    }
+
+    fn paint_geometry(&self) -> PaintGeometry {
+        PaintGeometry {
+            bounds: self.bounds,
+            metrics: self.metrics,
+            grid: self.size,
+            shift: self.grid_shift,
+            marked: self
+                .size_marker()
+                .map(|marker| marker.marked)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// How far a taller grid is moved up, in pixels.
+    fn grid_offset(&self) -> Pixels {
+        self.metrics.line_height * f32::from(self.grid_shift)
+    }
+
+    /// Resize the emulator's grid; on success it is the current geometry.
+    fn resize_engine(&mut self, size: Size, pixel_cell: (u32, u32), cx: &mut Context<Self>) {
+        self.row_cache.clear();
+        let result = self
+            .engine
+            .as_mut()
+            .map(|engine| engine.resize(size.cols, size.rows, pixel_cell.0, pixel_cell.1));
+        if result.as_ref().is_some_and(|reply| reply.is_ok()) {
+            self.resized_pixel_cell = Some(pixel_cell);
+            self.size = size;
+            self.grid_shift = self.grid_shift.min(size.rows.saturating_sub(1));
+            self.geometry_ready = true;
+        }
+        if let Some(reply) = result.and_then(|result| self.output(result)) {
+            self.send_bytes(reply);
+        }
+        self.content_revision += 1;
+        self.search_wake(cx);
+        // The resize ended a hold; its timer must not cut the next short.
+        self.watch_held_frame(cx);
+    }
+
     fn send(&mut self, command: Command) -> bool {
         let is_input = matches!(&command, Command::Input { .. });
+        let action = match &command {
+            Command::Input { .. } => "Input",
+            Command::Resize(..) => "Resize",
+            Command::TakeOver => "Size takeover",
+        };
         if let Command::Input { bytes, .. } = &command {
             if bytes.len() > MAX_INPUT {
                 self.reject_command("Input exceeds the 64 KiB limit".into());
@@ -1021,7 +1208,6 @@ impl Terminal {
             }
             Ok(()) => true,
             Err(error) => {
-                let action = if is_input { "Input" } else { "Resize" };
                 self.reject_command(format!("{action} not sent: {error}"));
                 false
             }
@@ -1261,6 +1447,52 @@ impl Terminal {
             .into_any_element()
     }
 
+    /// The PTY size another client set, in the pane's top right corner, in
+    /// the look of the control above. A click takes the size over unless the
+    /// policy is `smallest`.
+    fn size_badge(&self, marker: SizeMarker, cx: &mut Context<Self>) -> AnyElement {
+        let colors = self.colors;
+        let tooltip = SharedString::from(marker.tooltip());
+        let badge = div()
+            .id("terminal-size-marker")
+            .debug_selector(|| "terminal-size-marker".into())
+            .absolute()
+            .top(px(6.))
+            .right(px(20.))
+            .px_2()
+            .py(px(3.))
+            .border_1()
+            .border_dashed()
+            .border_color(rgb(colors.ansi[8]))
+            .rounded_sm()
+            .bg(rgb(colors.background))
+            .text_color(rgb(colors.ansi[8]))
+            .text_size(rems(11. / 16.))
+            .font_family(terminal_family(cx))
+            .child(marker.label)
+            .tooltip(move |window, cx| {
+                gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+            })
+            // The terminal's own pointer gestures stay out of it.
+            .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+        if !marker.takeover {
+            return badge.into_any_element();
+        }
+        badge
+            .cursor_pointer()
+            .hover(|badge| {
+                badge
+                    .border_color(rgb(colors.foreground))
+                    .text_color(rgb(colors.foreground))
+            })
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.take_over_size();
+                this.focus_pty(window, cx);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     fn operation(&mut self, result: Option<Result<()>>) {
         if let Some(Err(error)) = result {
             self.status = format!("Terminal engine: {error:#}");
@@ -1413,7 +1645,7 @@ impl Terminal {
         let col = ((position.x - self.bounds.left()) / self.metrics.cell_width)
             .floor()
             .clamp(0., f32::from(self.size.cols - 1)) as u16;
-        let row = ((position.y - self.bounds.top()) / self.metrics.line_height)
+        let row = ((position.y - self.bounds.top() + self.grid_offset()) / self.metrics.line_height)
             .floor()
             .clamp(0., f32::from(self.size.rows - 1)) as u16;
         (col, row)
@@ -1428,7 +1660,8 @@ impl Terminal {
         if x >= f32::from(self.bounds.size.width) || y >= f32::from(self.bounds.size.height) {
             return None;
         }
-        self.metrics.hit_cell(x, y, self.size)
+        self.metrics
+            .hit_cell(x, y + f32::from(self.grid_offset()), self.size)
     }
 
     fn link_at(&mut self, cell: links::Cell) -> Option<links::Target> {
@@ -1486,7 +1719,7 @@ impl Terminal {
         let scale = window.scale_factor();
         (
             f32::from(position.x - self.bounds.left()) * scale,
-            f32::from(position.y - self.bounds.top()) * scale,
+            f32::from(position.y - self.bounds.top() + self.grid_offset()) * scale,
         )
     }
 
@@ -1982,6 +2215,11 @@ impl Terminal {
         if previous != (self.bounds, self.metrics, self.display_scale) {
             self.invalidate_presentation();
         }
+        let pane_changed = self.pane_size != size;
+        self.pane_size = size;
+        // The emulator keeps the session's PTY size; the pane's own is
+        // reported and becomes the PTY's with the server's answer.
+        let size = self.target_size();
         self.links.geometry(links::Geometry {
             origin: (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
             extent: (f32::from(bounds.size.width), f32::from(bounds.size.height)),
@@ -1989,14 +2227,20 @@ impl Terminal {
             scale,
             size: (size.cols, size.rows),
         });
-        let mouse_width = f32::from(bounds.size.width)
-            .min(f32::from(self.metrics.cell_width) * f32::from(size.cols))
-            .max(1.)
-            * scale;
-        let mouse_height = f32::from(bounds.size.height)
-            .min(f32::from(self.metrics.line_height) * f32::from(size.rows))
-            .max(1.)
-            * scale;
+        // Pointer positions count from the grid's origin; a grid larger than
+        // the pane takes positions beyond the pane's extent.
+        let grid_width = f32::from(self.metrics.cell_width) * f32::from(size.cols);
+        let grid_height = f32::from(self.metrics.line_height) * f32::from(size.rows);
+        let (mouse_width, mouse_height) = if self.pty.is_some() {
+            (grid_width, grid_height)
+        } else {
+            (
+                f32::from(bounds.size.width).min(grid_width),
+                f32::from(bounds.size.height).min(grid_height),
+            )
+        };
+        let mouse_width = mouse_width.max(1.) * scale;
+        let mouse_height = mouse_height.max(1.) * scale;
         let mouse_cell_width = f32::from(self.metrics.cell_width) * scale;
         let mouse_cell_height = f32::from(self.metrics.line_height) * scale;
         let result = self.engine.as_mut().map(|engine| {
@@ -2008,36 +2252,20 @@ impl Terminal {
             )
         });
         self.operation(result);
-        let size_changed = self.size != size;
         let pixel_cell = self.metrics.pixel_cell(scale);
-        if size_changed || self.resized_pixel_cell != Some(pixel_cell) {
-            self.row_cache.clear();
-            let result = self
-                .engine
-                .as_mut()
-                .map(|engine| engine.resize(size.cols, size.rows, pixel_cell.0, pixel_cell.1));
-            if result.as_ref().is_some_and(|reply| reply.is_ok()) {
-                self.resized_pixel_cell = Some(pixel_cell);
-                self.size = size;
-                self.geometry_ready = true;
-            }
-            if let Some(reply) = result.and_then(|result| self.output(result)) {
-                self.send_bytes(reply);
-            }
-            self.content_revision += 1;
-            self.search_wake(cx);
-            // The resize ended a hold; its timer must not cut the next short.
-            self.watch_held_frame(cx);
-            if size_changed {
-                if self.size_report_hold.is_some() {
-                    self.size_report_pending = true;
-                } else {
-                    self.report_size();
-                }
-            }
+        if self.size != size || self.resized_pixel_cell != Some(pixel_cell) {
+            self.resize_engine(size, pixel_cell, cx);
             cx.notify();
         } else {
             self.geometry_ready = true;
+        }
+        if pane_changed {
+            if self.size_report_hold.is_some() {
+                self.size_report_pending = true;
+            } else {
+                self.report_size();
+            }
+            cx.notify();
         }
         if self.size_report_pending && self.size_report_hold.is_none() {
             self.report_size();
@@ -2097,11 +2325,25 @@ impl Terminal {
         let started = Instant::now();
         self.frames += 1;
         self.last_paint = Some(started);
-        let geometry = PaintGeometry {
-            bounds: self.bounds,
-            metrics: self.metrics,
+        // A grid taller than the pane follows its cursor's row.
+        self.grid_shift = if self.pty.is_some() {
+            let cursor_row = self
+                .engine
+                .as_mut()
+                .and_then(|engine| engine.cursor_row().ok())
+                .unwrap_or(0);
+            grid_shift(self.pane_size.rows, self.size.rows, cursor_row)
+        } else {
+            0
         };
-        if let Err(error) = self.paint_engine(geometry, true, window, cx) {
+        let geometry = self.paint_geometry();
+        let painted = window.with_content_mask(
+            Some(ContentMask {
+                bounds: geometry.bounds,
+            }),
+            |window| self.paint_engine(geometry, true, window, cx),
+        );
+        if let Err(error) = painted {
             self.status = format!("Terminal paint: {error:#}");
         } else {
             self.painted_revision = self.content_revision;
@@ -2151,6 +2393,13 @@ impl Terminal {
         self.paint_sequence = self.paint_sequence.wrapping_add(1);
         let current_frame = self.paint_sequence;
         window.paint_quad(fill(geometry.bounds, rgb(base)));
+        let pane = geometry;
+        // Rows, images and the cursor lie on the grid, which can be smaller
+        // or larger than the pane and moved up; the pane clips it.
+        let geometry = PaintGeometry {
+            bounds: pane.grid_bounds(),
+            ..pane
+        };
         // Images: their pixels are read once per generation and kept as
         // textures while they are on screen.
         let placements = frame.images()?;
@@ -2265,7 +2514,70 @@ impl Terminal {
                 cx,
             )?;
         }
+        paint_size_marker(pane, self.colors.ansi[8], window);
         Ok(())
+    }
+}
+
+/// Hatch the pane's area outside a narrower or shorter grid, with a dashed
+/// edge along the grid: that area belongs to a size another client set.
+fn paint_size_marker(geometry: PaintGeometry, color: u32, window: &mut Window) {
+    let pane = geometry.bounds;
+    let grid = geometry.grid_bounds();
+    let mut areas = Vec::with_capacity(2);
+    if geometry.marked.right && grid.right() < pane.right() {
+        areas.push((
+            Bounds::new(
+                point(grid.right(), pane.top()),
+                size(pane.right() - grid.right(), pane.size.height),
+            ),
+            true,
+        ));
+    }
+    if geometry.marked.bottom && grid.bottom() < pane.bottom() {
+        let right = if areas.is_empty() {
+            pane.right()
+        } else {
+            grid.right()
+        };
+        areas.push((
+            Bounds::new(
+                point(pane.left(), grid.bottom()),
+                size(right - pane.left(), pane.bottom() - grid.bottom()),
+            ),
+            false,
+        ));
+    }
+    // Diagonal lines this far apart, measured across them.
+    const HATCH_SPACING: f32 = 8.;
+    let step = HATCH_SPACING * std::f32::consts::SQRT_2;
+    for (area, vertical_edge) in areas {
+        window.with_content_mask(Some(ContentMask { bounds: area }), |window| {
+            // Lines x + y = c, rising to the right, across the whole area.
+            let mut lines = PathBuilder::stroke(px(1.));
+            let (left, top) = (f32::from(area.left()), f32::from(area.top()));
+            let (right, bottom) = (f32::from(area.right()), f32::from(area.bottom()));
+            let mut c = left + top;
+            while c < right + bottom {
+                lines.move_to(point(px(c - top), px(top)));
+                lines.line_to(point(px(c - bottom), px(bottom)));
+                c += step;
+            }
+            if let Ok(path) = lines.build() {
+                window.paint_path(path, rgba((color << 8) | 0x70));
+            }
+            let mut edge = PathBuilder::stroke(px(1.)).dash_array(&[px(4.), px(3.)]);
+            if vertical_edge {
+                edge.move_to(point(area.left() + px(0.5), area.top()));
+                edge.line_to(point(area.left() + px(0.5), area.bottom()));
+            } else {
+                edge.move_to(point(area.left(), area.top() + px(0.5)));
+                edge.line_to(point(area.right(), area.top() + px(0.5)));
+            }
+            if let Ok(path) = edge.build() {
+                window.paint_path(path, rgb(color));
+            }
+        });
     }
 }
 
@@ -2594,7 +2906,9 @@ fn paint_link_underline(
     color: u32,
     window: &mut Window,
 ) {
-    let PaintGeometry { bounds, metrics } = geometry;
+    let PaintGeometry {
+        bounds, metrics, ..
+    } = geometry;
     for run in runs {
         let x = bounds.left() + metrics.cell_width * f32::from(run.cols.start);
         let y = bounds.top() + metrics.line_height * f32::from(run.row);
@@ -2783,6 +3097,12 @@ impl Render for Terminal {
         let scroll_bottom = behind
             .map(|behind| self.scroll_bottom_control(behind, false, cx))
             .or_else(|| leaving.map(|last| self.scroll_bottom_control(last, true, cx)));
+        let size_badge = self
+            .size_marker()
+            .filter(|_| {
+                !self.search_active || self.search.as_ref().is_none_or(|search| !search.open)
+            })
+            .map(|marker| self.size_badge(marker, cx));
         let layout = cx.entity();
         let paint = layout.clone();
         div()
@@ -2851,6 +3171,7 @@ impl Render for Terminal {
             )
             .when_some(scrollbar, |view, scrollbar| view.child(scrollbar))
             .when_some(scroll_bottom, |view, control| view.child(control))
+            .when_some(size_badge, |view, badge| view.child(badge))
             .when_some(link_preview, |view, preview| {
                 view.child(
                     div()
@@ -2980,7 +3301,7 @@ impl EntityInputHandler for Terminal {
             self.bounds.origin
                 + point(
                     self.metrics.cell_width * f32::from(cursor.col),
-                    self.metrics.line_height * f32::from(cursor.row),
+                    self.metrics.line_height * f32::from(cursor.row) - self.grid_offset(),
                 ),
             size(self.metrics.cell_width, self.metrics.line_height),
         ))
@@ -3045,7 +3366,10 @@ mod paste_tests {
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod presentation_tests {
-    use super::{links, Command, LinkOrigin, Terminal, TerminalPresentation};
+    use super::{
+        grid_shift, links, Command, LinkOrigin, Marked, PtyGrid, Size, SizeMarker, Terminal,
+        TerminalPresentation,
+    };
     use crate::terminal_engine::{Engine, LinkHit, LinkKind, LinkRun};
     use gpui_kit::{
         div, point, prelude::*, px, size, AppContext, Context, Entity, IntoElement, Modifiers,
@@ -3227,6 +3551,167 @@ mod presentation_tests {
                 assert!(terminal.held_frame_release.is_none());
             });
         });
+    }
+
+    #[test]
+    fn a_pty_size_set_by_another_client_is_marked_and_can_be_taken_over() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            let draw = |window: &mut VisualTestContext| {
+                window.update(|window, cx| window.draw(cx).clear(cx));
+            };
+            let set = |window: &mut VisualTestContext, pty: Option<PtyGrid>| {
+                window.update(|_, cx| {
+                    terminal.update(cx, |terminal, cx| terminal.set_pty_size(pty, cx))
+                });
+                window.update(|window, cx| window.draw(cx).clear(cx));
+            };
+            let read = |window: &mut VisualTestContext| {
+                window.update(|_, cx| {
+                    let terminal = terminal.read(cx);
+                    (terminal.size, terminal.pane_size, terminal.size_marker())
+                })
+            };
+            let take_overs = || {
+                commands
+                    .borrow()
+                    .iter()
+                    .filter(|command| matches!(command, Command::TakeOver))
+                    .count()
+            };
+            draw(window);
+            // Until the server tells, the grid is the pane's and nothing is marked.
+            let (grid, pane, marker) = read(window);
+            assert_eq!(grid, pane);
+            assert_eq!(marker, None);
+            assert!(window.debug_bounds("terminal-size-marker").is_none());
+
+            // A narrower and shorter PTY: the emulator takes its size, the
+            // rest of the pane is marked and the pane's size is still reported.
+            let smaller = PtyGrid {
+                cols: pane.cols - 10,
+                rows: pane.rows - 4,
+                takeover: true,
+            };
+            set(window, Some(smaller));
+            let (grid, unchanged, marker) = read(window);
+            assert_eq!((grid.cols, grid.rows), (smaller.cols, smaller.rows));
+            assert_eq!(unchanged, pane);
+            let marker = marker.expect("a marker");
+            assert_eq!(
+                marker.marked,
+                Marked {
+                    right: true,
+                    bottom: true
+                }
+            );
+            assert_eq!(marker.label, format!("{}×{}", smaller.cols, smaller.rows));
+            assert!(marker.tooltip().contains("Click to use this window's size"));
+            commands.borrow_mut().clear();
+            window.update(|_, cx| terminal.update(cx, |terminal, _| terminal.report_size()));
+            assert!(matches!(
+                commands.borrow().last(),
+                Some(Command::Resize(cols, rows)) if (*cols, *rows) == (pane.cols, pane.rows)
+            ));
+
+            // The badge takes the size over.
+            let badge = window
+                .debug_bounds("terminal-size-marker")
+                .expect("the size badge");
+            window.simulate_click(badge.center(), Modifiers::default());
+            assert_eq!(take_overs(), 1);
+
+            // Under `smallest` there is nothing to take over.
+            set(
+                window,
+                Some(PtyGrid {
+                    takeover: false,
+                    ..smaller
+                }),
+            );
+            let (_, _, marker) = read(window);
+            assert!(marker
+                .expect("a marker")
+                .tooltip()
+                .starts_with("Another client shows"));
+            let badge = window
+                .debug_bounds("terminal-size-marker")
+                .expect("the size badge");
+            window.simulate_click(badge.center(), Modifiers::default());
+            assert_eq!(take_overs(), 1);
+
+            // A taller PTY moves up as far as its cursor's row needs.
+            let taller = PtyGrid {
+                cols: pane.cols,
+                rows: pane.rows + 10,
+                takeover: true,
+            };
+            set(window, Some(taller));
+            let lines = "\r\n".repeat(usize::from(taller.rows) * 2);
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.feed(lines.as_bytes(), false, cx)
+                })
+            });
+            draw(window);
+            let (grid, _, marker) = read(window);
+            assert_eq!(grid.rows, taller.rows);
+            assert_eq!(
+                marker.expect("a marker").marked,
+                Marked::default(),
+                "a taller grid leaves no area of the pane to mark"
+            );
+            let (shift, top_left) = window.update(|_, cx| {
+                let terminal = terminal.read(cx);
+                let origin = terminal.bounds.origin + point(px(1.), px(1.));
+                (terminal.grid_shift, terminal.cell_at(origin))
+            });
+            assert_eq!(shift, 10);
+            assert_eq!(top_left, (0, 10), "the pane's top shows the grid's row 10");
+
+            // At the pane's size again, nothing is marked.
+            set(
+                window,
+                Some(PtyGrid {
+                    cols: pane.cols,
+                    rows: pane.rows,
+                    takeover: true,
+                }),
+            );
+            let (grid, _, marker) = read(window);
+            assert_eq!(grid, pane);
+            assert_eq!(marker, None);
+            assert_eq!(window.update(|_, cx| terminal.read(cx).grid_shift), 0);
+            assert!(window.debug_bounds("terminal-size-marker").is_none());
+        });
+    }
+
+    #[test]
+    fn a_taller_grid_moves_only_as_far_as_its_cursor_needs() {
+        assert_eq!(grid_shift(24, 24, 23), 0);
+        assert_eq!(grid_shift(24, 34, 10), 0);
+        assert_eq!(grid_shift(24, 34, 24), 1);
+        assert_eq!(grid_shift(24, 34, 33), 10);
+        assert_eq!(grid_shift(24, 34, 60), 10);
+        assert_eq!(grid_shift(30, 24, 23), 0);
+        let pane = Size { cols: 80, rows: 24 };
+        let marker = |cols, rows| {
+            SizeMarker::new(
+                pane,
+                Some(PtyGrid {
+                    cols,
+                    rows,
+                    takeover: true,
+                }),
+            )
+            .map(|marker| (marker.marked.right, marker.marked.bottom))
+        };
+        assert_eq!(SizeMarker::new(pane, None), None);
+        assert_eq!(marker(80, 24), None);
+        assert_eq!(marker(70, 24), Some((true, false)));
+        assert_eq!(marker(80, 20), Some((false, true)));
+        assert_eq!(marker(100, 30), Some((false, false)));
+        assert_eq!(marker(100, 20), Some((false, true)));
     }
 
     #[test]
@@ -3630,7 +4115,7 @@ mod presentation_tests {
                     .iter()
                     .filter_map(|command| match command {
                         Command::Resize(cols, rows) => Some((*cols, *rows)),
-                        Command::Input { .. } => None,
+                        Command::Input { .. } | Command::TakeOver => None,
                     })
                     .collect::<Vec<_>>()
             };

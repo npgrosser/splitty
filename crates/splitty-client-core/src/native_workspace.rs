@@ -3,6 +3,7 @@ mod auto_forward;
 mod editors;
 mod files;
 mod host_catalog;
+mod presence;
 mod remembered;
 mod remote;
 mod shares;
@@ -35,6 +36,10 @@ pub use editors::{
     PathKind,
 };
 pub use files::{quote_path, FileUpdate, StoreItem};
+pub use presence::{
+    PtySize, SizePolicy, WindowPresence, WindowPresenceCell, ACTIVITY_INTERVAL, MAX_PTY_COLS,
+    MAX_PTY_ROWS,
+};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -86,6 +91,7 @@ impl Command {
         let captured = match &self.kind {
             CommandKind::Input { route, .. }
             | CommandKind::ResizePane { route, .. }
+            | CommandKind::TakeOverSize { route }
             | CommandKind::Focus { route, .. } => Some(route.source_token()),
             CommandKind::RequestClose { plan, .. } => plan.source_token(),
             CommandKind::ApplyTemplate { plan, .. } => Some(plan.source_token()),
@@ -385,6 +391,11 @@ pub enum CommandKind {
         route_generation: u64,
         panes: Vec<String>,
     },
+    /// Make the PTY of the route's session, and every other one of its
+    /// server, follow this window's sizes (`activity` with `takeover`).
+    TakeOverSize {
+        route: TerminalToken,
+    },
 }
 pub enum Update {
     RemoteScreenCreateRejected {
@@ -447,6 +458,13 @@ pub enum Update {
     Attached {
         source: SourceToken,
         session: String,
+    },
+    /// A session's PTY size changed, as its server's policy set it. Sent
+    /// before the output written at that size.
+    PtySize {
+        source: SourceToken,
+        session: String,
+        size: PtySize,
     },
     Status(String),
     /// The phase the start of the local backend entered; the window shows
@@ -614,6 +632,9 @@ pub struct Worker {
     /// The worker exited and can be joined, even when cleanup failed. This is
     /// deliberately separate from successful service-cleanup evidence.
     pub finished: Arc<AtomicBool>,
+    /// The window's visibility and focus, for the servers' PTY size policy.
+    /// The window sets it as soon as the worker starts and on every change.
+    pub presence: WindowPresenceCell,
     thread: Option<thread::JoinHandle<anyhow::Result<()>>>,
 }
 
@@ -1200,6 +1221,7 @@ impl Worker {
             stop: Arc::new(AtomicBool::new(false)),
             cleanup_complete: Arc::new(AtomicBool::new(true)),
             finished: Arc::new(AtomicBool::new(true)),
+            presence: WindowPresenceCell::default(),
             thread: None,
         }
     }
@@ -1250,6 +1272,8 @@ impl Worker {
         let completed = cleanup_complete.clone();
         let finished = Arc::new(AtomicBool::new(false));
         let completion = finished.clone();
+        let presence = WindowPresenceCell::default();
+        let window_presence = presence.clone();
         let thread = thread::spawn(move || {
             // Declared before the runtime: its drop (including cleanup tasks)
             // precedes this completion signal on every return/unwind path.
@@ -1273,6 +1297,7 @@ impl Worker {
                     completed,
                     scheme,
                     origin,
+                    window_presence,
                 )
                 .await;
                 if let Err(error) = &result {
@@ -1285,6 +1310,7 @@ impl Worker {
             stop,
             cleanup_complete,
             finished,
+            presence,
             thread: Some(thread),
         }
     }
@@ -1341,11 +1367,21 @@ async fn run(
     cleanup_complete: Arc<AtomicBool>,
     scheme: ColorScheme,
     origin: Origin,
+    presence: WindowPresenceCell,
 ) -> anyhow::Result<()> {
     let backend = match origin.into_backend() {
         Ok(backend) => backend,
         Err(service) => {
-            return run_service(*service, commands, updates, stop, cleanup_complete, scheme).await
+            return run_service_with_presence(
+                *service,
+                commands,
+                updates,
+                stop,
+                cleanup_complete,
+                scheme,
+                presence,
+            )
+            .await
         }
     };
     use crate::owned_service::{LocalBackend, Prepared, StartupPhase};
@@ -1388,7 +1424,16 @@ async fn run(
     // Reported without waiting: the service is owned now and must reach
     // `run_service`, which joins it on every path.
     let _ = updates.try_send(Update::Startup(StartupPhase::Connecting));
-    run_service(service, commands, updates, stop, cleanup_complete, scheme).await
+    run_service_with_presence(
+        service,
+        commands,
+        updates,
+        stop,
+        cleanup_complete,
+        scheme,
+        presence,
+    )
+    .await
 }
 
 /// Pending metadata and recent source admissions share one request identity.
@@ -1461,13 +1506,36 @@ impl HostConnects {
     }
 }
 
+/// [`run_service_with_presence`] for a window that never reports its presence.
+#[cfg(test)]
 async fn run_service(
+    service: impl Into<crate::owned_service::OwnedService>,
+    commands: mpsc::Receiver<Command>,
+    updates: mpsc::Sender<Update>,
+    stop: Arc<AtomicBool>,
+    cleanup_complete: Arc<AtomicBool>,
+    scheme: ColorScheme,
+) -> anyhow::Result<()> {
+    run_service_with_presence(
+        service,
+        commands,
+        updates,
+        stop,
+        cleanup_complete,
+        scheme,
+        WindowPresenceCell::default(),
+    )
+    .await
+}
+
+async fn run_service_with_presence(
     service: impl Into<crate::owned_service::OwnedService>,
     mut commands: mpsc::Receiver<Command>,
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
     scheme: ColorScheme,
+    presence: WindowPresenceCell,
 ) -> anyhow::Result<()> {
     let service = service.into();
     let client = match service.connect().await {
@@ -1478,7 +1546,11 @@ async fn run_service(
         }
     };
     let mut window = WindowWorkspace::new(client.connection_id());
-    let mut local = source::SourceRuntime::new(client, window.lifecycle_token());
+    let mut local = source::SourceRuntime::new(client, window.lifecycle_token())
+        .with_window_presence(presence.clone());
+    // What the window's presence was at the last turn: a window that became
+    // hidden makes every connection idle.
+    let mut seen_presence = presence.get();
     let mut settings = None::<RuntimeLocalService<'_>>;
     let mut ports = None::<PortsClient<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
@@ -1491,7 +1563,7 @@ async fn run_service(
     let mut auto_forward = auto_forward::AutoForward::default();
     let mut auto_forward_enabled = false;
     let mut forwards = None::<Arc<ForwardSnapshot>>;
-    let mut remotes = remote::Remotes::new(&service);
+    let mut remotes = remote::Remotes::new(&service).with_window_presence(presence.clone());
     let mut known = None::<Arc<HostDirectorySnapshot>>;
     let mut host_connects = HostConnects::default();
     let result = async {
@@ -1520,6 +1592,19 @@ async fn run_service(
                 _ = tick.tick() => Next::Tick,
             };
             if stop.load(Ordering::Acquire) { break; }
+            let current_presence = presence.get();
+            if seen_presence.visible && !current_presence.visible {
+                local.hidden();
+                remotes.hidden();
+            }
+            seen_presence = current_presence;
+            if presence.take_acted() {
+                match window.shown_key().map(|key| key.source_id()) {
+                    Some(id) if id == local.id() => local.acted(),
+                    Some(id) => remotes.acted(id),
+                    None => {}
+                }
+            }
             let owner = window.lifecycle_token();
             match next {
                 Next::Remembered(list) => publish(&updates,Update::RememberedScreens(list),&stop).await?,
@@ -2430,26 +2515,32 @@ mod close_tests {
         let mut other = service.connect().await.unwrap();
         session_kind(&mut other, "mux.welcome").await;
         // Register the competing client before the worker. Its later size
-        // report is not legacy activity, so the worker remains the most recent
-        // active claimant under both Active and Latest policies.
+        // report is not legacy activity, so the worker's own activity below
+        // keeps it the most recent active claimant under both Active and
+        // Latest policies.
         other.activity(false).unwrap();
         other.request_workspace().unwrap();
         session_kind(&mut other, "mux.workspace_snapshot").await;
         let stop = Arc::new(AtomicBool::new(false));
         let cleanup = Arc::new(AtomicBool::new(false));
-        let worker = tokio::spawn(run_service(
+        let presence = WindowPresenceCell::default();
+        let worker = tokio::spawn(run_service_with_presence(
             service,
             receiver,
             sender,
             stop.clone(),
             cleanup.clone(),
             ColorScheme::Dark,
+            presence.clone(),
         ));
         let first = stable_model(&mut updates).await;
         let scope = first.source_token();
         let screen = first.shown_screen_id().unwrap().to_owned();
         let connection = first.connection_id();
         let pane_a = first.routes()[0].pane_id.clone();
+        // The user acts in the window, which makes the worker's connection
+        // active as well: under the default policy the smaller size decides.
+        presence.acted();
         commands
             .send(Command::new(
                 scope,

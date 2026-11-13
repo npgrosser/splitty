@@ -262,7 +262,7 @@ model {
     native_workspace -> client_shell_profiles 'Publish charged choices and bound admitted launch fallback notices'
     native_workspace -> appearance 'Poll owner-bound appearance without consuming session events'
     native_workspace -> embedded 'Own appearance fixture service cleanup in runtime tests'
-    native_workspace -> splitty.core.protocol 'Read Screen placement capability before admission and broadcast same-service settings events in runtime tests'
+    native_workspace -> splitty.core.protocol 'Read Screen placement and PTY size capabilities before admission, follow the size policy per connection and broadcast same-service settings events in runtime tests'
     native_workspace -> splitty.core.config 'Verify persistence in an isolated child process'
     native_workspace -> client_workspace 'Collect and commit coherent routes, admit captured transfers and revalidate close impact'
     native_workspace -> connection 'Reject commands with missing or obsolete source authority before effects'

@@ -1247,6 +1247,20 @@ impl Engine {
         ))
     }
 
+    /// The cursor's row in the active area, whatever the viewport shows.
+    pub fn cursor_row(&mut self) -> Result<u16> {
+        let mut row = 0u16;
+        // SAFETY: the output exactly matches the terminal data key.
+        unsafe {
+            check(ffi::ghostty_terminal_get(
+                self.terminal,
+                ffi::DATA_CURSOR_Y,
+                ptr::from_mut(&mut row).cast(),
+            ))?;
+        }
+        Ok(row)
+    }
+
     pub fn cursor(&mut self) -> Result<Cursor> {
         let mut col = 0u16;
         let mut row = 0u16;

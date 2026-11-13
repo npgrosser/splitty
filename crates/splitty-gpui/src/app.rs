@@ -180,6 +180,9 @@ async fn run_service(
                     )
                     .await?;
                 }
+                // The probe's terminal follows its own size; there is
+                // nothing to take over.
+                Next::Terminal(Some(terminal::Command::TakeOver)) => {}
                 Next::Terminal(Some(terminal::Command::Resize(cols, rows))) => {
                     size = (cols, rows);
                     if attached {

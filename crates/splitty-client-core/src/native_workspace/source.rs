@@ -5,7 +5,7 @@ use crate::{
     workspace::{RemoteScreenCreateRequest, SourceId, SourceKind, WorkspaceDelta},
     Client,
 };
-use std::io;
+use std::{io, time::Instant};
 
 #[derive(Default)]
 pub(super) struct SourceEffects {
@@ -37,7 +37,12 @@ pub(super) struct SourceRuntime {
     /// report asks the server to redraw at an unchanged size. Any later one
     /// would make full-screen programs repaint for a layout change elsewhere.
     redraw_pending: HashSet<String>,
-    activity_pending: bool,
+    /// What this connection's server still has to hear for its size policy.
+    presence: presence::ConnectionPresence,
+    /// The window's presence, read when a welcome is greeted.
+    window_presence: presence::WindowPresenceCell,
+    /// The latest valid PTY size of each owned session (`size` events).
+    pty_sizes: HashMap<String, presence::PtySize>,
     /// The size the window last reported for each session's pane, in the
     /// current route generation. A session without one is not reported.
     sizes: HashMap<String, (u16, u16)>,
@@ -68,7 +73,9 @@ impl SourceRuntime {
             pending_hide: HashSet::new(),
             pending_resize: HashSet::new(),
             redraw_pending: HashSet::new(),
-            activity_pending: false,
+            presence: presence::ConnectionPresence::default(),
+            window_presence: presence::WindowPresenceCell::default(),
+            pty_sizes: HashMap::new(),
             sizes: HashMap::new(),
             refresh_error: None,
             control_error: None,
@@ -80,6 +87,20 @@ impl SourceRuntime {
             editors: editors::EditorRequests::default(),
             extractions: HashMap::new(),
         }
+    }
+    /// Greet welcomes with the presence of this window; until set, the
+    /// window counts as not in use.
+    pub fn with_window_presence(mut self, presence: presence::WindowPresenceCell) -> Self {
+        self.window_presence = presence;
+        self
+    }
+    /// The user acted in the window while it showed a Screen of this source.
+    pub fn acted(&mut self) {
+        self.presence.acted(std::time::Instant::now());
+    }
+    /// The window was hidden: this connection is not in use.
+    pub fn hidden(&mut self) {
+        self.presence.hidden();
     }
     pub fn owner(&self) -> SourceToken {
         self.owner
@@ -333,6 +354,12 @@ impl SourceRuntime {
                         self.sizes.insert(route.session_id().into(), (*cols, *rows));
                         self.pending_resize.insert(route.session_id().into());
                     }
+                }
+                return Ok(out);
+            }
+            CommandKind::TakeOverSize { route } => {
+                if window.accepts_terminal(route) && self.attached.contains(route.session_id()) {
+                    self.presence.take_over();
                 }
                 return Ok(out);
             }
@@ -911,6 +938,7 @@ impl SourceRuntime {
             | CommandKind::AnswerEditorRequest { .. }
             | CommandKind::ResizePane { .. }
             | CommandKind::ReadViewer { .. }
+            | CommandKind::TakeOverSize { .. }
             | CommandKind::Visible { .. } => {
                 unreachable!("read-only controls handled before model mutation")
             }
@@ -939,6 +967,9 @@ impl SourceRuntime {
         let local = window
             .source(self.id())
             .is_some_and(|source| source.kind() == SourceKind::Local);
+        let shown_here = window
+            .shown_key()
+            .is_some_and(|key| key.source_id() == self.id());
         let mut model = Some(
             window
                 .source_mut(self.id())
@@ -1007,6 +1038,11 @@ impl SourceRuntime {
                     }
                     out.changed = true;
                     self.welcomed = true;
+                    // Greeted in the next reconcile, before any attach.
+                    self.presence.welcome(
+                        presence::decides_sizes(json),
+                        shown_here && self.window_presence.get().in_use(),
+                    );
                     self.files.welcome(&self.client, json);
                     self.editors.welcome(&self.client, json);
                 }
@@ -1177,7 +1213,6 @@ impl SourceRuntime {
                         }) {
                             self.attached.insert(session.to_owned());
                             self.redraw_pending.insert(session.to_owned());
-                            self.activity_pending = true;
                             if model
                                 .as_ref()
                                 .and_then(|model| model.pane_for(session))
@@ -1195,9 +1230,27 @@ impl SourceRuntime {
                         }
                     }
                 }
+                Some("size") => {
+                    if let Some(session) = json["sessionId"]
+                        .as_str()
+                        .filter(|session| self.owned_sessions.contains(*session))
+                        .filter(|_| self.presence.supported())
+                    {
+                        if let Some(size) = presence::PtySize::from_event(json) {
+                            if self.pty_sizes.insert(session.to_owned(), size) != Some(size) {
+                                out.push(Update::PtySize {
+                                    source,
+                                    session: session.to_owned(),
+                                    size,
+                                });
+                            }
+                        }
+                    }
+                }
                 Some("closed") => {
                     if let Some(session) = json["sessionId"].as_str() {
                         self.attached.remove(session);
+                        self.pty_sizes.remove(session);
                         self.redraw_pending.remove(session);
                         self.editors.session_closed(
                             &self.client,
@@ -1411,6 +1464,26 @@ impl SourceRuntime {
         }
         Ok(out)
     }
+    /// Withdraw this connection's size report; a server that does not decide
+    /// sizes knows no `hide` and keeps the PTY as it is.
+    fn hide(&self, session: &str) -> io::Result<()> {
+        if self.presence.supported() {
+            self.client.hide(session)
+        } else {
+            Ok(())
+        }
+    }
+    /// Report a shown pane's size. A server that does not decide sizes knows
+    /// no `redraw`: the first report after an attach resizes the PTY by one
+    /// row and back instead, so that the session's programs redraw.
+    fn report_size(&self, session: &str, cols: u16, rows: u16, redraw: bool) -> io::Result<()> {
+        if redraw && !self.presence.supported() {
+            let nudged = if rows < u16::MAX { rows + 1 } else { rows - 1 };
+            self.client.resize(session, cols, nudged, false)?;
+            return self.client.resize(session, cols, rows, false);
+        }
+        self.client.resize(session, cols, rows, redraw)
+    }
     pub fn reconcile(&mut self, window: &mut WindowWorkspace) -> anyhow::Result<SourceEffects> {
         let mut out = SourceEffects::default();
         self.files
@@ -1433,6 +1506,8 @@ impl SourceRuntime {
                 .retain(|session| desired_sessions.contains(session));
             self.redraw_pending
                 .retain(|session| desired_sessions.contains(session));
+            self.pty_sizes
+                .retain(|session, _| desired_sessions.contains(session));
             self.desired_visible.retain(|pane| {
                 model.screen_for(pane) == model.shown_screen_id()
                     && model.session_for(pane).is_some()
@@ -1453,6 +1528,7 @@ impl SourceRuntime {
                             self.pending_resize.remove(&session);
                             self.redraw_pending.remove(&session);
                             self.sizes.remove(&session);
+                            self.pty_sizes.remove(&session);
                         }
                         Err(error) => {
                             pending_error.get_or_insert_with(|| format!("Detach pending: {error}"));
@@ -1466,8 +1542,18 @@ impl SourceRuntime {
                 .difference(&self.owned_sessions)
                 .cloned()
                 .collect();
+            // A welcome's greeting precedes every attach, so that a window
+            // nobody uses never counts as active for the sessions it attaches.
+            let client = &self.client;
+            if let Err(error) = self.presence.flush(Instant::now(), |report| match report {
+                presence::Report::Activity { takeover } => client.activity(takeover),
+                presence::Report::Idle => client.idle(),
+            }) {
+                pending_error.get_or_insert_with(|| format!("Activity pending: {error}"));
+            }
+            let attach_ready = self.presence.attach_ready();
             for session in missing {
-                if !self.closed_sessions.contains(&session) {
+                if attach_ready && !self.closed_sessions.contains(&session) {
                     match self.client.attach(&session) {
                         Ok(()) => {
                             self.owned_sessions.insert(session);
@@ -1478,18 +1564,10 @@ impl SourceRuntime {
                     }
                 }
             }
-            if self.activity_pending {
-                match self.client.activity(true) {
-                    Ok(()) => self.activity_pending = false,
-                    Err(error) => {
-                        pending_error.get_or_insert_with(|| format!("Activity pending: {error}"));
-                    }
-                }
-            }
             for pane in self.visible.clone() {
                 if !self.desired_visible.contains(&pane) {
                     if let Some(session) = model.session_for(&pane) {
-                        match self.client.hide(session) {
+                        match self.hide(session) {
                             Ok(()) => {
                                 self.visible.remove(&pane);
                             }
@@ -1513,7 +1591,7 @@ impl SourceRuntime {
                     self.pending_hide.remove(&session);
                     self.pending_resize.insert(session);
                 } else {
-                    match self.client.hide(&session) {
+                    match self.hide(&session) {
                         Ok(()) => {
                             self.pending_hide.remove(&session);
                         }
@@ -1536,7 +1614,7 @@ impl SourceRuntime {
                             continue;
                         };
                         let redraw = self.redraw_pending.contains(session);
-                        match self.client.resize(session, cols, rows, redraw) {
+                        match self.report_size(session, cols, rows, redraw) {
                             Ok(()) => {
                                 self.visible.insert(pane.clone());
                                 self.pending_resize.remove(session);
@@ -2413,6 +2491,365 @@ mod tests {
     #[tokio::test]
     async fn host_metadata_refresh_keeps_the_size_report_of_a_shown_pane() {
         host_metadata_refresh_leaves_pane_sizes_alone(true).await;
+    }
+
+    /// A window whose source drives a connection to the test service as a
+    /// host's, showing one Screen whose pane it reports at `pane_size`.
+    struct ShownWindow {
+        source: SourceRuntime,
+        window: WindowWorkspace,
+        presence: presence::WindowPresenceCell,
+        id: SourceId,
+        token: SourceToken,
+        screen: ScreenKey,
+        pane: String,
+        session: String,
+        pane_size: (u16, u16),
+        output: HashMap<String, Vec<u8>>,
+        /// Every `Update::PtySize` the source published, in order.
+        sizes: Vec<(String, presence::PtySize)>,
+    }
+
+    impl ShownWindow {
+        async fn open(
+            client: Client,
+            screen_id: &str,
+            presence: presence::WindowPresence,
+            pane_size: (u16, u16),
+        ) -> Self {
+            let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
+            window
+                .ui_test_screen_order_fixture(&[(screen_id, "Local")], None)
+                .unwrap();
+            let id = window
+                .admit_remote(window.lifecycle_token(), "size.test")
+                .unwrap();
+            window.test_bind_remote_client(id, &client);
+            let token = window.source(id).unwrap().source_token();
+            window.confirm_ready(token).unwrap();
+            let target = window.host(id).unwrap().action_target().clone();
+            let cell = presence::WindowPresenceCell::default();
+            cell.set(presence);
+            let source = SourceRuntime::new(client, token).with_window_presence(cell.clone());
+            let screen = window.source(id).unwrap().screen_key(screen_id);
+            let mut shown = Self {
+                source,
+                window,
+                presence: cell,
+                id,
+                token,
+                screen,
+                pane: String::new(),
+                session: String::new(),
+                pane_size,
+                output: HashMap::new(),
+                sizes: Vec::new(),
+            };
+            shown
+                .pump("the host catalog", |this| {
+                    this.window
+                        .source(id)
+                        .unwrap()
+                        .live_catalog()
+                        .is_some_and(|catalog| !catalog.is_empty())
+                })
+                .await;
+            shown.window.host_mut(&target).unwrap().catalog = crate::workspace::CatalogState::Ready;
+            let key = shown.screen.clone();
+            shown.window.open_existing(token, &key).unwrap();
+            if shown.window.shown_key().as_ref() != Some(&key) {
+                let owner = shown.window.lifecycle_token();
+                shown.window.select(owner, &key).unwrap();
+            }
+            shown
+                .pump("the pane", |this| {
+                    let model = this.window.source(id).unwrap();
+                    model.routes().len() == 1
+                        && this.source.attached.contains(&model.routes()[0].session_id)
+                })
+                .await;
+            let route = shown.window.source(id).unwrap().routes()[0].clone();
+            shown.pane = route.pane_id;
+            shown.session = route.session_id;
+            shown.report();
+            shown
+        }
+
+        /// What the window sends once it measured its pane.
+        fn report(&mut self) {
+            let pane = self.pane.clone();
+            let screen = self.screen.clone();
+            let (cols, rows) = self.pane_size;
+            report_layout(
+                &mut self.source,
+                &mut self.window,
+                self.id,
+                &screen,
+                &[(&pane, cols, rows)],
+            );
+        }
+
+        /// Run the source as the worker does until `done`, reporting the pane
+        /// again after each route refresh, as the window measures it then.
+        async fn pump(&mut self, what: &str, mut done: impl FnMut(&Self) -> bool) {
+            let mut reported = self.window.source(self.id).unwrap().route_generation();
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    self.source.reconcile(&mut self.window).unwrap();
+                    if done(self) && !self.source.observation_pending(&self.window) {
+                        break;
+                    }
+                    let event = self.source.client.next_event().await.unwrap().unwrap();
+                    if let Some(chunk) = event.output() {
+                        self.output
+                            .entry(chunk.session_id.to_owned())
+                            .or_default()
+                            .extend_from_slice(chunk.bytes);
+                    }
+                    let effects = self
+                        .source
+                        .event(&mut self.window, Box::new(event))
+                        .unwrap();
+                    for update in effects.updates {
+                        if let Update::PtySize {
+                            source,
+                            session,
+                            size,
+                        } = update
+                        {
+                            assert_eq!(source, self.token);
+                            self.sizes.push((session, size));
+                        }
+                    }
+                    let generation = self.window.source(self.id).unwrap().route_generation();
+                    if !self.pane.is_empty()
+                        && generation != reported
+                        && !self.source.observation_pending(&self.window)
+                    {
+                        self.source.reconcile(&mut self.window).unwrap();
+                        self.report();
+                        reported = generation;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+        }
+
+        /// The PTY size (columns, rows) the session's shell reports now.
+        async fn stty(&mut self, marker: &str) -> (u16, u16) {
+            let command = format!("printf '{marker}_%s_\\n' \"$(stty size)\"\n");
+            let route = TerminalToken::new(self.token, &self.pane, &self.session);
+            self.source
+                .command(
+                    &mut self.window,
+                    Command::new(
+                        self.token,
+                        CommandKind::Input {
+                            route,
+                            bytes: command.into_bytes(),
+                        },
+                    ),
+                )
+                .unwrap();
+            let found = |this: &Self| stty_answer(this.output.get(&this.session), marker);
+            self.pump("the shell's size", |this| found(this).is_some())
+                .await;
+            let size = found(self).unwrap();
+            self.output.remove(&self.session);
+            size
+        }
+    }
+
+    /// `<marker>_<rows> <cols>_` in a shell's output, not its echoed command.
+    fn stty_answer(output: Option<&Vec<u8>>, marker: &str) -> Option<(u16, u16)> {
+        let text = String::from_utf8_lossy(output?);
+        let prefix = format!("{marker}_");
+        text.match_indices(&prefix).find_map(|(at, _)| {
+            let rest = &text[at + prefix.len()..];
+            let (size, _) = rest.split_once('_')?;
+            let (rows, cols) = size.trim().split_once(' ')?;
+            Some((cols.parse().ok()?, rows.parse().ok()?))
+        })
+    }
+
+    /// Another client that shows `session` at `cols`×`rows` and is in use.
+    async fn client_in_use(
+        service: &crate::EmbeddedService,
+        session: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Client {
+        let mut viewer = service.connect().await.unwrap();
+        viewer.attach(session).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let event = viewer.next_event().await.unwrap().unwrap();
+                let Some(json) = event.json() else { continue };
+                match json["type"].as_str() {
+                    Some("attached") => {
+                        viewer.activity(false).unwrap();
+                        viewer.resize(session, cols, rows, false).unwrap();
+                    }
+                    Some("size") if json["cols"] == cols && json["rows"] == rows => break,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the other client's size");
+        viewer
+    }
+
+    fn in_use() -> presence::WindowPresence {
+        presence::WindowPresence {
+            visible: true,
+            focused: true,
+        }
+    }
+
+    fn pty(cols: u16, rows: u16) -> presence::PtySize {
+        presence::PtySize {
+            cols,
+            rows,
+            policy: presence::SizePolicy::Active,
+        }
+    }
+
+    #[tokio::test]
+    async fn an_untouched_window_that_attaches_again_leaves_the_size_to_the_client_in_use() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        // The window's first connection, which then goes away.
+        let first = ShownWindow::open(client, &initial.screen_id, in_use(), (50, 30)).await;
+        let session = first.session.clone();
+        let other = client_in_use(&service, &session, 60, 20).await;
+        first.source.client.finish().await.unwrap();
+
+        // Reconnected: visible and focused, but nobody acted in it since.
+        let client = service.connect().await.unwrap();
+        let mut window = ShownWindow::open(client, &initial.screen_id, in_use(), (50, 30)).await;
+        assert_eq!(window.session, session);
+        assert!(window.source.presence.supported());
+        assert_eq!(window.stty("UNTOUCHED").await, (60, 20));
+        assert_eq!(window.source.pty_sizes.get(&session), Some(&pty(60, 20)));
+        assert_eq!(
+            window.sizes.last(),
+            Some(&(session.clone(), pty(60, 20))),
+            "the size reaches the window"
+        );
+
+        // The user acts: both clients are in use, the smaller size decides.
+        window.source.acted();
+        assert_eq!(window.stty("ACTED").await, (50, 20));
+
+        // Taking the size over makes the other client idle until it acts.
+        let route = TerminalToken::new(window.token, &window.pane, &session);
+        let token = window.token;
+        window
+            .source
+            .command(
+                &mut window.window,
+                Command::new(token, CommandKind::TakeOverSize { route }),
+            )
+            .unwrap();
+        assert_eq!(window.stty("TAKEN").await, (50, 30));
+        assert_eq!(window.sizes.last(), Some(&(session.clone(), pty(50, 30))));
+
+        drop(other);
+        window.source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn a_hidden_window_is_idle_and_the_other_clients_size_applies() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        let mut window = ShownWindow::open(client, &initial.screen_id, in_use(), (50, 15)).await;
+        window.source.acted();
+        let session = window.session.clone();
+        let other = client_in_use(&service, &session, 60, 20).await;
+        assert_eq!(window.stty("SHOWN").await, (50, 15));
+
+        window.presence.set(presence::WindowPresence {
+            visible: false,
+            focused: false,
+        });
+        window.source.hidden();
+        assert_eq!(window.stty("HIDDEN").await, (60, 20));
+        assert_eq!(window.sizes.last(), Some(&(session.clone(), pty(60, 20))));
+
+        drop(other);
+        window.source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn size_events_of_unknown_sessions_or_out_of_range_are_not_published() {
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let mut window = WindowWorkspace::new(client.connection_id());
+        let token = window.lifecycle_token();
+        let mut source = SourceRuntime::new(client, token);
+        source.presence.welcome(true, false);
+        source.owned_sessions.insert("known".into());
+        let connection = source.client.connection_id();
+        let mut published = Vec::new();
+        for (session, cols, rows, policy) in [
+            ("known", 100, 30, "latest"),
+            ("known", 100, 30, "latest"),
+            ("unknown", 90, 20, "latest"),
+            ("known", 5000, 30, "latest"),
+            ("known", 80, 24, "largest"),
+            ("known", 80, 24, "smallest"),
+        ] {
+            let event = Event::ui_test_json(
+                connection,
+                &serde_json::json!({"type":"size","sessionId":session,"cols":cols,"rows":rows,"policy":policy}),
+            )
+            .await
+            .unwrap();
+            let effects = source.event(&mut window, Box::new(event)).unwrap();
+            published.extend(
+                effects
+                    .updates
+                    .into_iter()
+                    .filter_map(|update| match update {
+                        Update::PtySize { session, size, .. } => Some((session, size)),
+                        _ => None,
+                    }),
+            );
+        }
+        let size = |cols, rows, policy| presence::PtySize { cols, rows, policy };
+        assert_eq!(
+            published,
+            [
+                (
+                    "known".to_owned(),
+                    size(100, 30, presence::SizePolicy::Latest)
+                ),
+                (
+                    "known".to_owned(),
+                    size(80, 24, presence::SizePolicy::Smallest)
+                ),
+            ]
+        );
+        source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[tokio::test]

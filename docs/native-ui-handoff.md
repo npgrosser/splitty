@@ -165,6 +165,23 @@ session that holds a record raises no bell notification of its own. The
 outgoing Screen of a transition shows no dots, as it shows no scratchpad
 marks.
 
+## PTY size
+
+The window follows the servers' size policy (terminal-sessions, Client
+Activity Reports and Client Display of the PTY Size). The workspace marks a
+key or pointer button, its activation and its resizing, and writes its
+visibility and focus, into a cell it shares with the worker
+(`crates/splitty-client-core/src/native_workspace/presence.rs`); the worker
+greets each `pty-size-v1` welcome with `activity` or `idle` before it attaches,
+sends `activity` to the connection of the shown Screen at most every 5 s,
+`idle` to every connection once the window is hidden, and nothing of this to a
+server without the capability. Each validated `size` reaches the terminal of
+its session (`workspace/pty_size.rs`): the emulator runs at that size, the
+pane's rest is hatched, a taller grid moves up as far as its cursor row needs,
+and a badge with the size takes it over unless the policy is `smallest`. Not
+yet seen with two clients on one session in a real window; the provisional
+choices are NPS-1 to NPS-3 in `openspec/open-decisions.md`.
+
 ## Versions
 
 The settings have a read-only About section (`workspace/settings.rs`): the
