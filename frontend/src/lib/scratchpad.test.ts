@@ -4,7 +4,7 @@ import {
   byteLength, FONT_SIZE_MAX, FONT_SIZE_MIN, SAVE_DELAY_MS, SCRATCHPAD_LIMIT, Scratchpads, SETTLE_MS, steppedFontSize, withinLimit,
 } from "./scratchpad.ts";
 
-function screen(id: string, sessions: Record<string, string | undefined>, panes: Record<string, string> = {}): ScreenState {
+function screen(id: string, sessions: Record<string, string | undefined>, panes: Record<string, string> = {}, versions: Record<string, number> = {}): ScreenState {
   return {
     id,
     revision: 1,
@@ -13,18 +13,22 @@ function screen(id: string, sessions: Record<string, string | undefined>, panes:
     panes: Object.fromEntries(Object.entries(panes).map(([pane, session]) => [pane, { id: pane, sessionId: session, role: "terminal" as const }])),
     sessions: Object.fromEntries(Object.entries(sessions).map(([session, scratchpad]) => [
       session,
-      { id: session, status: "running" as const, ...(scratchpad === undefined ? {} : { scratchpad }) },
+      {
+        id: session, status: "running" as const, ...(scratchpad === undefined ? {} : { scratchpad }),
+        ...(versions[session] === undefined ? {} : { scratchpadVersion: versions[session] }),
+      },
     ])),
   };
 }
 
-let saved: [string, string, string][];
+let saved: (string | number)[][];
 let pads: Scratchpads;
 
 beforeEach(() => {
   vi.useFakeTimers();
   saved = [];
-  pads = new Scratchpads((screenId, sessionId, text) => saved.push([screenId, sessionId, text]));
+  pads = new Scratchpads((screenId, sessionId, text, ifVersion) =>
+    saved.push(ifVersion === undefined ? [screenId, sessionId, text] : [screenId, sessionId, text, ifVersion]));
 });
 
 afterEach(() => vi.useRealTimers());
@@ -81,6 +85,64 @@ describe("scratchpads", () => {
     vi.advanceTimersByTime(SETTLE_MS);
     pads.snapshot(screen("screen-1", { "sess-1": "later, from another window" }));
     expect(pads.text("sess-1")).toBe("later, from another window");
+  });
+
+  // session-scratchpad, Concurrent Edits (Older server)
+  it("saves without a version and holds the text for a moment on a server without versions", () => {
+    pads.welcome(false);
+    pads.snapshot(screen("screen-1", { "sess-1": "old" }, {}, { "sess-1": 2 }));
+    pads.edit("screen-1", "sess-1", "saved");
+    pads.flush("sess-1");
+    expect(saved).toEqual([["screen-1", "sess-1", "saved"]]);
+  });
+
+  // session-scratchpad, Concurrent Edits (Snapshot from before the save)
+  it("names the version a save is based on and ignores snapshots from before it", () => {
+    pads.welcome(true);
+    pads.snapshot(screen("screen-1", { "sess-1": "old" }, {}, { "sess-1": 2 }));
+    pads.edit("screen-1", "sess-1", "saved");
+    pads.flush("sess-1");
+    expect(saved).toEqual([["screen-1", "sess-1", "saved", 2]]);
+    vi.advanceTimersByTime(SETTLE_MS * 10);
+    pads.snapshot(screen("screen-1", { "sess-1": "old" }, {}, { "sess-1": 2 }));
+    expect(pads.text("sess-1")).toBe("saved");
+    pads.snapshot(screen("screen-1", { "sess-1": "saved" }, {}, { "sess-1": 3 }));
+    pads.snapshot(screen("screen-1", { "sess-1": "later, from another window" }, {}, { "sess-1": 4 }));
+    expect(pads.text("sess-1")).toBe("later, from another window");
+    pads.edit("screen-1", "sess-1", "again");
+    pads.flush("sess-1");
+    expect(saved.at(-1)).toEqual(["screen-1", "sess-1", "again", 4]);
+  });
+
+  // session-scratchpad, Concurrent Edits (Another window saved first)
+  it("shows the other window's text when its save reached the server first", () => {
+    pads.welcome(true);
+    pads.snapshot(screen("screen-1", { "sess-1": "old" }, {}, { "sess-1": 2 }));
+    pads.edit("screen-1", "sess-1", "mine");
+    pads.flush("sess-1");
+    pads.snapshot(screen("screen-1", { "sess-1": "theirs" }, {}, { "sess-1": 3 }));
+    expect(pads.text("sess-1")).toBe("theirs");
+  });
+
+  // session-scratchpad, Concurrent Edits (Unsaved edit is kept)
+  it("saves a waiting edit on top of the version that arrived meanwhile", () => {
+    pads.welcome(true);
+    pads.snapshot(screen("screen-1", { "sess-1": "old" }, {}, { "sess-1": 2 }));
+    pads.edit("screen-1", "sess-1", "mine");
+    pads.snapshot(screen("screen-1", { "sess-1": "theirs" }, {}, { "sess-1": 3 }));
+    expect(pads.text("sess-1")).toBe("mine");
+    vi.advanceTimersByTime(SAVE_DELAY_MS);
+    expect(saved).toEqual([["screen-1", "sess-1", "mine", 3]]);
+  });
+
+  it("forgets the versions of a previous connection", () => {
+    pads.welcome(true);
+    pads.snapshot(screen("screen-1", { "sess-1": "old" }, {}, { "sess-1": 5 }));
+    pads.edit("screen-1", "sess-1", "saved");
+    pads.flush("sess-1");
+    pads.welcome(true);
+    pads.snapshot(screen("screen-1", { "sess-1": "restored" }, {}, { "sess-1": 5 }));
+    expect(pads.text("sess-1")).toBe("restored");
   });
 
   it("forgets a session its screen no longer lists, unless another screen does", () => {

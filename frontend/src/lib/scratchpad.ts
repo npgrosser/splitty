@@ -5,8 +5,12 @@
  * An edit shows at once and is saved with `set_scratchpad` half a second after
  * typing pauses, or at once on `flush`. A text from the server replaces the
  * shown one only while no edit of this window waits; a waiting edit is saved
- * and wins (last write wins). Right after a save, a snapshot the server made
- * before it may still arrive; for a moment the saved text stays.
+ * and wins. Right after a save, a snapshot the server made before it may
+ * still arrive. A server with `scratchpad-versions-v1` versions each
+ * scratchpad: a save names the version it is based on (`ifVersion`) and is
+ * expected to become that version plus one, so a snapshot with a lower
+ * version is from before it and changes nothing. Without versions the saved
+ * text outlasts snapshots for a moment (`SETTLE_MS`).
  */
 
 import type { ScreenState } from "./protocol/types.ts";
@@ -15,7 +19,7 @@ import type { ScreenState } from "./protocol/types.ts";
 export const SCRATCHPAD_LIMIT = 64 * 1024;
 /** How long typing pauses before an edit is saved. */
 export const SAVE_DELAY_MS = 500;
-/** How long a saved text outlasts snapshots the server made before the save. */
+/** How long a saved text outlasts snapshots, on a server without versions. */
 export const SETTLE_MS = 2000;
 
 const encoder = new TextEncoder();
@@ -90,26 +94,41 @@ interface Waiting {
 export class Scratchpads {
   private readonly texts = new Map<string, string>();
   private readonly waiting = new Map<string, Waiting>();
-  /** Per session, until when a saved text outlasts older snapshots. */
+  /** Per session, until when a saved text outlasts older snapshots (no versions). */
   private readonly settling = new Map<string, number>();
+  /** Per session, the version the shown text is based on, or its own save is expected to become. */
+  private readonly versions = new Map<string, number>();
+  /** Whether the server versions its scratchpads (`scratchpad-versions-v1`). */
+  private versioned = false;
   private readonly panes = new Map<string, string>();
   private readonly screens = new Map<string, Set<string>>();
   private readonly listeners = new Set<() => void>();
 
-  constructor(private readonly save: (screenId: string, sessionId: string, text: string) => void) {}
+  constructor(private readonly save: (screenId: string, sessionId: string, text: string, ifVersion?: number) => void) {}
+
+  /**
+   * The connection's welcome: whether its server versions scratchpads. The
+   * versions known so far belong to the previous connection and are forgotten.
+   */
+  welcome(versioned: boolean): void {
+    this.versioned = versioned;
+    this.versions.clear();
+    this.settling.clear();
+  }
 
   /** A screen's snapshot: its sessions' texts (absent is empty) and which pane shows which. */
   snapshot(screen: ScreenState): void {
     let changed = false;
     const listed = new Set(Object.keys(screen.sessions));
     for (const [id, session] of Object.entries(screen.sessions)) {
-      if (this.holds(id)) continue;
+      if (this.holds(id, session.scratchpadVersion ?? 0)) continue;
       changed = this.store(id, session.scratchpad ?? "") || changed;
     }
     // A session gone from its screen is closed, or listed by another screen's snapshot.
     for (const id of this.screens.get(screen.id) ?? []) {
       if (listed.has(id) || this.waiting.has(id) || this.listedElsewhere(screen.id, id)) continue;
       changed = this.texts.delete(id) || changed;
+      this.versions.delete(id);
     }
     this.screens.set(screen.id, listed);
     for (const [paneId, pane] of Object.entries(screen.panes)) {
@@ -159,8 +178,15 @@ export class Scratchpads {
     if (!edit) return;
     clearTimeout(edit.timer);
     this.waiting.delete(sessionId);
-    this.settling.set(sessionId, Date.now() + SETTLE_MS);
-    this.save(edit.screenId, sessionId, edit.text);
+    const base = this.versioned ? this.versions.get(sessionId) : undefined;
+    if (base === undefined) {
+      // No version to base the save on: hold the text for a moment instead.
+      this.settling.set(sessionId, Date.now() + SETTLE_MS);
+      this.save(edit.screenId, sessionId, edit.text);
+      return;
+    }
+    this.versions.set(sessionId, base + 1);
+    this.save(edit.screenId, sessionId, edit.text, base);
   }
 
   /** Whether an edit of this window waits to be saved. */
@@ -173,13 +199,24 @@ export class Scratchpads {
     return () => this.listeners.delete(listener);
   }
 
-  /** Whether this window's own text outranks a snapshot's for the session. */
-  private holds(sessionId: string): boolean {
-    if (this.waiting.has(sessionId)) return true;
+  /** Whether this window's own text outranks a snapshot's, with its scratchpad `version`, for the session. */
+  private holds(sessionId: string, version: number): boolean {
+    const known = this.versions.get(sessionId);
+    if (this.waiting.has(sessionId)) {
+      // The waiting edit is saved on top of what the server holds now.
+      if (this.versioned) this.versions.set(sessionId, Math.max(known ?? 0, version));
+      return true;
+    }
+    if (this.versioned && known !== undefined) {
+      // Lower: made before this window's own save.
+      if (version < known) return true;
+      this.versions.set(sessionId, version);
+      return false;
+    }
     const until = this.settling.get(sessionId);
-    if (until === undefined) return false;
-    if (Date.now() < until) return true;
+    if (until !== undefined && Date.now() < until) return true;
     this.settling.delete(sessionId);
+    if (this.versioned) this.versions.set(sessionId, version);
     return false;
   }
 

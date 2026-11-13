@@ -28,7 +28,10 @@ export interface ScreenSyncPolicy {
 /** Hand a connection's mux events to its policy. Returns a reset. */
 export function connectScreenSync(conn: ServerConnection, policy: ScreenSyncPolicy): () => void {
   return conn.mux.setHandlers({
-    onWelcome: (_clientId, screens) => policy.welcome(screens),
+    onWelcome: (_clientId, screens) => {
+      conn.scratchpads.welcome(conn.mux.scratchpadVersions);
+      policy.welcome(screens);
+    },
     onSnapshot: (state) => {
       conn.scratchpads.snapshot(state);
       conn.annotations.snapshot(state);

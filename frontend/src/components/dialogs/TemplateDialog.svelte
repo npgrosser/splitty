@@ -32,7 +32,9 @@
   let saveName = $state("");
   let saveUseRoot = $state(false);
   let saveRoot = $state("");
-  let confirmOverwrite = $state(false);
+  // The name the server reported as taken; saving it again overwrites.
+  let overwriteName = $state<string | null>(null);
+  let confirmOverwrite = $derived(overwriteName !== null && overwriteName === saveName.trim());
 
   // Save flow: extracted template + per-pane command toggles
   let saveTemplate_ = $state<Template | null>(null);
@@ -64,7 +66,7 @@
       mode = "list";
       error = "";
       confirmDeleteSlug = "";
-      confirmOverwrite = false;
+      overwriteName = null;
       pendingTemplate = null;
       applyInNewScreen = false;
       saveTemplate_ = null;
@@ -155,7 +157,7 @@
     saveName = "";
     saveUseRoot = false;
     saveRoot = "";
-    confirmOverwrite = false;
+    overwriteName = null;
 
     // Extract now so we can show per-pane command toggles
     try {
@@ -177,14 +179,8 @@
   async function doSave() {
     const name = saveName.trim();
     if (!name || !saveTemplate_) return;
-    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    if (!slug) return;
-
-    // Check for overwrite
-    if (!confirmOverwrite && templates.some((t) => t.slug === slug)) {
-      confirmOverwrite = true;
-      return;
-    }
+    // The server names the file and says when one of that name exists.
+    const overwrite = confirmOverwrite;
 
     try {
       // Clone the pre-extracted template
@@ -208,9 +204,13 @@
 
       tmpl.name = name;
 
-      await saveTemplate(slug, tmpl);
+      const result = await saveTemplate(tmpl, overwrite);
+      if (!result.saved) {
+        overwriteName = name;
+        return;
+      }
       mode = "list";
-      confirmOverwrite = false;
+      overwriteName = null;
       saveTemplate_ = null;
       paneToggles = {};
       await fetchTemplates();
@@ -273,7 +273,7 @@
     if (e.key === "Escape") {
       e.preventDefault();
       if (confirmOverwrite) {
-        confirmOverwrite = false;
+        overwriteName = null;
       } else {
         mode = "list";
         saveTemplate_ = null;
@@ -481,7 +481,7 @@
           <div class="dialog-actions">
             <button
               class="template-btn-sm template-btn-ghost"
-              onclick={() => { mode = "list"; confirmOverwrite = false; saveTemplate_ = null; paneToggles = {}; }}
+              onclick={() => { mode = "list"; overwriteName = null; saveTemplate_ = null; paneToggles = {}; }}
             >Cancel</button>
             <button
               class="template-btn-sm template-btn-fill"

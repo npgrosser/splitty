@@ -70,6 +70,8 @@ export class MuxClient {
   /** Whether the server keeps scratchpads (`session-scratchpad`, Scratchpad Capability). */
   hubHostDecisions = false;
   scratchpads = false;
+  /** Whether the server versions scratchpads and takes `ifVersion` (`session-scratchpad`, Concurrent Edits). */
+  scratchpadVersions = false;
   /** Whether the server takes a window's grid as `arrange_panes` (mux-protocol, Window Layout Changes Reach the Server). */
   arrangements = false;
   /** Whether the server takes a selected tab as `select_tab` (mux-protocol, Selected Tabs Reach the Server). */
@@ -258,6 +260,7 @@ export class MuxClient {
         this.serverMode = msg.serverMode === "daemon" ? "daemon" : "embedded";
         this.hubHostDecisions = Array.isArray(msg.capabilities) && msg.capabilities.includes("hub-host-decisions-v1");
         this.scratchpads = Array.isArray(msg.capabilities) && msg.capabilities.includes("scratchpad-v1");
+        this.scratchpadVersions = Array.isArray(msg.capabilities) && msg.capabilities.includes("scratchpad-versions-v1");
         this.arrangements = Array.isArray(msg.capabilities) && msg.capabilities.includes("layout-arrange-v1");
         this.tabSelections = Array.isArray(msg.capabilities) && msg.capabilities.includes("tab-select-v1");
         this.viewers = Array.isArray(msg.capabilities) && msg.capabilities.includes(VIEWER_CAPABILITY);

@@ -30,9 +30,13 @@ it.each(["browser", "native"])("preserves feature data and domain errors through
       case "shellProfiles.update":
         if (!(args.body as typeof profiles).defaultProfileId) return answer({ error: "Choose a default shell" }, 422);
         profiles = args.body as typeof profiles; return answer(profiles);
-      case "template.save":
-        if (templates.has(String(args.slug))) return { status: 409, contentType: "text" as const, body: "Template already exists" };
-        templates.set(String(args.slug), args.body as Template); return { status: 204, contentType: "empty" as const, body: "" };
+      case "template.create": {
+        const { template, overwrite } = args.body as { template: Template; overwrite: boolean };
+        const slug = template.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        const replaced = templates.has(slug);
+        if (replaced && !overwrite) return answer({ error: "template exists", slug }, 409);
+        templates.set(slug, template); return answer({ slug, replaced });
+      }
       case "template.get": return templates.has(String(args.slug)) ? answer(templates.get(String(args.slug))) : { status: 404, contentType: "text" as const, body: "Template missing" };
       case "template.list": return answer([...templates].map(([slug, template]) => ({ slug, displayName: template.name })));
       case "template.delete": templates.delete(String(args.slug)); return { status: 204, contentType: "empty" as const, body: "" };
@@ -46,7 +50,7 @@ it.each(["browser", "native"])("preserves feature data and domain errors through
     const url = new URL(path, "http://gateway.invalid");
     const method = init?.method ?? "GET";
     const routes: Record<string, string> = { "/api/home/settings": method === "PATCH" ? "home.update" : "home.get", "/api/home/theme": "theme.get", "/api/shell-profiles": method === "PUT" ? "shellProfiles.update" : "shellProfiles.get", "/api/remote/host-order": method === "PUT" ? "hostOrder.update" : "hostOrder.get" };
-    const operation = url.pathname.startsWith("/api/templates/") ? (({ GET: "template.get", POST: "template.save", DELETE: "template.delete" } as Record<string, string>)[method]) : url.pathname === "/api/templates" ? "template.list" : routes[url.pathname];
+    const operation = url.pathname.startsWith("/api/templates/") ? (({ GET: "template.get", POST: "template.save", DELETE: "template.delete" } as Record<string, string>)[method]) : url.pathname === "/api/templates" ? (method === "POST" ? "template.create" : "template.list") : routes[url.pathname];
     if (!operation) throw Error("Unexpected browser route");
     const reply = domain({ operation, args: { ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}), ...(url.searchParams.has("name") ? { name: url.searchParams.get("name") } : {}), ...(url.pathname.startsWith("/api/templates/") ? { slug: decodeURIComponent(url.pathname.slice("/api/templates/".length)) } : {}) } });
     return new Response(reply.contentType === "empty" ? null : reply.body, { status: reply.status, headers: { "Content-Type": reply.contentType === "json" ? "application/json" : "text/plain" } });
@@ -70,12 +74,13 @@ it.each(["browser", "native"])("preserves feature data and domain errors through
   expect((await theme.reloadTheme("chosen-theme")).name).toBe("chosen-theme");
   const template = await import("../templates.ts");
   const value: Template = { name: "Saved workspace", panes: { pane: { command: "echo hi" } }, layout: { slot: ["pane"] } };
-  await template.saveTemplate("saved", value);
-  await expect(template.saveTemplate("saved", value)).rejects.toThrow("Template already exists");
-  expect(await template.getTemplate("saved")).toEqual(value);
-  expect(await template.listTemplates()).toEqual([{ slug: "saved", displayName: value.name }]);
-  await template.deleteTemplate("saved");
-  await expect(template.getTemplate("saved")).rejects.toThrow("Template missing");
+  expect(await template.saveTemplate(value, false)).toEqual({ saved: true, slug: "saved-workspace", replaced: false });
+  expect(await template.saveTemplate(value, false)).toEqual({ saved: false, slug: "saved-workspace" });
+  expect(await template.saveTemplate(value, true)).toEqual({ saved: true, slug: "saved-workspace", replaced: true });
+  expect(await template.getTemplate("saved-workspace")).toEqual(value);
+  expect(await template.listTemplates()).toEqual([{ slug: "saved-workspace", displayName: value.name }]);
+  await template.deleteTemplate("saved-workspace");
+  await expect(template.getTemplate("saved-workspace")).rejects.toThrow("Template missing");
   const { HostOrderStore } = await import("../remote/host_order.ts");
   const { apiFetch } = await import("./http.ts");
   const changed = vi.fn(); const hostOrder = new HostOrderStore({ fetch: apiFetch, changed });
@@ -83,11 +88,11 @@ it.each(["browser", "native"])("preserves feature data and domain errors through
   expect(changed).toHaveBeenLastCalledWith(["vm2", "vm1"]);
   // Reload the UI modules against the same service state, with no previous
   // origin's localStorage available and no mutation replay.
-  const mutations = operations.filter(operation => ["home.update", "shellProfiles.update", "template.save", "template.delete", "hostOrder.update"].includes(operation));
+  const mutations = operations.filter(operation => ["home.update", "shellProfiles.update", "template.create", "template.delete", "hostOrder.update"].includes(operation));
   vi.resetModules(); await assign(); home = await import("../settings.ts");
   await home.loadSettings(); expect(home.getSettings().drawer.pinned).toBe(true);
   expect((await (await import("../shell_profiles.ts")).loadShellProfiles()).profiles[0].name).toBe("Updated shell");
-  expect(operations.filter(operation => ["home.update", "shellProfiles.update", "template.save", "template.delete", "hostOrder.update"].includes(operation))).toEqual(mutations);
+  expect(operations.filter(operation => ["home.update", "shellProfiles.update", "template.create", "template.delete", "hostOrder.update"].includes(operation))).toEqual(mutations);
   expect(storage.getItem).not.toHaveBeenCalled(); expect(storage.setItem).not.toHaveBeenCalled();
   if (mode === "native") expect(browserFetch).not.toHaveBeenCalled();
 });

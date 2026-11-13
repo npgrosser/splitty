@@ -464,6 +464,8 @@ export interface SessionState {
   exitCode?: number;
   /** The session's scratchpad (`session-scratchpad`); absent while empty. */
   scratchpad?: string;
+  /** Raised by every accepted save of the scratchpad; absent while 0 (`scratchpad-versions-v1`). */
+  scratchpadVersion?: number;
 }
 
 export interface ScreenState {
@@ -567,7 +569,7 @@ export type MuxOperation =
   | { type: "dock_pane"; floatingId: string; paneId?: string }
   | { type: "move_float"; floatingId: string; bounds: { x: number; y: number; w: number; h: number } }
   // A session's whole scratchpad; only a window sends it (`session-scratchpad`).
-  | { type: "set_scratchpad"; sessionId: string; text: string }
+  | { type: "set_scratchpad"; sessionId: string; text: string; ifVersion?: number }
   | OpenViewerOp
   // A viewer pane's annotations, added or replaced by id (without number and
   // replies), and removed with their replies (`viewer-annotations`); a window's alone.

@@ -66,8 +66,8 @@ export class ServerConnection {
     this.mux = new MuxClient(socket);
     this.attachments = new AttachRegistry(socket);
     this.sessions = new SessionClient(socket, this.attachments);
-    this.scratchpads = new Scratchpads((screenId, sessionId, text) =>
-      this.mux.sendOp(screenId, { type: "set_scratchpad", sessionId, text }));
+    this.scratchpads = new Scratchpads((screenId, sessionId, text, ifVersion) =>
+      this.mux.sendOp(screenId, { type: "set_scratchpad", sessionId, text, ...(ifVersion === undefined ? {} : { ifVersion }) }));
     this.viewers = new ViewerDocuments(socket);
     this.annotations = new ViewerAnnotations({
       send: (screenId, op) => this.mux.sendOp(screenId, op),
