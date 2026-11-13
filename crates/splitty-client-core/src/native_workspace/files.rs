@@ -364,15 +364,18 @@ fn prepare(item: StoreItem) -> Result<Prepared, String> {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".into());
-            let file = std::fs::File::open(&path)
-                .map_err(|error| format!("{name} could not be read: {error}"))?;
-            let metadata = file
-                .metadata()
-                .map_err(|error| format!("{name} could not be read: {error}"))?;
+            let unreadable = |error: io::Error| format!("{name} could not be read: {error}");
+            let not_a_file =
+                || format!("{name} is not a file. Folders cannot be pasted; archive them first.");
+            // Checked before opening: Windows refuses to open a directory
+            // ("Access is denied"), and opening a FIFO would block.
+            if !std::fs::metadata(&path).map_err(unreadable)?.is_file() {
+                return Err(not_a_file());
+            }
+            let file = std::fs::File::open(&path).map_err(unreadable)?;
+            let metadata = file.metadata().map_err(unreadable)?;
             if !metadata.is_file() {
-                return Err(format!(
-                    "{name} is not a file. Folders cannot be pasted; archive them first."
-                ));
+                return Err(not_a_file());
             }
             if metadata.len() > MAX_FILE_BYTES {
                 return Err(format!("{name} is larger than 512 MB."));
@@ -1111,6 +1114,39 @@ mod tests {
                 FileRoute::AskThenStore
             );
         }
+    }
+
+    /// A folder gets the folder message, also where it cannot be opened:
+    /// Windows refuses to open any directory as a file, and Unix one without
+    /// read permission.
+    #[test]
+    fn a_folder_is_refused_as_a_folder_before_it_is_opened() {
+        use super::{prepare, StoreItem};
+        let dir = scratch_dir("folder");
+        let open = dir.join("open");
+        let closed = dir.join("closed");
+        std::fs::create_dir(&open).unwrap();
+        std::fs::create_dir(&closed).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        for (path, name) in [(open, "open"), (closed.clone(), "closed")] {
+            let Err(message) = prepare(StoreItem::File(path)) else {
+                panic!("a folder was prepared for upload");
+            };
+            assert_eq!(
+                message,
+                format!("{name} is not a file. Folders cannot be pasted; archive them first.")
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
