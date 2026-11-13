@@ -92,7 +92,14 @@ pub fn component_modules(code: &Code, model: &Model) -> Vec<String> {
     let modules: BTreeSet<&Vec<String>> = code.files.values().map(|file| &file.module).collect();
     let mut violations = Vec::new();
     let mut named: BTreeMap<&Vec<String>, &str> = BTreeMap::new();
-    for c in model.components.values() {
+    let mut ids: BTreeMap<&str, &str> = BTreeMap::new();
+    for (id, c) in &model.components {
+        if let Some(other) = ids.insert(&c.name, id) {
+            violations.push(format!(
+                "{}: {other} and {id} have the same name; relationships could not tell them apart",
+                c.name
+            ));
+        }
         let module = display(&c.module);
         if let Some(other) = named.insert(&c.module, &c.name) {
             violations.push(format!(
@@ -157,6 +164,77 @@ pub fn unbacked_relationships(dependencies: &Dependencies, model: &Model) -> Vec
             )
         })
         .collect()
+}
+
+/// Production code of the crate `source` names the crate `target` only from the components in
+/// `through`. Test code (see [`crate::code::is_test`]) may name it anywhere.
+pub fn production_crossings(
+    code: &Code,
+    model: &Model,
+    repository: &Path,
+    (source, target): (&str, &str),
+    through: &[&str],
+) -> Vec<String> {
+    let mut violations = scanned(code, source);
+    for reference in code.references.iter().filter(|r| !r.test) {
+        let Some(file) = code.files.get(&reference.file) else {
+            continue;
+        };
+        if file.module[0] != source || reference.path[0] != target {
+            continue;
+        }
+        let owner = owner(file, model).map(|c| c.name.as_str());
+        if !owner.is_some_and(|name| through.contains(&name)) {
+            violations.push(format!(
+                "{}:{} names {}: production code of {source} names {target} only from {}",
+                relative(&reference.file, repository).display(),
+                reference.line,
+                display(&reference.path),
+                through.join(", ")
+            ));
+        }
+    }
+    violations
+}
+
+/// The code of the crate `source`, tests included, names no crate of the workspace but itself
+/// and `allowed`.
+pub fn foreign_crates(
+    code: &Code,
+    repository: &Path,
+    source: &str,
+    allowed: &[&str],
+) -> Vec<String> {
+    let mut violations = scanned(code, source);
+    let others = match allowed {
+        [] => "no other crate of the workspace".to_owned(),
+        _ => format!("no crate of the workspace but {}", allowed.join(", ")),
+    };
+    for reference in &code.references {
+        let Some(file) = code.files.get(&reference.file) else {
+            continue;
+        };
+        let target = reference.path[0].as_str();
+        if file.module[0] != source || target == source || allowed.contains(&target) {
+            continue;
+        }
+        violations.push(format!(
+            "{}:{} names {}: {source} names {others}",
+            relative(&reference.file, repository).display(),
+            reference.line,
+            display(&reference.path),
+        ));
+    }
+    violations
+}
+
+/// A rule about a crate that was not scanned would hold for nothing.
+fn scanned(code: &Code, name: &str) -> Vec<String> {
+    if code.files.values().any(|file| file.module[0] == name) {
+        Vec::new()
+    } else {
+        vec![format!("{name}: no target of this crate was scanned")]
+    }
 }
 
 pub fn missing_specs(model: &Model, specs: &Path) -> Vec<String> {
@@ -261,6 +339,80 @@ mod tests {
         );
     }
 
+    /// A crate `client` with a component allowed to name `server`, one that is not, and a test
+    /// file, next to the library `server` and the binary `app`.
+    fn client_and_server() -> (tempfile::TempDir, Code, Model) {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let files = [
+            ("client/lib.rs", "pub mod link;\npub mod other;"),
+            ("client/link.rs", "pub fn f() { server::run() }"),
+            (
+                "client/other.rs",
+                "pub fn f() { crate::link::f() }\n\
+                 #[cfg(test)]\nmod tests {\n    fn g() { server::run() }\n}\n\
+                 #[cfg(test)]\nmod more;",
+            ),
+            ("client/other/more.rs", "fn h() { server::run() }"),
+            ("server/lib.rs", "pub fn run() {}"),
+            ("app/main.rs", "fn main() { client::link::f() }"),
+        ];
+        for (name, text) in files {
+            let path = dir.path().join(name);
+            fs::create_dir_all(path.parent().expect("parent")).expect("create directory");
+            fs::write(path, text).expect("write file");
+        }
+        let target = |name: &str, root: &str, library| Target {
+            crate_name: name.into(),
+            root: dir.path().join(root),
+            library,
+        };
+        let code = scan(&[
+            target("client", "client/lib.rs", true),
+            target("server", "server/lib.rs", true),
+            target("app", "app/main.rs", false),
+        ]);
+        let model = model(
+            &[
+                ("client_root", "client", false),
+                ("link", "client::link", false),
+                ("other", "client::other", false),
+                ("server_root", "server", false),
+                ("app", "app", false),
+            ],
+            &[],
+        );
+        (dir, code, model)
+    }
+
+    #[test]
+    fn production_code_crosses_into_a_crate_only_through_named_components() {
+        let (dir, code, model) = client_and_server();
+        let rule = ("client", "server");
+        assert!(production_crossings(&code, &model, dir.path(), rule, &["link"]).is_empty());
+        assert_eq!(
+            production_crossings(&code, &model, dir.path(), rule, &["other"]),
+            ["client/link.rs:1 names server::run: production code of client names server only from other"]
+        );
+        assert_eq!(
+            production_crossings(&code, &model, dir.path(), ("gone", "server"), &[]),
+            ["gone: no target of this crate was scanned"]
+        );
+    }
+
+    #[test]
+    fn a_crate_names_only_the_allowed_crates_of_the_workspace() {
+        let (dir, code, _model) = client_and_server();
+        assert!(foreign_crates(&code, dir.path(), "app", &["client"]).is_empty());
+        assert_eq!(
+            foreign_crates(&code, dir.path(), "client", &[]),
+            [
+                "client/link.rs:1 names server::run: client names no other crate of the workspace",
+                "client/other/more.rs:1 names server::run: client names no other crate of the workspace",
+                "client/other.rs:4 names server::run: client names no other crate of the workspace",
+            ]
+        );
+    }
+
     #[test]
     fn planned_components_name_modules_that_do_not_exist() {
         let (_dir, code) = demo();
@@ -279,6 +431,20 @@ mod tests {
                 "b: demo::b is not a module file of the workspace",
                 "c: demo::a is also the module of a",
             ]
+        );
+    }
+
+    #[test]
+    fn component_names_are_unique_across_containers() {
+        let (_dir, code) = demo();
+        let mut twice = model(&[("root", "demo", false), ("a", "demo::a", false)], &[]);
+        let mut other = twice.components["s.c.a"].clone();
+        other.module = vec!["demo".into(), "b".into()];
+        other.planned = true;
+        twice.components.insert("s.d.a".into(), other);
+        assert_eq!(
+            component_modules(&code, &twice),
+            ["a: s.c.a and s.d.a have the same name; relationships could not tell them apart"]
         );
     }
 }

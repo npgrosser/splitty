@@ -1,6 +1,6 @@
 //! The code side: the modules of every library and binary target, found by following `mod`
 //! declarations from the crate root, and every path by which a module names a module of the
-//! workspace.
+//! workspace, marked as test or production code.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -33,6 +33,9 @@ pub struct File {
     pub crate_root: bool,
     /// Whether it holds more than `mod` declarations, attributes and comments.
     pub has_code: bool,
+    /// Whether it is test code as a whole: its `mod` declaration, or one of an enclosing
+    /// module, has a `cfg` that requires `test`.
+    pub test: bool,
 }
 
 /// A path in `file`, at `line`, naming `path`: absolute, starting with a crate name.
@@ -41,6 +44,8 @@ pub struct Reference {
     pub file: PathBuf,
     pub line: usize,
     pub path: ModulePath,
+    /// Whether the path lies in test code (see [`is_test`]).
+    pub test: bool,
 }
 
 #[derive(Default)]
@@ -67,22 +72,30 @@ pub fn scan(targets: &[Target]) -> Code {
             code.libraries.insert(target.crate_name.clone());
         }
         let root = vec![target.crate_name.clone()];
-        code.add_file(&target.root, root, true, true, &mut parsed);
+        let file = Declared {
+            mod_rs: true,
+            crate_root: true,
+            test: false,
+        };
+        code.add_file(&target.root, root, file, &mut parsed);
     }
     // Paths are resolved once every module is known: `use child::X` names a child module.
     for (path, syntax) in parsed {
+        let file = &code.files[&path];
         let mut collector = Collector {
             code: &code,
-            module: code.files[&path].module.clone(),
+            module: file.module.clone(),
+            test: file.test,
             found: BTreeSet::new(),
         };
         collector.visit_file(&syntax);
         let found = collector.found;
         code.references
-            .extend(found.into_iter().map(|(line, target)| Reference {
+            .extend(found.into_iter().map(|(line, target, test)| Reference {
                 file: path.clone(),
                 line,
                 path: target,
+                test,
             }));
     }
     code
@@ -90,13 +103,62 @@ pub fn scan(targets: &[Target]) -> Code {
 
 type Parsed = Vec<(PathBuf, syn::File)>;
 
+/// How a module file was declared.
+#[derive(Clone, Copy)]
+struct Declared {
+    /// `lib.rs`, `main.rs` or `mod.rs`, whose children sit next to it.
+    mod_rs: bool,
+    crate_root: bool,
+    test: bool,
+}
+
+/// Whether `attrs` make an item test code: `#[test]` (also as `#[tokio::test]`), or a `cfg`
+/// whose predicate cannot hold without `test`, such as `cfg(test)` or `cfg(all(test, unix))`.
+/// `cfg(any(test, feature = "…"))` also compiles into production builds, so it is not.
+pub fn is_test(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        if path
+            .segments
+            .last()
+            .is_some_and(|last| last.ident == "test")
+        {
+            return true;
+        }
+        path.is_ident("cfg")
+            && attr
+                .parse_args::<syn::Meta>()
+                .is_ok_and(|predicate| requires_test(&predicate))
+    })
+}
+
+fn requires_test(predicate: &syn::Meta) -> bool {
+    match predicate {
+        syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::NameValue(_) => false,
+        syn::Meta::List(list) => {
+            let Ok(nested) = list.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            if list.path.is_ident("all") {
+                nested.iter().any(requires_test)
+            } else if list.path.is_ident("any") {
+                !nested.is_empty() && nested.iter().all(requires_test)
+            } else {
+                false
+            }
+        }
+    }
+}
+
 impl Code {
     fn add_file(
         &mut self,
         path: &Path,
         module: ModulePath,
-        mod_rs: bool,
-        crate_root: bool,
+        declared: Declared,
         parsed: &mut Parsed,
     ) {
         let syntax = match fs::read_to_string(path)
@@ -112,19 +174,20 @@ impl Code {
         let parent = path.parent().unwrap_or(Path::new(""));
         // Children of `lib.rs`, `main.rs` and `mod.rs` sit next to them, those of `x.rs` in `x/`.
         let dir = match path.file_stem() {
-            Some(stem) if !mod_rs => parent.join(stem),
+            Some(stem) if !declared.mod_rs => parent.join(stem),
             _ => parent.to_path_buf(),
         };
         self.modules.insert(module.clone(), path.to_path_buf());
-        self.add_modules(&syntax.items, path, &module, &dir, parsed);
+        self.add_modules(&syntax.items, path, &module, &dir, declared.test, parsed);
         let has_code = syntax
             .items
             .iter()
             .any(|item| !matches!(item, syn::Item::Mod(declared) if declared.content.is_none()));
         let file = File {
             module,
-            crate_root,
+            crate_root: declared.crate_root,
             has_code,
+            test: declared.test,
         };
         self.files.insert(path.to_path_buf(), file);
         parsed.push((path.to_path_buf(), syntax));
@@ -136,12 +199,14 @@ impl Code {
         file: &Path,
         module: &[String],
         dir: &Path,
+        test: bool,
         parsed: &mut Parsed,
     ) {
         for item in items {
             let syn::Item::Mod(declared) = item else {
                 continue;
             };
+            let test = test || is_test(&declared.attrs);
             let name = declared.ident.unraw().to_string();
             let child = [module, std::slice::from_ref(&name)].concat();
             if declared
@@ -159,15 +224,21 @@ impl Code {
             match &declared.content {
                 Some((_, items)) => {
                     self.modules.insert(child.clone(), file.to_path_buf());
-                    self.add_modules(items, file, &child, &dir.join(&name), parsed);
+                    self.add_modules(items, file, &child, &dir.join(&name), test, parsed);
                 }
                 None => {
                     let flat = dir.join(format!("{name}.rs"));
                     let nested = dir.join(&name).join("mod.rs");
+                    let mut declared = Declared {
+                        mod_rs: false,
+                        crate_root: false,
+                        test,
+                    };
                     if flat.is_file() {
-                        self.add_file(&flat, child, false, false, parsed);
+                        self.add_file(&flat, child, declared, parsed);
                     } else if nested.is_file() {
-                        self.add_file(&nested, child, true, false, parsed);
+                        declared.mod_rs = true;
+                        self.add_file(&nested, child, declared, parsed);
                     } else {
                         self.problems.push(format!(
                             "{}: no file for module {}",
@@ -194,7 +265,9 @@ struct Collector<'a> {
     code: &'a Code,
     /// The module being visited, inline modules included.
     module: ModulePath,
-    found: BTreeSet<(usize, ModulePath)>,
+    /// Whether the code being visited is test code.
+    test: bool,
+    found: BTreeSet<(usize, ModulePath, bool)>,
 }
 
 impl Collector<'_> {
@@ -227,8 +300,16 @@ impl Collector<'_> {
 
     fn record(&mut self, line: usize, segments: &[String]) {
         if let Some(path) = self.resolve(segments) {
-            self.found.insert((line, path));
+            self.found.insert((line, path, self.test));
         }
+    }
+
+    /// Visits code with `attrs` as test code if they make it so.
+    fn scoped(&mut self, attrs: &[syn::Attribute], visit: impl FnOnce(&mut Self)) {
+        let outer = self.test;
+        self.test |= is_test(attrs);
+        visit(self);
+        self.test = outer;
     }
 
     fn use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>) {
@@ -295,7 +376,87 @@ impl Collector<'_> {
     }
 }
 
+/// The attributes that can make code test code, on the syntax that carries them most often.
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(item) => &item.attrs,
+        syn::ImplItem::Fn(item) => &item.attrs,
+        syn::ImplItem::Type(item) => &item.attrs,
+        syn::ImplItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+    match item {
+        syn::TraitItem::Const(item) => &item.attrs,
+        syn::TraitItem::Fn(item) => &item.attrs,
+        syn::TraitItem::Type(item) => &item.attrs,
+        syn::TraitItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
 impl<'ast> Visit<'ast> for Collector<'_> {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        self.scoped(item_attrs(item), |this| syn::visit::visit_item(this, item));
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        self.scoped(impl_item_attrs(item), |this| {
+            syn::visit::visit_impl_item(this, item)
+        });
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        self.scoped(trait_item_attrs(item), |this| {
+            syn::visit::visit_trait_item(this, item)
+        });
+    }
+
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        self.scoped(&field.attrs, |this| syn::visit::visit_field(this, field));
+    }
+
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        self.scoped(&variant.attrs, |this| {
+            syn::visit::visit_variant(this, variant)
+        });
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        self.scoped(&arm.attrs, |this| syn::visit::visit_arm(this, arm));
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        self.scoped(&local.attrs, |this| syn::visit::visit_local(this, local));
+    }
+
+    fn visit_stmt_macro(&mut self, stmt: &'ast syn::StmtMacro) {
+        self.scoped(&stmt.attrs, |this| syn::visit::visit_stmt_macro(this, stmt));
+    }
+
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         self.module.push(item.ident.unraw().to_string());
         syn::visit::visit_item_mod(self, item);
@@ -449,6 +610,57 @@ mod tests {
                 (9, "demo::b::B".to_owned()),
             ]
         );
+    }
+
+    fn test_paths(code: &Code, file: &str) -> Vec<(usize, bool)> {
+        code.references
+            .iter()
+            .filter(|r| r.file.ends_with(file))
+            .map(|r| (r.line, r.test))
+            .collect()
+    }
+
+    #[test]
+    fn marks_references_in_test_code() {
+        let (_dir, code) = demo(&[
+            (
+                "lib.rs",
+                "pub mod a;\npub mod b;\n#[cfg(all(test, unix))]\nmod tests;\n#[cfg(not(test))]\nmod real;",
+            ),
+            (
+                "a.rs",
+                "fn f() { other::x::f() }\n\
+                 #[cfg(test)]\nmod tests {\n    fn g() { other::x::g() }\n}\n\
+                 #[test]\nfn h() { other::x::h() }\n\
+                 #[tokio::test]\nasync fn i() { other::x::i() }\n\
+                 #[cfg(any(test, feature = \"ui-test-support\"))]\nfn j() { other::x::j() }\n\
+                 struct S {\n    #[cfg(test)]\n    field: other::x::S,\n}\n\
+                 impl S {\n    #[cfg(test)]\n    fn k() { other::x::k() }\n    fn l() { other::x::l() }\n}",
+            ),
+            ("b.rs", "#[cfg(test)]\nmod nested;"),
+            ("b/nested.rs", "fn f() { other::x::f() }"),
+            ("tests.rs", "fn f() { other::x::f() }"),
+            ("real.rs", "fn f() { other::x::f() }"),
+        ]);
+        assert!(code.problems.is_empty(), "{:?}", code.problems);
+        assert_eq!(
+            test_paths(&code, "src/a.rs"),
+            [
+                (1, false),
+                (4, true),
+                (7, true),
+                (9, true),
+                (11, false),
+                (14, true),
+                (18, true),
+                (19, false),
+            ]
+        );
+        assert_eq!(test_paths(&code, "src/b/nested.rs"), [(1, true)]);
+        assert_eq!(test_paths(&code, "src/tests.rs"), [(1, true)]);
+        assert_eq!(test_paths(&code, "src/real.rs"), [(1, false)]);
+        assert!(code.files[&code.modules[&module("demo::tests")]].test);
+        assert!(!code.files[&code.modules[&module("demo::b")]].test);
     }
 
     #[test]

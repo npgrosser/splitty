@@ -115,3 +115,32 @@ fn the_mux_stays_pure() {
         .collect();
     assert_none(violations);
 }
+
+/// The native client links the server only to start the embedded service in-process (Linux and
+/// macOS) and connect to it over the framed pipe a remote client uses: production code of
+/// client-core names the server only from the modules that start and connect it. Tests may
+/// build services of their own anywhere. A relationship added to the model does not let such a
+/// reference pass.
+#[test]
+fn the_native_client_reaches_the_server_only_through_the_embedded_service() {
+    let c = checked();
+    assert_none(check::production_crossings(
+        &c.code,
+        &c.model,
+        &repository(),
+        ("splitty_client_core", "splitty_server"),
+        &["embedded", "connection", "api_stream"],
+    ));
+}
+
+/// The native app depends on no crate of the workspace but the client core, tests included
+/// (`crates/splitty-gpui/Cargo.toml`).
+#[test]
+fn the_native_app_uses_only_the_client_core() {
+    assert_none(check::foreign_crates(
+        &checked().code,
+        &repository(),
+        "splitty_gpui",
+        &["splitty_client_core"],
+    ));
+}

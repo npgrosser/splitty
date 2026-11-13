@@ -18,8 +18,8 @@ into operating-system processes.
 | `landscape.c4` | People, external systems, the system `splitty` with its containers and stores |
 | `core.c4` | The components of `splitty-core` and their relationships |
 | `transport.c4` | Platform-neutral native framing, negotiation and resource accounting |
-| `client-core.c4` | The experimental UI-free native client, local workspace model and service dependencies |
-| `gpui.c4` | The GPUI local workspace, terminal engine and retained fixture probe |
+| `client-core.c4` | The UI-free native client of the native app, its local workspace model and its dependencies on the service crates |
+| `gpui.c4` | The native desktop app (GPUI): window, workspace, terminal engine and startup |
 | `server.c4` | The components of `splitty-server` (the `splitty` binary) and their relationships, also into the core |
 | `remote.c4` | The components of `splitty-remote` (SSH, install, handshake, bridge, tunnel, known hosts) and their relationships |
 | `desktop.c4` | The components of `splitty-gui` (the Tauri app) and their relationships, also into the core and the server |
@@ -102,7 +102,12 @@ covers exactly its two components. Naming counts in these places:
 - inline `#[cfg(test)]` modules.
 
 Doc comments, integration tests under `tests/`, build scripts and the check's own crate do not
-count. The check works in both directions:
+count. A relationship covers test and production references alike; the boundary rules below tell
+them apart. Test code is an item (a module, function, `impl` or trait item, field, variant, match
+arm, `let` or macro statement) marked `#[test]` (also `#[tokio::test]`) or under a `cfg` that
+cannot hold without `test`, such as `cfg(test)` or `cfg(all(test, unix))`, and every file of a
+module declared that way. `cfg(any(test, feature = "ui-test-support"))` also compiles into
+production builds, so it counts as production code. The check works in both directions:
 - a reference without a relationship fails;
 - a relationship that no reference backs fails too, since a stale arrow would tell a reader that a dependency exists.
 
@@ -127,11 +132,22 @@ check:
 1. The model validates (file, line, message).
 2. Every module file is found: every `mod` declaration has a file, and no `#[path]` is used.
 3. Every file with code has a component.
-4. Every component not tagged `planned` names a module file. A `planned` one names a module that does not exist yet, and no two components name the same module.
+4. Every component not tagged `planned` names a module file. A `planned` one names a module that does not exist yet, no two components name the same module, and no two have the same name.
 5. Every reference between components has a relationship. Example: `crates/splitty-core/src/auth/token.rs:52 names splitty_core::config::ensure_private_dir: no relationship auth -> config`.
 6. Every relationship between built components is backed by a reference.
 7. Every `spec` names a directory under `../openspec/specs/` (`planned` elements are exempt).
 8. The mux stays pure: no relationship from `mux` to `pty` or `effect_runner`.
+9. The native client reaches the server only through the embedded service: production code of
+   `splitty_client_core` names `splitty_server` only from `embedded`, `connection` and
+   `api_stream`, the modules that start the in-process service on Linux and macOS and hold the
+   native client of its framed pipe. Test code may name it anywhere, to build services of its
+   own. Example: `crates/splitty-client-core/src/hub.rs:526 names splitty_server::native::client::Connector: production code of splitty_client_core names splitty_server only from embedded, connection, api_stream`.
+   A relationship in the model does not let such a reference pass.
+10. The native app (`splitty_gpui`) names no crate of the workspace but `splitty_client_core`,
+    tests included, as its manifest allows.
+
+Rules 8 to 10 are tests in `check/tests/model.rs`; the unit tests of `check/src` show each rule
+failing on a small fixture.
 
 A change that adds a crate, a top-level module or a dependency between components updates the
 `.c4` files in the same change. The failure message names the missing relationship.
