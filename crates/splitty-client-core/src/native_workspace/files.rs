@@ -497,10 +497,11 @@ impl FileTransfers {
         json: &Value,
         out: &mut Vec<Update>,
     ) -> Option<()> {
-        match json["type"].as_str() {
-            Some("file.offer") => self.offered(client, source, attached, json, out),
-            Some("file.chunk") => self.chunk(client, source, json, out),
-            Some("file.closed") => {
+        let kind = MessageType::of(json);
+        match kind {
+            MessageType::FileOffer => self.offered(client, source, attached, json, out),
+            MessageType::FileChunk => self.chunk(client, source, json, out),
+            MessageType::FileClosed => {
                 let id = json["offerId"].as_str()?;
                 let offer = self.offers.remove(id)?;
                 out.push(Update::Files(if offer.download.is_some() {
@@ -516,8 +517,8 @@ impl FileTransfers {
                     }
                 }));
             }
-            Some("image_saved") | Some("upload_saved") => {
-                let image = json["type"] == "image_saved";
+            MessageType::ImageSaved | MessageType::UploadSaved => {
+                let image = kind == MessageType::ImageSaved;
                 if !self.answers(json, image) {
                     return None;
                 }
@@ -532,13 +533,13 @@ impl FileTransfers {
                     ),
                 }
             }
-            Some("image_failed") | Some("upload_failed") => {
-                if self.answers(json, json["type"] == "image_failed") {
+            MessageType::ImageFailed | MessageType::UploadFailed => {
+                if self.answers(json, kind == MessageType::ImageFailed) {
                     let reason = plain(json["error"].as_str(), "The server refused the file.");
                     self.fail(client, source, reason, false, out);
                 }
             }
-            Some("upload_progress") => {
+            MessageType::UploadProgress => {
                 if !self.answers(json, false) {
                     return None;
                 }
@@ -574,7 +575,7 @@ impl FileTransfers {
                     );
                 }
             }
-            Some("error") if json["sessionId"].is_null() => {
+            MessageType::Error if json["sessionId"].is_null() => {
                 let image = match json["error"].as_str() {
                     Some(UNKNOWN_SAVE_IMAGE) => true,
                     Some(UNKNOWN_UPLOAD) => false,
@@ -1276,5 +1277,75 @@ mod tests {
         assert_eq!(quote_path("/tmp/My Report.pdf"), "'/tmp/My Report.pdf'");
         assert_eq!(quote_path("/tmp/it's"), r#"'/tmp/it'"'"'s'"#);
         assert_eq!(quote_path("/tmp/$(id)"), "'/tmp/$(id)'");
+    }
+
+    /// An offer with a field this build does not know is still one, a reason
+    /// it does not know still ends it, and a message of a type it does not
+    /// know is no file message.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn offers_are_read_past_fields_reasons_and_types_this_build_does_not_know() {
+        use super::{FileTransfers, FileUpdate, HashSet, Update};
+        use serde_json::json;
+        use splitty_core::protocol::session::{FileClosedReason, SessionMessage};
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let source = crate::workspace::SourceWorkspace::new(uuid::Uuid::new_v4()).source_token();
+        let attached = HashSet::from(["s1".to_owned()]);
+        let mut files = FileTransfers {
+            offers_supported: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let id = "0123456789abcdef0123456789abcdef";
+        assert!(!files.event(
+            &client,
+            source,
+            &attached,
+            &json!({"type":"file.prompt","offerId":id,"sessionId":"s1","name":"a","size":1}),
+            &mut out,
+        ));
+        assert!(out.is_empty() && files.offers.is_empty());
+        let expires_at = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000;
+        let mut offer = serde_json::to_value(SessionMessage::FileOffer {
+            offer_id: id.into(),
+            session_id: "s1".into(),
+            name: "report.pdf".into(),
+            size: 12,
+            expires_at,
+        })
+        .unwrap();
+        offer["futureField"] = json!([1]);
+        files.event(&client, source, &attached, &offer, &mut out);
+        assert!(matches!(
+            out.as_slice(),
+            [Update::Files(FileUpdate::Offered { offer_id, name, size: 12, .. })]
+                if offer_id == id && name == "report.pdf"
+        ));
+        out.clear();
+        let mut closed = serde_json::to_value(SessionMessage::FileClosed {
+            offer_id: id.into(),
+            reason: FileClosedReason::Taken,
+        })
+        .unwrap();
+        closed["reason"] = json!("moved");
+        closed["futureField"] = json!(null);
+        files.event(&client, source, &attached, &closed, &mut out);
+        assert!(matches!(
+            out.as_slice(),
+            [Update::Files(FileUpdate::OfferClosed { offer_id, .. })] if offer_id == id
+        ));
+        assert!(files.offers.is_empty());
+        client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 }

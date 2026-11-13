@@ -222,7 +222,7 @@ impl SourceWorkspace {
     }
     pub(crate) fn observe_transfer_failure(&mut self, connection: Uuid, event: &Value) {
         if connection != self.connection_id
-            || event["type"] != "mux.op_failed"
+            || !MessageType::MuxOpFailed.is(event)
             || event["op"] != "move_pane_to_screen"
         {
             return;

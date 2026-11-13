@@ -18,6 +18,6 @@
 
 ## 4. Typed decoding in client-core
 
-- [ ] 4.1 Unit (splitty-core): `ServerEvent` and the message types decode their own JSON, ignore unknown fields, and an unknown type decodes as unknown.
-- [ ] 4.2 Decode server messages typed in client-core module by module; extend each module's existing tests with a message carrying an unknown field.
-- [ ] 4.3 Update docs/protocol.ts and docs/architecture.md where they name the places.
+- [x] 4.1 Unit (splitty-core): `ServerEvent` and the message types decode their own JSON, ignore unknown fields, and an unknown type decodes as unknown.
+- [x] 4.2 Decode server messages typed in client-core module by module; extend each module's existing tests with a message carrying an unknown field.
+- [x] 4.3 Update docs/protocol.ts and docs/architecture.md where they name the places.

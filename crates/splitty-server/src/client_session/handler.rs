@@ -135,7 +135,7 @@ pub(super) async fn run(
                 }
             } => {
                 if changed.is_err() { prompt_changes = None; }
-                else if sender.try_send_json(&serde_json::json!({"type":splitty_core::protocol::SSH_PROMPTS_CHANGED})).is_err() { break; }
+                else if sender.try_send_json(&splitty_core::protocol::session::SessionMessage::SshPromptsChanged).is_err() { break; }
             },
             msg = read.recv() => {
                 let (msg, _incoming_bytes) = match msg {

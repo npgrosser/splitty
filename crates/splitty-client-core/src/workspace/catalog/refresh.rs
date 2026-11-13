@@ -456,7 +456,7 @@ fn catalog(event: &Value, model: &SourceWorkspace) -> io::Result<Catalog> {
     } else {
         MAX_REMOTE_CATALOG
     };
-    if event["type"] != "mux.workspace_snapshot" {
+    if !MessageType::MuxWorkspaceSnapshot.is(event) {
         return Err(invalid("expected workspace catalog"));
     }
     let values = event["screens"]

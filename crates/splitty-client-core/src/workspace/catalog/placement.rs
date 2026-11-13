@@ -149,7 +149,7 @@ impl SourceWorkspace {
     /// Clearing sooner could attribute its late failure to a subsequent intent.
     pub fn observe_placement_failure(&mut self, connection: Uuid, event: &Value) {
         if connection != self.connection_id
-            || event["type"] != "mux.op_failed"
+            || !MessageType::MuxOpFailed.is(event)
             || event["op"] != "move_tab"
         {
             return;

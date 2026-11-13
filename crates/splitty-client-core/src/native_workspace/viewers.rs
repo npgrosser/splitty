@@ -215,8 +215,8 @@ impl Viewers {
                 .collect();
             error
         };
-        match (ask, value["type"].as_str()) {
-            (Ask::Anchors, Some("viewer.anchored")) => {
+        match (ask, MessageType::of(value)) {
+            (Ask::Anchors, MessageType::ViewerAnchored) => {
                 let anchors = value["anchors"]
                     .as_array()
                     .filter(|anchors| anchors.len() <= splitty_core::mux::ANNOTATION_COUNT_LIMIT)
@@ -238,7 +238,7 @@ impl Viewers {
             (Ask::Anchors, _) => {}
             (Ask::Review { token }, kind) => {
                 let review = match kind {
-                    Some("viewer.reviewed") => {
+                    MessageType::ViewerReviewed => {
                         let entries = value["entries"].as_array().and_then(|entries| {
                             entries
                                 .iter()
@@ -279,7 +279,7 @@ impl Viewers {
     ) {
         if let Some(value) = event
             .json()
-            .filter(|value| value["type"] == "viewer.review_answered")
+            .filter(|value| MessageType::ViewerReviewAnswered.is(value))
         {
             if let (Some(pane), Some(wait_id)) =
                 (value["paneId"].as_str(), value["waitId"].as_str())
@@ -295,8 +295,10 @@ impl Viewers {
         }
         if let Some(value) = event.json().filter(|value| {
             matches!(
-                value["type"].as_str(),
-                Some("viewer.anchored" | "viewer.reviewed" | "viewer.failed")
+                MessageType::of(value),
+                MessageType::ViewerAnchored
+                    | MessageType::ViewerReviewed
+                    | MessageType::ViewerFailed
             )
         }) {
             if self.answer(source, value, out) {
@@ -351,6 +353,7 @@ mod tests {
         let mut out = Vec::new();
         let answer = json!({
             "type": "viewer.anchored", "requestId": "r1", "paneId": "v1", "version": "7",
+            "futureField": {"x": 1},
             "anchors": [
                 {"id": "a1", "state": "general"},
                 {"id": "a2", "state": "anchored", "start": 4, "end": 9, "startLine": 2, "endLine": 2},
@@ -393,7 +396,7 @@ mod tests {
         let mut out = Vec::new();
         let answer = json!({
             "type": "viewer.reviewed", "requestId": "r2", "paneId": "v1", "version": "7",
-            "text": "# Review\n", "count": 1,
+            "text": "# Review\n", "count": 1, "futureField": [1],
             "entries": [{"id": "a1", "kind": "comment", "body": "Why?"}],
         });
         assert!(viewers.answer(owner(), &answer, &mut out));

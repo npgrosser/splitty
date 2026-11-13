@@ -25,6 +25,8 @@ pub use document::{Document, DocumentRead};
 #[cfg(not(target_os = "windows"))]
 pub use embedded::EmbeddedService;
 pub use local_service::LocalServiceClient;
+/// The `type` of a message from a server, shared with the server.
+pub use splitty_core::protocol::message_type::MessageType;
 pub use workspace::{SessionRoute, SourceWorkspace, WindowWorkspace, WorkspaceDelta};
 
 mod api_stream;

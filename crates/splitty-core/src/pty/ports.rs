@@ -18,7 +18,7 @@
 
 use std::net::SocketAddr;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::Backend;
 
@@ -27,7 +27,7 @@ use super::Backend;
 pub const SUPPORTED: bool = cfg!(target_os = "linux");
 
 /// A TCP port a process of a session listens on.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListeningPort {
     pub port: u16,

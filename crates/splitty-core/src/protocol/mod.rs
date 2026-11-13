@@ -2,7 +2,9 @@
 //!
 //! The capabilities a server announces in `mux.welcome` are named in
 //! `capability`; the messages for one connection that are not events
-//! (answers, editor requests, file offers) are `session::SessionMessage`.
+//! (answers, editor requests, file offers) are `session::SessionMessage`;
+//! clients tell every message to a window apart by its
+//! `message_type::MessageType`.
 //!
 //! Defines the transport-agnostic `Request`/`Response` types, message type constants
 //! for both plain terminal and mux protocols, the `Dispatcher` that routes requests
@@ -14,6 +16,7 @@
 
 pub mod capability;
 pub mod dispatcher;
+pub mod message_type;
 mod messages;
 pub mod notice;
 pub mod notify;

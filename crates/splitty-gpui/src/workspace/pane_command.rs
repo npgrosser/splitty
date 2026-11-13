@@ -7,7 +7,7 @@
 mod tests;
 use super::*;
 use crate::terminal::LocalAction;
-use splitty_client_core::Event;
+use splitty_client_core::{Event, MessageType};
 
 impl Workspace {
     pub(super) fn observe_pane_command(
@@ -19,7 +19,7 @@ impl Workspace {
     ) {
         let Some(command) = event
             .json()
-            .filter(|json| json["type"] == "command")
+            .filter(|json| MessageType::Command.is(json))
             .map(|json| &json["command"])
         else {
             return;

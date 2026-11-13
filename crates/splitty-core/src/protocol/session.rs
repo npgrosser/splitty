@@ -20,6 +20,12 @@ pub enum SessionMessage {
     #[serde(rename = "hub.changed")]
     HubChanged,
 
+    /// The service's pending SSH questions changed; carries none of them.
+    /// Only on local main connections (`ssh-prompts-v1`), which read them
+    /// with `ssh.prompts.get`.
+    #[serde(rename = "ssh.prompts.changed")]
+    SshPromptsChanged,
+
     /// The answer to `mux.extract_template`: the template, or why there is
     /// none.
     #[serde(rename = "mux.template_extracted", rename_all = "camelCase")]
@@ -127,6 +133,10 @@ mod tests {
         assert_eq!(
             wire(SessionMessage::HubChanged),
             json!({"type":"hub.changed"})
+        );
+        assert_eq!(
+            wire(SessionMessage::SshPromptsChanged),
+            json!({"type":"ssh.prompts.changed"})
         );
         assert_eq!(
             wire(SessionMessage::TemplateExtracted {

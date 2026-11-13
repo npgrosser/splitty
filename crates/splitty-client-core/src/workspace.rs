@@ -36,6 +36,7 @@ pub use splitty_core::mux::{
 pub use splitty_core::mux::{
     CloseAssessment, CloseLoss, CloseScope, SessionStatus, ViewerSource, ViewerState,
 };
+use splitty_core::protocol::message_type::MessageType;
 use splitty_core::{
     ids::{NodeId, PaneId, SessionId},
     mux::{self, ScreenOp},
@@ -747,7 +748,7 @@ impl ScreenModel {
         if connection_id != self.connection_id {
             return Ok(WorkspaceDelta::default());
         }
-        if event["type"] != "mux.screen_snapshot" {
+        if !MessageType::MuxScreenSnapshot.is(event) {
             return Err(invalid("expected screen snapshot"));
         }
         let screen = ScreenState::deserialize(&event["screen"]).map_err(io::Error::other)?;

@@ -749,6 +749,13 @@ type ClientMessage =
 // ============================================================================
 
 // --- Base types (TypeScript-only, not on the wire) ---
+//
+// In Rust, events are `splitty_core::protocol::ServerEvent`, the answers and
+// requests of one connection (hub.changed, ssh.prompts.changed,
+// mux.template_extracted, mux.close_assessed, editor.*, file.offer,
+// file.closed) are `protocol::session::SessionMessage`, and every type name a
+// window may receive is a `protocol::message_type::MessageType`. Clients
+// ignore types and fields they do not know.
 
 /** Base shape of every JSON server event. */
 interface ServerEvent {
@@ -986,7 +993,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1" and "viewer-reviews-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "terminal-input-bytes-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1" and "viewer-reviews-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */

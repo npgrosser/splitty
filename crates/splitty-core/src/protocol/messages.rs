@@ -20,8 +20,6 @@ pub const MSG_DETACH: &str = "detach";
 pub const MSG_INPUT: &str = "input";
 /// Standard base64 carrying terminal bytes that need not be UTF-8.
 pub const MSG_INPUT_BYTES: &str = "input_bytes";
-/// The service's pending SSH questions changed; carries none of them.
-pub const SSH_PROMPTS_CHANGED: &str = "ssh.prompts.changed";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_INPUT_ENCODED_BYTES: usize = MAX_INPUT_BYTES.div_ceil(3) * 4;
 pub const MSG_RESIZE: &str = "resize";
@@ -156,7 +154,10 @@ pub fn generate_event_id() -> String {
 ///
 /// Serialized flat on the wire with `type` as the discriminator tag.
 /// Terminal output bypasses this enum entirely (binary frames).
-#[derive(Clone, Debug, Serialize)]
+///
+/// It decodes as well, ignoring fields this build does not know; a message of
+/// another `type` is not a `ServerEvent`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
     #[serde(rename = "settings.changed", rename_all = "camelCase")]
@@ -320,7 +321,7 @@ pub enum ServerEvent {
         status: Option<ProgramStatus>,
         /// A window may notify about this change; exactly then `notice` is
         /// present.
-        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         notify: bool,
         /// What a window shows for it (`notification-notices-v1`).
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -850,6 +851,78 @@ mod tests {
         assert_eq!(wire["type"], "mux.welcome");
         assert_eq!(wire["clientId"], "client");
         assert_eq!(wire["serverMode"], "embedded");
+    }
+
+    /// Events decode from their own JSON, and from a newer server's with
+    /// fields this build does not know; another type is not an event.
+    #[test]
+    fn events_decode_tolerating_unknown_fields() {
+        let events = [
+            ServerEvent::settings_changed(serde_json::json!({"drawer":{"pinned":true}})),
+            ServerEvent::session_created_with_fallback(
+                "s1",
+                Some("/home".into()),
+                Some("prompt".into()),
+                Some("zsh".into()),
+                Some("missing".into()),
+            ),
+            ServerEvent::session_attached("s1", None, None, Some(1), Some(2)),
+            ServerEvent::session_closed_result("s1", Some(1), Some("TERM".into())),
+            ServerEvent::error(None, "gone"),
+            ServerEvent::bell("s1"),
+            ServerEvent::size("s1", 80, 24, "largest"),
+            ServerEvent::process_finished("s1", "make".into(), Some("make all".into())),
+            ServerEvent::process_idle("s1", "make".into(), Some(2), false),
+            ServerEvent::session_exited("s1", 3, Some("make".into()), None, true),
+            ServerEvent::ports_changed(vec![ListeningPort {
+                port: 3000,
+                session_id: "s1".into(),
+                process: "node".into(),
+            }]),
+            ServerEvent::program_status_changed(
+                "s1",
+                Some(("p1".into(), "sc1".into())),
+                None,
+                None,
+            ),
+            ServerEvent::mux_welcome("c1".into(), vec![], Some("daemon".into()), true),
+            ServerEvent::mux_workspace_snapshot(vec![], Some("sc1".into())),
+            ServerEvent::mux_nudge("mux_op".into(), Some("sc1".into())),
+            ServerEvent::mux_pane_spawned_with_profile("p1", "s1", Some("zsh".into()), None),
+            ServerEvent::mux_op_failed("close_pane", Some("sc1".into()), None, "x"),
+            ServerEvent::image_saved("r1", "/tmp/a.png"),
+            ServerEvent::image_failed("r1", "x"),
+            ServerEvent::upload_progress("r1", 5),
+            ServerEvent::upload_saved("r1", "/tmp/a"),
+            ServerEvent::upload_failed("r1", "x"),
+            ServerEvent::command(ClientCommand::PaneActivate {
+                pane_id: Some("p1".into()),
+            }),
+        ];
+        for event in events {
+            let wire = serde_json::to_value(&event).unwrap();
+            let decoded: ServerEvent = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+            let mut newer = wire.clone();
+            newer["futureField"] = serde_json::json!({"any":"thing"});
+            let decoded: ServerEvent = serde_json::from_value(newer).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+        }
+        let changed: ServerEvent = serde_json::from_value(serde_json::json!({
+            "type":"program_status.changed","id":"e","timestamp":1,"sessionId":"s1","status":null
+        }))
+        .unwrap();
+        assert!(matches!(
+            changed,
+            ServerEvent::ProgramStatusChanged { notify: false, .. }
+        ));
+        for other in [
+            serde_json::json!({"type":"future.event","id":"e","timestamp":1}),
+            serde_json::json!({"type":"hub.changed"}),
+            serde_json::json!({"id":"e","timestamp":1}),
+        ] {
+            assert!(serde_json::from_value::<ServerEvent>(other).is_err());
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 use base64::Engine as _;
 use serde_json::{json, Value};
 use splitty_core::mux::ScreenOp;
+use splitty_core::protocol::message_type::MessageType;
 use splitty_core::protocol::{capability, MAX_INPUT_BYTES};
 use splitty_transport::{
     budget::{Charged, Lease},
@@ -226,12 +227,13 @@ impl Client {
             let decoded = match raw.frame.kind {
                 Kind::Text => {
                     let value = decode_event_json(&raw, &self.sender().context().budget)?;
-                    if value["type"] == "mux.welcome" {
+                    let kind = MessageType::of(&value);
+                    if kind == MessageType::MuxWelcome {
                         self.byte_input =
                             capability::offered(&value, capability::TERMINAL_INPUT_BYTES);
                     }
                     if let Some(session) = value["sessionId"].as_str() {
-                        observe_attachment(&mut self.attachments, session, value["type"].as_str());
+                        observe_attachment(&mut self.attachments, session, kind);
                     }
                     Some(value)
                 }
@@ -839,19 +841,19 @@ fn binary(bytes: &[u8]) -> Option<(&str, &[u8])> {
 fn observe_attachment(
     attachments: &mut HashMap<String, Attachment>,
     session: &str,
-    kind: Option<&str>,
+    kind: MessageType,
 ) {
     match kind {
-        Some("attached") => {
+        MessageType::Attached => {
             if let Some(attachment) = attachments.get_mut(session) {
                 attachment.replay = false;
             }
         }
-        Some("closed") => {
+        MessageType::Closed => {
             attachments.remove(session);
             attachments.shrink_to_fit();
         }
-        Some("error")
+        MessageType::Error
             if attachments
                 .get(session)
                 .is_some_and(|attachment| attachment.replay) =>
@@ -937,12 +939,14 @@ mod tests {
                 },
             );
         }
-        observe_attachment(&mut attachments, "pending", Some("error"));
+        observe_attachment(&mut attachments, "pending", MessageType::Error);
         assert!(!attachments.contains_key("pending"));
-        observe_attachment(&mut attachments, "live", Some("error"));
+        observe_attachment(&mut attachments, "live", MessageType::Error);
         assert!(attachments.contains_key("live"));
         assert_eq!(budget.used(), 512);
-        observe_attachment(&mut attachments, "live", Some("closed"));
+        observe_attachment(&mut attachments, "live", MessageType::Unknown);
+        assert_eq!(budget.used(), 512);
+        observe_attachment(&mut attachments, "live", MessageType::Closed);
         assert_eq!(budget.used(), 0);
     }
 }

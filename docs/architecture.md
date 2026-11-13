@@ -155,7 +155,13 @@ on server storage types.
 Every `mux.welcome` capability name is defined once in `core::protocol::capability`,
 which also assembles the welcome's list in its fixed order; the session handler only
 says whether the connection is a local main one with a hub, and clients test the
-same constants (`capability::offered`).
+same constants (`capability::offered`). The messages a server sends a window are
+typed in `core::protocol` as well: events in `ServerEvent` (`messages`), one
+connection's answers and requests in `session::SessionMessage`, and every message's
+`type` in `message_type::MessageType`, which client-core and splitty-gpui match on
+instead of strings. A type a build does not know reads as `MessageType::Unknown` and
+is ignored; the handling module still reads the payload's fields itself, leniently
+and within its budget, so a malformed known message is answered as before.
 
 Outbound forwarding has a separate `client-core::ports` owner. Connection-scoped
 port observations live in `SourceWorkspace`; the Ports controller reads those

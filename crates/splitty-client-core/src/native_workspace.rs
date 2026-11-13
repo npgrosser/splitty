@@ -43,6 +43,7 @@ pub use presence::{
     MAX_PTY_ROWS,
 };
 use splitty_core::protocol::capability;
+use splitty_core::protocol::message_type::MessageType;
 pub use ssh_prompts::SshPrompt;
 use std::{
     collections::{HashMap, HashSet},
@@ -1900,17 +1901,18 @@ async fn run_service_with_presence(
                         publish(&updates,Update::Event { source:local.owner(),event },&stop).await?;
                     } else {
                         let json=event.json().expect("JSON event");
-                        let welcome=!local.welcomed && json["type"]=="mux.welcome";
+                        let kind=MessageType::of(json);
+                        let welcome=!local.welcomed && kind==MessageType::MuxWelcome;
                         let supports_hub=welcome && supports_host_directory(json);
                         let notifies_prompts=welcome && supports_ssh_prompts(json);
                         let host_state=welcome && supports_host_state(json);
-                        if json["type"]=="settings.changed" {
+                        if kind==MessageType::SettingsChanged {
                             if let Some(reader)=&mut settings { if let Err(error)=reader.settings_changed(event.connection_id) {publish(&updates,Update::AppearanceError {connection:event.connection_id,reason:error.to_string()},&stop).await?;} }
                         }
-                        if json["type"]==splitty_core::protocol::SSH_PROMPTS_CHANGED {
+                        if kind==MessageType::SshPromptsChanged {
                             if let Some(prompts)=&mut prompts {prompts.changed();}
                         }
-                        if json["type"]=="hub.changed" {
+                        if kind==MessageType::HubChanged {
                             if let Some(ports)=&mut ports {ports.refresh();}
                             if let Some(reader)=&mut hub {if let Err(error)=reader.refresh(event.connection_id) {publish(&updates,Update::Status(error.to_string()),&stop).await?;} }
                         }

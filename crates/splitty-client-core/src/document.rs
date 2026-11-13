@@ -2,6 +2,7 @@
 use crate::connection::{identifier, invalid, Client, Event};
 use base64::Engine as _;
 use serde_json::{json, Value};
+use splitty_core::protocol::message_type::MessageType;
 use splitty_transport::budget::{ConnectionBudget, Lease};
 use std::io;
 use uuid::Uuid;
@@ -93,9 +94,15 @@ impl DocumentRead {
         event.connection_id == self.connection_id
             && event.json().is_some_and(|value| {
                 value["requestId"].as_str() == Some(self.request_id.as_str())
-                    && value["type"]
-                        .as_str()
-                        .is_some_and(|kind| kind.starts_with("viewer."))
+                    && matches!(
+                        MessageType::of(value),
+                        MessageType::ViewerChunk
+                            | MessageType::ViewerUnchanged
+                            | MessageType::ViewerAnchored
+                            | MessageType::ViewerReviewed
+                            | MessageType::ViewerFailed
+                            | MessageType::ViewerReviewAnswered
+                    )
             })
     }
 
@@ -114,12 +121,12 @@ impl DocumentRead {
                 .take(limit)
                 .collect()
         };
-        match value["type"].as_str() {
-            Some("viewer.unchanged") => {
+        match MessageType::of(value) {
+            MessageType::ViewerUnchanged => {
                 self.finished = true;
                 Some(ReadOutcome::Unchanged)
             }
-            Some("viewer.failed") => {
+            MessageType::ViewerFailed => {
                 self.finished = true;
                 Some(ReadOutcome::Failed {
                     code: words("code", 64),
@@ -192,9 +199,9 @@ impl DocumentRead {
         if self.finished {
             return Err(invalid("document read already finished"));
         }
-        match value["type"].as_str() {
-            Some("viewer.failed") => return Err(invalid("service refused document read")),
-            Some("viewer.chunk") => {}
+        match MessageType::of(value) {
+            MessageType::ViewerFailed => return Err(invalid("service refused document read")),
+            MessageType::ViewerChunk => {}
             _ => return Err(invalid("unexpected document response")),
         }
         let size = value["size"]

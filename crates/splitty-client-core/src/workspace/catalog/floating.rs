@@ -292,7 +292,7 @@ impl SourceWorkspace {
         Ok(true)
     }
     pub(crate) fn observe_floating_failure(&mut self, connection: Uuid, event: &Value) {
-        if connection != self.connection_id || event["type"] != "mux.op_failed" {
+        if connection != self.connection_id || !MessageType::MuxOpFailed.is(event) {
             return;
         }
         if let Some(pending) = &mut self.pending_floating {

@@ -6,6 +6,7 @@ use crate::{
     Client,
 };
 use splitty_core::mux;
+use splitty_core::protocol::message_type::MessageType;
 use std::{io, time::Instant};
 
 #[derive(Default)]
@@ -1067,8 +1068,9 @@ impl SourceRuntime {
         self.template_extracted(&event, &mut out.updates);
         self.close_assessed(&event, &mut out.updates);
         if let Some(json) = event.json() {
-            match json["type"].as_str() {
-                Some("mux.welcome") if !self.welcomed => {
+            let kind = MessageType::of(json);
+            match kind {
+                MessageType::MuxWelcome if !self.welcomed => {
                     let workspace = model.as_mut().expect("owned local source");
                     let offered = |name: &str| capability::offered(json, name);
                     workspace.set_templates_supported(offered(capability::SERVER_TEMPLATES));
@@ -1107,7 +1109,7 @@ impl SourceRuntime {
                     self.files.welcome(&self.client, json);
                     self.editors.welcome(&self.client, json);
                 }
-                Some("editor.request" | "editor.cancelled") => {
+                MessageType::EditorRequest | MessageType::EditorCancelled => {
                     self.editors.event(
                         &self.client,
                         source,
@@ -1116,14 +1118,18 @@ impl SourceRuntime {
                         &mut out.updates,
                     );
                 }
-                Some(
-                    "file.offer" | "file.chunk" | "file.closed" | "image_saved" | "image_failed"
-                    | "upload_progress" | "upload_saved" | "upload_failed",
-                ) => {
+                MessageType::FileOffer
+                | MessageType::FileChunk
+                | MessageType::FileClosed
+                | MessageType::ImageSaved
+                | MessageType::ImageFailed
+                | MessageType::UploadProgress
+                | MessageType::UploadSaved
+                | MessageType::UploadFailed => {
                     self.files
                         .event(&self.client, source, &self.attached, json, &mut out.updates);
                 }
-                Some("ports.changed") => {
+                MessageType::PortsChanged => {
                     if let Some(model) = &mut model {
                         match model.observe_ports(
                             source,
@@ -1135,7 +1141,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("program_status.changed") => {
+                MessageType::ProgramStatusChanged => {
                     if let Some(model) = &mut model {
                         match model.observe_program_status(
                             source,
@@ -1147,7 +1153,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("mux.workspace_snapshot") => {
+                MessageType::MuxWorkspaceSnapshot => {
                     if let Some(model) = &mut model {
                         let response_generation = model.catalog_request_generation();
                         let first = !model.catalog_initialized();
@@ -1210,7 +1216,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("mux.screen_snapshot") => {
+                MessageType::MuxScreenSnapshot => {
                     if let Some(model) = &mut model {
                         match self.workspace_refresh.apply_snapshot(
                             model,
@@ -1242,7 +1248,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("mux.pane_spawned") => {
+                MessageType::MuxPaneSpawned => {
                     if let (Some(model), Some(pane), Some(session)) = (
                         &mut model,
                         json["paneId"].as_str(),
@@ -1257,7 +1263,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("mux.nudge") => {
+                MessageType::MuxNudge => {
                     if let Some(model) = &mut model {
                         let id = json["screenId"].as_str();
                         if matches!(json["reason"].as_str(), Some("mux_op" | "cli_op"))
@@ -1274,7 +1280,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("attached") => {
+                MessageType::Attached => {
                     if let Some(session) = json["sessionId"].as_str() {
                         if model.as_mut().is_some_and(|model| {
                             model.observe_attached(event.connection_id, session)
@@ -1298,7 +1304,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("size") => {
+                MessageType::Size => {
                     if let Some(session) = json["sessionId"]
                         .as_str()
                         .filter(|session| self.owned_sessions.contains(*session))
@@ -1315,7 +1321,7 @@ impl SourceRuntime {
                         }
                     }
                 }
-                Some("closed") => {
+                MessageType::Closed => {
                     if let Some(session) = json["sessionId"].as_str() {
                         self.attached.remove(session);
                         self.pty_sizes.remove(session);
@@ -1331,7 +1337,7 @@ impl SourceRuntime {
                         self.closed_sessions.insert(session.to_owned());
                     }
                 }
-                Some("mux.op_failed") | Some("error") => {
+                MessageType::MuxOpFailed | MessageType::Error => {
                     let file_answer = self.files.event(
                         &self.client,
                         source,
@@ -1339,7 +1345,7 @@ impl SourceRuntime {
                         json,
                         &mut out.updates,
                     );
-                    if json["type"] == "mux.op_failed" {
+                    if kind == MessageType::MuxOpFailed {
                         if let Some(model) = &mut model {
                             model.observe_placement_failure(event.connection_id, json);
                             model.observe_transfer_failure(event.connection_id, json);
@@ -1351,7 +1357,7 @@ impl SourceRuntime {
                             close.observe_failure(json);
                         }
                     }
-                    if json["type"] == "error" {
+                    if kind == MessageType::Error {
                         if let Some(session) = json["sessionId"].as_str() {
                             if !self.attached.contains(session) {
                                 // A server-rejected pending attach is removed by
@@ -3312,7 +3318,7 @@ impl SourceRuntime {
     fn close_assessed(&mut self, event: &Event, out: &mut Vec<Update>) {
         let Some(value) = event
             .json()
-            .filter(|value| value["type"] == "mux.close_assessed")
+            .filter(|value| MessageType::MuxCloseAssessed.is(value))
         else {
             return;
         };
@@ -3345,7 +3351,7 @@ impl SourceRuntime {
     fn template_extracted(&mut self, event: &Event, out: &mut Vec<Update>) {
         let Some(value) = event
             .json()
-            .filter(|value| value["type"] == "mux.template_extracted")
+            .filter(|value| MessageType::MuxTemplateExtracted.is(value))
         else {
             return;
         };

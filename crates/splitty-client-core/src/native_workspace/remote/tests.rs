@@ -685,8 +685,11 @@ async fn application_prelude_requires_exact_target_then_catalog_capability() {
     assert!(!host
         .observe_prelude(&serde_json::json!({"type":"remote.progress"}))
         .unwrap());
+    assert!(!host
+        .observe_prelude(&serde_json::json!({"type":"remote.progress","futureField":1}))
+        .unwrap());
     assert!(host.daemon_version.is_none());
-    let ready = serde_json::json!({"type":"remote.ready","target":"prelude.test","daemon":{"version":"0.3.2","protocol":1,"started":false}});
+    let ready = serde_json::json!({"type":"remote.ready","target":"prelude.test","daemon":{"version":"0.3.2","protocol":1,"started":false},"futureField":true});
     assert!(!host.observe_prelude(&ready).unwrap());
     assert!(host.was_ready);
     assert!(host.offer.is_none(), "a version alone offers no update");

@@ -13,6 +13,7 @@ use crate::{
     Client,
 };
 use splitty_core::protocol::capability;
+use splitty_core::protocol::message_type::MessageType;
 use splitty_remote::ssh::SshTarget;
 use splitty_transport::{
     budget::{Charged, ConnectionBudget},
@@ -227,11 +228,11 @@ impl<'a> Host<'a> {
     /// A transport assignment alone is insufficient; the welcome must follow
     /// this attempt's exact target and advertise the coherent catalog protocol.
     fn observe_prelude(&mut self, json: &serde_json::Value) -> io::Result<bool> {
-        match json["type"].as_str() {
+        match MessageType::of(json) {
             // Progress arrives as transport reports during preparation. A hub
             // of the previous release repeats it here as text; ignore it.
-            Some("remote.progress") => Ok(false),
-            Some("remote.ready")
+            MessageType::RemoteProgress => Ok(false),
+            MessageType::RemoteReady
                 if !self.remote_ready && json["target"].as_str() == Some(self.action.target()) =>
             {
                 self.offer = HostUpdateOffer::from_ready(json, &self.context.budget)?;
@@ -241,7 +242,7 @@ impl<'a> Host<'a> {
                 self.was_ready = true;
                 Ok(false)
             }
-            Some("mux.welcome") if self.remote_ready => {
+            MessageType::MuxWelcome if self.remote_ready => {
                 if !capability::offered(json, capability::WORKSPACE_CATALOG) {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,

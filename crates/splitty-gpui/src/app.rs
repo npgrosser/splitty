@@ -4,8 +4,8 @@ use crate::{
     terminal::{self, Terminal},
 };
 use gpui_kit::{prelude::*, *};
-use serde_json::{json, Value};
-use splitty_client_core::{AnnotationDraft, Document, Event};
+use serde_json::json;
+use splitty_client_core::{AnnotationDraft, Document, Event, MessageType};
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -216,11 +216,11 @@ async fn run_service(
                         anyhow::bail!("Native stream closed");
                     };
                     if let Some(json) = event.json() {
-                        match json.get("type").and_then(Value::as_str) {
-                            Some("mux.welcome") if ids.is_none() => {
+                        match MessageType::of(json) {
+                            MessageType::MuxWelcome if ids.is_none() => {
                                 ids = Some(client.create_screen("Native UI probe")?);
                             }
-                            Some("mux.pane_spawned") => {
+                            MessageType::MuxPaneSpawned => {
                                 if ids.as_ref().is_some_and(|ids| {
                                     json["paneId"].as_str() == Some(&ids.pane_id)
                                 }) {
@@ -230,7 +230,7 @@ async fn run_service(
                                     }
                                 }
                             }
-                            Some("attached") => {
+                            MessageType::Attached => {
                                 attached = true;
                                 client.activity(true)?;
                                 if let Some(session) = &session {
@@ -247,7 +247,7 @@ async fn run_service(
                                 }
                                 send_update(&updates, Update::Attached, &stop).await?;
                             }
-                            Some("mux.screen_snapshot") => {
+                            MessageType::MuxScreenSnapshot => {
                                 if let Some(ids) = &ids {
                                     if json["screen"]["id"].as_str() == Some(&ids.screen_id) {
                                         if viewer.is_none() {
@@ -277,12 +277,12 @@ async fn run_service(
                                     }
                                 }
                             }
-                            Some("mux.nudge") => {
+                            MessageType::MuxNudge => {
                                 if let Some(ids) = &ids {
                                     client.resync(&ids.screen_id)?;
                                 }
                             }
-                            Some("mux.op_failed") | Some("error") => {
+                            MessageType::MuxOpFailed | MessageType::Error => {
                                 send_update(
                                     &updates,
                                     Update::Status(format!("Service rejected operation: {json}")),
@@ -492,7 +492,7 @@ impl Probe {
                         });
                     }
                     if let Some(json) = event.json() {
-                        if json["type"] == "mux.screen_snapshot"
+                        if MessageType::MuxScreenSnapshot.is(json)
                             && self.screen.as_deref() == json["screen"]["id"].as_str()
                         {
                             if let Some(viewer) = &self.viewer {

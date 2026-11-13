@@ -796,7 +796,7 @@ impl SourceWorkspace {
         let Some(watermark) = self.catalog_in_flight.take() else {
             return Ok(WorkspaceDelta::default());
         };
-        if event["type"] != "mux.workspace_snapshot" {
+        if !MessageType::MuxWorkspaceSnapshot.is(event) {
             return Err(invalid("expected workspace catalog"));
         }
         // Validate the complete replacement before changing selection or routes.

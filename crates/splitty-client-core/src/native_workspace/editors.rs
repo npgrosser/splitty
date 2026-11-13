@@ -210,8 +210,8 @@ impl EditorRequests {
         json: &Value,
         out: &mut Vec<Update>,
     ) {
-        match json["type"].as_str() {
-            Some("editor.cancelled") => {
+        match MessageType::of(json) {
+            MessageType::EditorCancelled => {
                 if let Some(id) = json["requestId"].as_str() {
                     if self
                         .pending
@@ -226,7 +226,7 @@ impl EditorRequests {
                     }
                 }
             }
-            Some("editor.request") if self.registered => {
+            MessageType::EditorRequest if self.registered => {
                 self.requested(client, source, attached, json, out)
             }
             _ => {}
@@ -383,5 +383,71 @@ mod tests {
             ),
             AppEditor::VsCode
         );
+    }
+
+    /// A request with a field this build does not know is still one; a
+    /// message of a type it does not know is no request.
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn requests_are_read_past_fields_and_types_this_build_does_not_know() {
+        use splitty_core::protocol::session::{self, SessionMessage};
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let source = crate::workspace::SourceWorkspace::new(uuid::Uuid::new_v4()).source_token();
+        let attached = HashSet::from(["s1".to_owned()]);
+        let mut editors = EditorRequests {
+            registered: true,
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let id = "0123456789abcdef0123456789abcdef";
+        editors.event(
+            &client,
+            source,
+            &attached,
+            &json!({"type":"editor.prompt","requestId":id,"sessionId":"s1","path":"/a"}),
+            &mut out,
+        );
+        assert!(out.is_empty() && editors.pending.is_none());
+        let expires_at = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap()
+            + 60_000;
+        let mut request = serde_json::to_value(SessionMessage::EditorRequest {
+            request_id: id.into(),
+            session_id: "s1".into(),
+            path: "/work/a.rs".into(),
+            kind: session::PathKind::File,
+            editor: Some(session::Editor::Zed),
+            expires_at,
+        })
+        .unwrap();
+        request["futureField"] = json!({"x": 1});
+        editors.event(&client, source, &attached, &request, &mut out);
+        let [Update::Editor(EditorUpdate::Requested(asked))] = out.as_slice() else {
+            panic!("expected a request");
+        };
+        assert_eq!(asked.request_id, id);
+        assert_eq!(asked.kind, PathKind::File);
+        assert_eq!(asked.editor, Some(AppEditor::Zed));
+        out.clear();
+        let mut cancelled = serde_json::to_value(SessionMessage::EditorCancelled {
+            request_id: id.into(),
+        })
+        .unwrap();
+        cancelled["futureField"] = json!(true);
+        editors.event(&client, source, &attached, &cancelled, &mut out);
+        assert!(matches!(
+            out.as_slice(),
+            [Update::Editor(EditorUpdate::Cancelled { request_id, .. })] if request_id == id
+        ));
+        client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 }
