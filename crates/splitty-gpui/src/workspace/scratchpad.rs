@@ -6,6 +6,7 @@ use gpui_kit::component::input::{InputEvent, Paste, Textarea, TextareaState};
 /// Maximum UTF-8 byte length of a session scratchpad (`64 KiB`).
 pub(super) const SCRATCHPAD_LIMIT: usize = 64 * 1024;
 const SAVE_DELAY: Duration = Duration::from_millis(500);
+/// How long a saved text outlasts snapshots, on a service without versions.
 const SETTLE_DURATION: Duration = Duration::from_millis(2000);
 const DEFAULT_SHARE: f32 = 1. / 3.;
 const MIN_SHARE: f32 = 0.1;
@@ -27,9 +28,65 @@ fn session_scratchpad<'a>(
     screen: &'a splitty_client_core::workspace::ScreenState,
     session_id: &str,
 ) -> Option<&'a str> {
+    scratchpad_of(screen, session_id).map(|(text, _)| text)
+}
+
+/// A session's scratchpad text and its version on the service.
+fn scratchpad_of<'a>(
+    screen: &'a splitty_client_core::workspace::ScreenState,
+    session_id: &str,
+) -> Option<(&'a str, u64)> {
     screen.sessions.iter().find_map(|(id, session)| {
-        (id.as_str() == session_id).then_some(session.scratchpad.as_str())
+        (id.as_str() == session_id)
+            .then_some((session.scratchpad.as_str(), session.scratchpad_version))
     })
+}
+
+/// What an editor knows of its text's version on a service that versions
+/// scratchpads (`session-scratchpad`, Concurrent Edits): the version the
+/// shown text is based on, or the one its own last save is expected to
+/// become. It belongs to one connection; another one starts unknown.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ScratchpadVersion {
+    known: Option<(Uuid, u64)>,
+}
+
+impl ScratchpadVersion {
+    fn on(&self, connection: Uuid) -> Option<u64> {
+        self.known
+            .and_then(|(owner, version)| (owner == connection).then_some(version))
+    }
+
+    /// Whether the version of this connection is known.
+    pub(super) fn knows(&self, connection: Uuid) -> bool {
+        self.on(connection).is_some()
+    }
+
+    /// A snapshot with `version` arrived while an edit waits: the edit is
+    /// saved on top of it.
+    pub(super) fn waiting(&mut self, connection: Uuid, version: u64) {
+        let known = self.on(connection).unwrap_or(0).max(version);
+        self.known = Some((connection, known));
+    }
+
+    /// A snapshot with `version` arrived and no edit waits: whether its text
+    /// replaces the shown one. A lower version is from before this editor's
+    /// own save.
+    pub(super) fn snapshot(&mut self, connection: Uuid, version: u64) -> bool {
+        if self.on(connection).is_some_and(|known| version < known) {
+            return false;
+        }
+        self.known = Some((connection, version));
+        true
+    }
+
+    /// A save goes out: the version it is based on, when known; the save is
+    /// then expected to become the next one.
+    pub(super) fn save(&mut self, connection: Uuid) -> Option<u64> {
+        let base = self.on(connection)?;
+        self.known = Some((connection, base + 1));
+        Some(base)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -68,6 +125,9 @@ pub(super) struct ScratchpadEditor {
     pub full: bool,
     pub syncing: bool,
     pub settle_until: Option<Instant>,
+    /// Whether the editor's service versions scratchpads.
+    pub versioned: bool,
+    pub version: ScratchpadVersion,
     pub debounce_task: Option<Task<()>>,
     pub _subscription: Subscription,
 }
@@ -199,6 +259,19 @@ impl Workspace {
         );
         let clamped = within_limit(initial_text).to_owned();
         let full = clamped.len() >= SCRATCHPAD_LIMIT;
+        // The shown text is the snapshot's, and so is its version.
+        let mut version = ScratchpadVersion::default();
+        let model = self
+            .selected_model()
+            .filter(|model| model.source_token() == source);
+        let versioned = model.is_some_and(SourceWorkspace::scratchpad_versions_supported);
+        if let Some((_, known)) = model
+            .and_then(SourceWorkspace::snapshot)
+            .and_then(|screen| scratchpad_of(screen, key.session_id.as_str()))
+            .filter(|_| versioned)
+        {
+            version.snapshot(source.connection_id(), known);
+        }
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(placeholder)
@@ -229,6 +302,8 @@ impl Workspace {
                 full,
                 syncing: false,
                 settle_until: None,
+                versioned,
+                version,
                 debounce_task: None,
                 _subscription: subscription,
             },
@@ -282,9 +357,16 @@ impl Workspace {
         }
         editor.dirty = false;
         editor.debounce_task = None;
-        editor.settle_until = Some(Instant::now() + SETTLE_DURATION);
-        let text = within_limit(&editor.input.read(cx).value()).to_owned();
         let source = editor.source;
+        let if_version = editor
+            .versioned
+            .then(|| editor.version.save(source.connection_id()))
+            .flatten();
+        if if_version.is_none() {
+            // No version to base the save on: hold the text for a moment.
+            editor.settle_until = Some(Instant::now() + SETTLE_DURATION);
+        }
+        let text = within_limit(&editor.input.read(cx).value()).to_owned();
         let screen = editor.screen_id.clone();
         let session = editor.session_id.clone();
         self.send_captured(
@@ -294,6 +376,7 @@ impl Workspace {
                 connection: source.connection_id(),
                 session,
                 text,
+                if_version,
             },
             cx,
         );
@@ -392,30 +475,45 @@ impl Workspace {
                 .zip(
                     source
                         .snapshot()
-                        .and_then(|snap| session_scratchpad(snap, key.session_id.as_str())),
+                        .and_then(|snap| scratchpad_of(snap, key.session_id.as_str())),
                 )
                 .or_else(|| {
                     source.screens().iter().find_map(|info| {
                         source
                             .screen(info.id.as_str())
                             .and_then(ScreenModel::snapshot)
-                            .and_then(|snap| session_scratchpad(snap, key.session_id.as_str()))
-                            .map(|text| (info.id.as_str(), text))
+                            .and_then(|snap| scratchpad_of(snap, key.session_id.as_str()))
+                            .map(|found| (info.id.as_str(), found))
                     })
                 });
-            let Some((screen_id, scratchpad_text)) = found else {
+            let Some((screen_id, (scratchpad_text, version))) = found else {
                 continue;
             };
             editor.source = source.source_token();
             editor.screen_id = screen_id.to_owned();
+            editor.versioned = source.scratchpad_versions_supported();
+            let connection = source.connection_id();
             if editor.dirty {
+                if editor.versioned {
+                    editor.version.waiting(connection, version);
+                }
                 continue;
             }
-            if editor
-                .settle_until
-                .is_some_and(|until| Instant::now() < until)
-            {
-                continue;
+            if editor.versioned && editor.version.knows(connection) {
+                // Versions tell a snapshot from before this editor's save.
+                if !editor.version.snapshot(connection, version) {
+                    continue;
+                }
+            } else {
+                if editor
+                    .settle_until
+                    .is_some_and(|until| Instant::now() < until)
+                {
+                    continue;
+                }
+                if editor.versioned {
+                    editor.version.snapshot(connection, version);
+                }
             }
             editor.settle_until = None;
             let server_text = within_limit(scratchpad_text).to_owned();
@@ -595,5 +693,34 @@ impl Workspace {
                 })
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ScratchpadVersion;
+    use uuid::Uuid;
+
+    /// session-scratchpad, Concurrent Edits (Snapshot from before the save,
+    /// Another window saved first, Unsaved edit is kept): a save names its
+    /// base, snapshots below its expected version change nothing, a waiting
+    /// edit saves on top of newer versions, and another connection starts
+    /// unknown.
+    #[test]
+    fn versions_tell_snapshots_from_before_the_save() {
+        let connection = Uuid::new_v4();
+        let mut version = ScratchpadVersion::default();
+        assert_eq!(version.save(connection), None, "unknown: no ifVersion");
+        assert!(version.snapshot(connection, 2));
+        assert_eq!(version.save(connection), Some(2));
+        assert!(!version.snapshot(connection, 2), "from before the save");
+        assert!(version.snapshot(connection, 3), "the save or a first one");
+        assert!(version.snapshot(connection, 5));
+        version.waiting(connection, 7);
+        assert_eq!(version.save(connection), Some(7));
+        let reconnected = Uuid::new_v4();
+        assert!(!version.knows(reconnected));
+        assert!(version.snapshot(reconnected, 1), "a new connection");
+        assert_eq!(version.save(reconnected), Some(1));
     }
 }

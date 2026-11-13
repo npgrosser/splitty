@@ -1250,13 +1250,14 @@ impl ScreenModel {
         client: &Client,
         session_id: &str,
         text: String,
+        if_version: Option<u64>,
     ) -> io::Result<()> {
         self.send_op(
             client,
             &ScreenOp::SetScratchpad {
                 session_id: SessionId::from(session_id),
                 text,
-                if_version: None,
+                if_version,
             },
         )
     }

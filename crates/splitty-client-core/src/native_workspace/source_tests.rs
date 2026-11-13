@@ -323,6 +323,45 @@ async fn close_assessment_reaches_the_window_with_the_scratchpad_of_an_idle_pane
     );
     let plan = model.assess_close(42, target).unwrap().with_impact(&impact);
     assert!(plan.needs_confirmation(), "an idle pane with text asks");
+
+    // session-scratchpad, Concurrent Edits; templates, Saved Template Names:
+    // the welcome's capabilities reach the model, and a save names its version.
+    assert!(model.template_names_supported());
+    assert!(model.scratchpad_versions_supported());
+    commands
+        .send(Command::new(
+            owner,
+            CommandKind::SetScratchpad {
+                screen: screen.clone(),
+                connection: owner.connection_id(),
+                session: route.session_id.as_str().to_owned(),
+                text: "after the review".into(),
+                if_version: Some(1),
+            },
+        ))
+        .await
+        .unwrap();
+    let screen_id = splitty_core::ids::ScreenId::from(screen.as_str());
+    let session_id = splitty_core::ids::SessionId::from(route.session_id.as_str());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let saved = state
+                .mux_store
+                .get_screen(&screen_id)
+                .is_some_and(|screen| {
+                    screen.sessions.get(&session_id).is_some_and(|session| {
+                        (session.scratchpad.as_str(), session.scratchpad_version)
+                            == ("after the review", 2)
+                    })
+                });
+            if saved {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the versioned save arrives");
     stop.store(true, Ordering::Release);
     worker.await.unwrap().unwrap();
     assert!(cleanup.load(Ordering::Acquire));

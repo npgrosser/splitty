@@ -22,10 +22,10 @@ enum TemplateMode {
         name: Entity<InputState>,
         root: Entity<InputState>,
     },
+    /// The service names the file (`templates`, Saved Template Names).
     Save {
         draft: Arc<TemplateDraft>,
         name: Entity<InputState>,
-        slug: Entity<InputState>,
         commands: HashSet<String>,
     },
     Overwrite {
@@ -72,10 +72,8 @@ impl TemplateDialog {
         let focused =
             |input: &Entity<InputState>| input.read(cx).focus_handle(cx).is_focused(window);
         match &self.mode {
-            TemplateMode::Extract { name, root, .. }
-            | TemplateMode::Save {
-                name, slug: root, ..
-            } => focused(name) || focused(root),
+            TemplateMode::Extract { name, root, .. } => focused(name) || focused(root),
+            TemplateMode::Save { name, .. } => focused(name),
             TemplateMode::Apply { root, .. } => focused(root),
             _ => false,
         }
@@ -97,21 +95,6 @@ fn modal_key(key: &str, input_focused: bool, request_pending: bool) -> ModalKey 
     } else {
         ModalKey::Consume
     }
-}
-
-fn slug_from_name(name: &str) -> String {
-    let mut slug = String::new();
-    for character in name.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-        } else if matches!(character, ' ' | '-' | '_') && !slug.ends_with('-') && !slug.is_empty() {
-            slug.push('-');
-        }
-        if slug.len() == 128 {
-            break;
-        }
-    }
-    slug.trim_end_matches('-').to_owned()
 }
 
 fn names_with_commands(draft: &TemplateDraft) -> Vec<String> {
@@ -287,23 +270,25 @@ impl Workspace {
                 dialog.error = None;
             }
             TemplateApiOutcome::Draft(draft) => {
-                if !matches!(request.as_ref(), Some(TemplateApiRequest::Extract { .. } | TemplateApiRequest::Load { .. })) {
+                if !matches!(
+                    request.as_ref(),
+                    Some(TemplateApiRequest::Extract { .. } | TemplateApiRequest::Load { .. })
+                ) {
                     dialog.error = Some("Unexpected template draft reply".into());
                     cx.notify();
                     return;
                 }
-                let name = cx.new(|cx| InputState::new(window, cx).default_value(draft.name().to_owned()));
-                let slug_text = slug_from_name(draft.name());
-                let slug = cx.new(|cx| InputState::new(window, cx).default_value(slug_text));
+                let name =
+                    cx.new(|cx| InputState::new(window, cx).default_value(draft.name().to_owned()));
                 let commands = names_with_commands(&draft).into_iter().collect();
-                dialog.mode = if matches!(request.as_ref(), Some(TemplateApiRequest::Extract { .. })) {
-                    TemplateMode::Save {
-                        draft,
-                        name: name.clone(),
-                        slug,
-                        commands,
-                    }
-                } else {
+                dialog.mode =
+                    if matches!(request.as_ref(), Some(TemplateApiRequest::Extract { .. })) {
+                        TemplateMode::Save {
+                            draft,
+                            name: name.clone(),
+                            commands,
+                        }
+                    } else {
                         let root = cx.new(|cx| InputState::new(window, cx));
                         root.update(cx, |input, cx| input.focus(window, cx));
                         TemplateMode::Apply {
@@ -311,7 +296,7 @@ impl Workspace {
                             root,
                             target: TargetChoice::NewScreen,
                         }
-                };
+                    };
                 if let TemplateMode::Save { name, .. } = &dialog.mode {
                     name.update(cx, |name, cx| name.focus(window, cx));
                 }
@@ -341,9 +326,9 @@ impl Workspace {
                 self.template_api(TemplateApiRequest::List, cx);
             }
             TemplateApiOutcome::OverwriteRequired { slug } => {
-                if let Some(request) = request.filter(|request| {
-                    matches!(request, TemplateApiRequest::Save { slug: original, .. } if original == &slug)
-                }) {
+                if let Some(request) =
+                    request.filter(|request| matches!(request, TemplateApiRequest::Save { .. }))
+                {
                     dialog.mode = TemplateMode::Overwrite { request, slug };
                     dialog.error = None;
                     self.focus.focus(window, cx);
@@ -486,18 +471,16 @@ impl Workspace {
     }
 
     fn template_save(&mut self, cx: &mut Context<Self>) {
-        let Some((draft, slug, name, included_commands)) =
+        let Some((draft, name, included_commands)) =
             self.template_dialog.as_ref().and_then(|dialog| {
                 if let TemplateMode::Save {
                     draft,
                     name,
-                    slug,
                     commands,
                 } = &dialog.mode
                 {
                     Some((
                         draft.clone(),
-                        slug.read(cx).value().trim().to_owned(),
                         name.read(cx).value().trim().to_owned(),
                         commands.iter().cloned().collect(),
                     ))
@@ -511,7 +494,6 @@ impl Workspace {
         self.template_api(
             TemplateApiRequest::Save {
                 draft,
-                slug,
                 name,
                 included_commands,
                 overwrite_confirmed: false,
@@ -523,7 +505,6 @@ impl Workspace {
     fn template_overwrite(&mut self, cx: &mut Context<Self>) {
         let Some(TemplateApiRequest::Save {
             draft,
-            slug,
             name,
             included_commands,
             ..
@@ -540,7 +521,6 @@ impl Workspace {
         self.template_api(
             TemplateApiRequest::Save {
                 draft,
-                slug,
                 name,
                 included_commands,
                 overwrite_confirmed: true,
@@ -944,24 +924,14 @@ impl Workspace {
                 TemplateMode::Save {
                     draft,
                     name,
-                    slug,
                     commands,
                 } => {
-                    body = body
-                        .child(field_label(colors, "Name"))
-                        .child(
-                            div()
-                                .id("template-save-name")
-                                .map(|field| field_box(field, colors))
-                                .child(Input::new(name)),
-                        )
-                        .child(field_label(colors, "File slug"))
-                        .child(
-                            div()
-                                .id("template-save-slug")
-                                .map(|field| field_box(field, colors))
-                                .child(Input::new(slug)),
-                        );
+                    body = body.child(field_label(colors, "Name")).child(
+                        div()
+                            .id("template-save-name")
+                            .map(|field| field_box(field, colors))
+                            .child(Input::new(name)),
+                    );
                     for command_name in names_with_commands(draft) {
                         let included = commands.contains(&command_name);
                         let command = draft
@@ -1533,16 +1503,10 @@ fn field_label(colors: &NativeAppearance, text: &'static str) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{modal_key, slug_from_name, ModalKey, TemplateDialog, TemplateMode};
+    use super::{modal_key, ModalKey, TemplateDialog, TemplateMode};
     use gpui_kit::ScrollHandle;
     use splitty_client_core::templates::TemplateApiRequest;
     use uuid::Uuid;
-    #[test]
-    fn slug_is_bounded_and_stable() {
-        assert_eq!(slug_from_name("My Session  2"), "my-session-2");
-        assert_eq!(slug_from_name("  /  "), "");
-        assert!(slug_from_name(&"a".repeat(512)).len() <= 128);
-    }
 
     #[test]
     fn modal_consumes_review_and_pending_keys_but_passes_editor_text() {

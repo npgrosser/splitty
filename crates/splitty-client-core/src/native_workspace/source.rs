@@ -776,11 +776,12 @@ impl SourceRuntime {
                 connection,
                 session,
                 text,
+                if_version,
             } => {
                 if self.pending_close.is_some() {
                     Err(std::io::Error::other("A close operation is pending"))
                 } else if model.connection_id() == connection {
-                    model.set_scratchpad(&self.client, &screen, &session, text)
+                    model.set_scratchpad(&self.client, &screen, &session, text, if_version)
                 } else {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -1048,6 +1049,18 @@ impl SourceRuntime {
                     workspace.set_screen_names_supported(
                         json["capabilities"].as_array().is_some_and(|caps| {
                             caps.iter().any(|cap| cap == mux::SCREEN_NAMES_CAPABILITY)
+                        }),
+                    );
+                    workspace.set_template_names_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter()
+                                .any(|cap| cap == splitty_core::template::NAMES_CAPABILITY)
+                        }),
+                    );
+                    workspace.set_scratchpad_versions_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter()
+                                .any(|cap| cap == mux::SCRATCHPAD_VERSIONS_CAPABILITY)
                         }),
                     );
                     workspace.set_tab_selection_supported(supports_tab_selection);

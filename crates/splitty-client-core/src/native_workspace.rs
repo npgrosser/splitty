@@ -296,11 +296,14 @@ pub enum CommandKind {
         connection: uuid::Uuid,
         name: String,
     },
+    /// Save a scratchpad; with `if_version` only while the service still has
+    /// that version (`session-scratchpad`, Concurrent Edits).
     SetScratchpad {
         screen: String,
         connection: uuid::Uuid,
         session: String,
         text: String,
+        if_version: Option<u64>,
     },
     Split {
         screen: ScreenKey,
@@ -1814,6 +1817,8 @@ async fn run_service_with_presence(
                         }
                         CommandKind::TemplateApi { connection,request_id,request } => {
                             let result = if window.local_source().connection_id()!=connection || !window.local_source().templates_supported() { Err(std::io::Error::other("Template source or capability unavailable")) }
+                            // The file name comes from the service (templates, Saved Template Names).
+                            else if matches!(request, crate::templates::TemplateApiRequest::Save { .. }) && !window.local_source().template_names_supported() { Err(std::io::Error::other("Update the local service to save templates")) }
                             else { settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local service API is not ready")).and_then(|settings|settings.enqueue_template(connection,request_id,request)) };
                             if let Err(error)=result { if error.kind()!=std::io::ErrorKind::AlreadyExists { publish(&updates,Update::TemplateApi(TemplateApiResult::rejected(connection,request_id,error.to_string())),&stop).await?; } }
                         }

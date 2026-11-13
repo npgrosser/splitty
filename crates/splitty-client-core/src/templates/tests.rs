@@ -22,7 +22,6 @@ fn templates_are_bounded_applicable_owned_and_copies_are_charged() {
     assert_eq!(draft.budget.used(), before);
     assert!(TemplateApiRequest::Save {
         draft: draft.clone(),
-        slug: "safe".into(),
         name: "Saved".into(),
         included_commands: vec!["a".into()],
         overwrite_confirmed: false
@@ -110,10 +109,10 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
         .template_store
         .save("source", &changed)
         .unwrap();
+    // The service names the file (templates, Saved Template Names).
     let save = TemplateApiRequest::Save {
         draft: draft.clone(),
-        slug: "target".into(),
-        name: "Review".into(),
+        name: "Review v1.2".into(),
         included_commands: vec!["a".into()],
         overwrite_confirmed: false,
     };
@@ -127,20 +126,26 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
     ));
     assert!(matches!(
         result(&mut client).await.outcome,
-        TemplateApiOutcome::Saved { .. }
+        TemplateApiOutcome::Saved { slug } if slug == "review-v1-2"
     ));
-    let stored = runtime.state.template_store.get("target").unwrap();
+    let stored = runtime.state.template_store.get("review-v1-2").unwrap();
     assert_eq!(stored.panes["a"].command, "printf REVIEWED");
-    assert_eq!(stored.name, "Review");
+    assert_eq!(stored.name, "Review v1.2");
     client
         .enqueue_template(owner, Uuid::new_v4(), save)
         .unwrap();
     assert!(matches!(
         result(&mut client).await.outcome,
-        TemplateApiOutcome::OverwriteRequired { .. }
+        TemplateApiOutcome::OverwriteRequired { slug } if slug == "review-v1-2"
     ));
     assert_eq!(
-        runtime.state.template_store.get("target").unwrap().panes["a"].command,
+        runtime
+            .state
+            .template_store
+            .get("review-v1-2")
+            .unwrap()
+            .panes["a"]
+            .command,
         "printf REVIEWED"
     );
     client
@@ -149,8 +154,7 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
             Uuid::new_v4(),
             TemplateApiRequest::Save {
                 draft: draft.clone(),
-                slug: "target".into(),
-                name: "No commands".into(),
+                name: "review V1 2".into(),
                 included_commands: vec![],
                 overwrite_confirmed: true,
             },
@@ -160,7 +164,8 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
         result(&mut client).await.outcome,
         TemplateApiOutcome::Saved { .. }
     ));
-    let stored = runtime.state.template_store.get("target").unwrap();
+    let stored = runtime.state.template_store.get("review-v1-2").unwrap();
+    assert_eq!(stored.name, "review V1 2");
     assert!(stored.panes["a"].command.is_empty());
     assert!(stored.panes["a"].restore_mode.is_empty());
     client
@@ -176,7 +181,7 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
             owner,
             Uuid::new_v4(),
             TemplateApiRequest::Delete {
-                slug: "target".into(),
+                slug: "review-v1-2".into(),
             },
         )
         .unwrap();
@@ -184,7 +189,7 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
         result(&mut client).await.outcome,
         TemplateApiOutcome::Deleted { .. }
     ));
-    assert!(runtime.state.template_store.get("target").is_err());
+    assert!(runtime.state.template_store.get("review-v1-2").is_err());
     // Extraction reads the authoritative Screen and target-side relative root.
     use splitty_core::{
         ids::{PaneId, ScreenId},

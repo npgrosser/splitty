@@ -83,9 +83,11 @@ pub enum TemplateApiRequest {
         name: String,
         root: String,
     },
+    /// Save under `name`; the service names the file (`templates`, Saved
+    /// Template Names) and, without `overwrite_confirmed`, answers
+    /// [`TemplateApiOutcome::OverwriteRequired`] when that file exists.
     Save {
         draft: Arc<TemplateDraft>,
-        slug: String,
         name: String,
         included_commands: Vec<String>,
         overwrite_confirmed: bool,
@@ -192,12 +194,10 @@ impl TemplateApiRequest {
             }
             Self::Save {
                 draft,
-                slug: value,
                 name,
                 included_commands,
                 ..
             } => {
-                slug(value)?;
                 if draft.connection_id() != owner {
                     return Err(invalid("Template belongs to a previous connection"));
                 }

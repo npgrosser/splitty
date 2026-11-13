@@ -1616,6 +1616,7 @@ async fn a_scratchpad_save_on_a_remote_screen_reaches_its_host() {
                     connection: token.connection_id(),
                     session: session.clone(),
                     text: "ask about the failing test".into(),
+                    if_version: None,
                 },
             ),
         )

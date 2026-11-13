@@ -116,24 +116,10 @@ async fn inner(
         }
         TemplateApiRequest::Save {
             draft,
-            slug,
             name,
             included_commands,
             overwrite_confirmed,
         } => {
-            let existing = read(
-                client,
-                Operation::TemplateGet,
-                args(json!({"slug":slug})),
-                cancel,
-            )
-            .await?;
-            if (200..300).contains(&existing.status) && !overwrite_confirmed {
-                return Ok(TemplateApiOutcome::OverwriteRequired { slug });
-            }
-            if existing.status != 404 && !(200..300).contains(&existing.status) {
-                return Err(invalid("Could not check existing template; nothing saved"));
-            }
             let _scratch = draft.reserve_copy()?;
             let mut template = draft.template().clone();
             template.name = name.trim().to_owned();
@@ -142,20 +128,40 @@ async fn inner(
             if serialized_size(&template)? > MAX_TEMPLATE_BYTES {
                 return Err(invalid("Saved template exceeds byte limit"));
             }
-            let confirmed = mutation(
-                client,
-                Operation::TemplateSave,
-                args(json!({"slug":slug,"body":template})),
-                cancel,
-            )
-            .await?;
-            Ok(if confirmed {
-                TemplateApiOutcome::Saved { slug }
-            } else {
-                TemplateApiOutcome::Uncertain {
-                    reason: "Template save outcome is unknown; reload before deciding again".into(),
-                }
-            })
+            // The service names the file and checks and saves in one step.
+            let request = client.request(
+                Operation::TemplateCreate,
+                args(json!({"body":{"template":template,"overwrite":overwrite_confirmed}})),
+            );
+            let reply =
+                tokio::select! {biased; _=cancel.notified()=>None, result=request=>result.ok()};
+            let uncertain = || TemplateApiOutcome::Uncertain {
+                reason: "Template save outcome is unknown; reload before deciding again".into(),
+            };
+            let Some(reply) = reply.filter(|reply| !reply.uncertain) else {
+                return Ok(uncertain());
+            };
+            let file_name = |reply: &splitty_transport::wire::Reply| {
+                serde_json::from_slice::<Value>(reply.body.as_bytes())
+                    .ok()
+                    .and_then(|body| body["slug"].as_str().map(str::to_owned))
+                    .filter(|value| slug(value).is_ok())
+            };
+            match reply.status {
+                200..300 => Ok(file_name(&reply)
+                    .map_or_else(uncertain, |slug| TemplateApiOutcome::Saved { slug })),
+                409 => Ok(TemplateApiOutcome::OverwriteRequired {
+                    slug: file_name(&reply)
+                        .ok_or_else(|| invalid("Template exists under an invalid file name"))?,
+                }),
+                status => Err(io::Error::other(
+                    serde_json::from_slice::<Value>(reply.body.as_bytes())
+                        .ok()
+                        .and_then(|body| body["error"].as_str().map(str::to_owned))
+                        .filter(|error| error.len() <= 512)
+                        .unwrap_or_else(|| format!("Template save rejected (status {status})")),
+                )),
+            }
         }
         TemplateApiRequest::Delete { slug } => {
             let confirmed = mutation(

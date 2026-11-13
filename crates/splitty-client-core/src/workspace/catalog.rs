@@ -87,6 +87,8 @@ pub struct SourceWorkspace {
     viewers_supported: bool,
     close_assessments_supported: bool,
     screen_names_supported: bool,
+    template_names_supported: bool,
+    scratchpad_versions_supported: bool,
     template_failures: HashMap<String, (String, String)>,
     reconciling: bool,
     route_generation: u64,
@@ -318,6 +320,24 @@ impl SourceWorkspace {
         self.pending_screens.contains_key(id)
     }
 
+    /// Whether this connection's service names saved templates' files and
+    /// saves by name (`template-names-v1`).
+    pub fn template_names_supported(&self) -> bool {
+        self.template_names_supported
+    }
+    pub(crate) fn set_template_names_supported(&mut self, value: bool) {
+        self.template_names_supported = value;
+    }
+
+    /// Whether this connection's service versions scratchpads and takes
+    /// `ifVersion` on a save (`scratchpad-versions-v1`).
+    pub fn scratchpad_versions_supported(&self) -> bool {
+        self.scratchpad_versions_supported
+    }
+    pub(crate) fn set_scratchpad_versions_supported(&mut self, value: bool) {
+        self.scratchpad_versions_supported = value;
+    }
+
     pub fn new(connection_id: Uuid) -> Self {
         Self {
             source_id: SourceId::initial(connection_id),
@@ -346,6 +366,8 @@ impl SourceWorkspace {
             viewers_supported: false,
             close_assessments_supported: false,
             screen_names_supported: false,
+            template_names_supported: false,
+            scratchpad_versions_supported: false,
             template_failures: HashMap::new(),
             reconciling: false,
             route_generation: 0,
@@ -1349,12 +1371,13 @@ impl SourceWorkspace {
         screen: &str,
         session: &str,
         text: String,
+        if_version: Option<u64>,
     ) -> io::Result<()> {
         self.check_known(client, screen)?;
         self.models
             .get_mut(screen)
             .ok_or_else(|| invalid("scratchpad target Screen is gone"))?
-            .set_scratchpad(client, session, text)
+            .set_scratchpad(client, session, text, if_version)
     }
     /// Send an operation on a viewer pane's annotations to the pane's Screen.
     pub(crate) fn annotation_op(

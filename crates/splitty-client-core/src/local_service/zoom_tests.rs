@@ -846,20 +846,12 @@ async fn drawer_visibility_shutdown_joins_pending_write() {
 
 #[tokio::test]
 async fn template_mutation_uncertainty_is_identified_and_never_replayed() {
-    let (mut client, server, path) = scripted(vec![
-        Exchange {
-            operation: "template.get",
-            status: 404,
-            uncertain: false,
-            body: "{}".into(),
-        },
-        Exchange {
-            operation: "template.save",
-            status: 204,
-            uncertain: true,
-            body: String::new(),
-        },
-    ])
+    let (mut client, server, path) = scripted(vec![Exchange {
+        operation: "template.create",
+        status: 200,
+        uncertain: true,
+        body: String::new(),
+    }])
     .await;
     let owner = Uuid::new_v4();
     let request = Uuid::new_v4();
@@ -869,7 +861,6 @@ async fn template_mutation_uncertainty_is_identified_and_never_replayed() {
         request,
         crate::templates::TemplateApiRequest::Save {
             draft: crate::templates::tests::draft(owner),
-            slug: "uncertain".into(),
             name: "Saved".into(),
             included_commands: vec![],
             overwrite_confirmed: false,
