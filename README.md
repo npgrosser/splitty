@@ -15,7 +15,7 @@ Working with coding agents helped shape Splitty: keeping track of many
 Claude Code or Codex sessions running in parallel, sometimes across several
 projects, with dev servers and tests alongside them, locally or on remote VMs.
 
-> **Status:** a personal project in active development (0.1.x), used daily on
+> **Status:** a personal project in active development (0.x), used daily on
 > all three systems. Expect rough edges and changes between versions.
 
 ## Contents
@@ -103,31 +103,24 @@ the GitHub CLI, for example
 
 | System | File | Notes |
 |---|---|---|
-| Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian): the app uses the default distribution and installs its backend there. To update, run the newer installer; it replaces an installed earlier version, including the web app of earlier releases. |
+| Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian): the app uses the default distribution and installs its backend there. To update, run the newer installer; it replaces an installed earlier version. |
 | macOS | `Splitty_<version>_aarch64.dmg` (Apple silicon) or `Splitty_<version>_x64.dmg` (Intel) | Clear the quarantine flag after installing (below). |
 | Linux (x86_64) | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm` or `splitty-<version>-linux-x86_64.tar.gz` | Install the deb (Debian, Ubuntu) or rpm (Fedora, openSUSE) with the system's package manager and start Splitty from the application menu or as `splitty-gpui`. The tar.gz runs from where it is unpacked: `./splitty-gpui`. |
 
-These are the native app. It draws its own interface on the GPU (Vulkan on
-Linux, Wayland or X11) and needs no browser engine. The deb and rpm install to
-`/opt/splitty` and name the libraries they need; with the tar.gz, keep the
-`splitty` command and the `shell-integration/` folder next to `splitty-gpui`.
+The app draws its own interface on the GPU (Vulkan on Linux, Wayland or X11)
+and needs no browser engine. The deb and rpm install to `/opt/splitty` and name
+the libraries they need; with the tar.gz, keep the `splitty` command and the
+`shell-integration/` folder next to `splitty-gpui`.
 
-### The web app
-
-The earlier desktop app, which shows the web interface in a system web view
-(Tauri) or in Electron, is no longer released; v0.3.0 was the last release with
-its packages. Its code stays in the repository and builds
-[from source](#building-from-source). An Intel Mac and Windows without WSL
-(where it opens remote hosts only) need it.
+On macOS, clear the quarantine flag after installing:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Splitty.app
 ```
 
-Local terminals of the native app and remote terminals have the
+Local and remote terminals have the
 [`splitty` command](#advanced-the-splitty-command) for the agent features and
-`splitty download`. In the web app on macOS and Linux, local terminals need it
-[installed](#installing-the-command).
+`splitty download`.
 
 ## Getting started
 
@@ -146,8 +139,8 @@ Local terminals of the native app and remote terminals have the
 Cmd is for macOS, Alt for Linux and Windows; all shortcuts are listed
 [below](#keyboard-shortcuts).
 
-In the native local workspace preview, **Templates** (Cmd+P on macOS, Alt+P
-elsewhere) opens the saved-template library. Save the current Screen by
+**Templates** (Cmd+P on macOS, Alt+P elsewhere) opens the saved-template
+library. Save the current Screen by
 reviewing its extracted layout and choosing which commands to retain. Loading
 a template lets you create a new Screen or replace the current one. Replacement
 ends that Screen's existing terminals, including with **Layout only**; use
@@ -161,8 +154,6 @@ things on top:
 | Command | What it does |
 |---|---|
 | `splitty attach` | Shows a session in a plain terminal, without the UI |
-| `splitty connect user@host` | Opens a host in the browser, without the desktop app |
-| `splitty serve` | Serves the UI to a browser on this machine |
 | `splitty daemon start` | Starts an independent persistent local backend (macOS, Linux) |
 | `splitty open <path>` | From inside a pane: shows a file in a viewer pane next to it; folders and `--editor` go to your editor |
 | `splitty run`, `splitty logs` | Managed background processes, mostly for agents |
@@ -171,9 +162,8 @@ Everything about the command is in [`docs/cli.md`](docs/cli.md).
 
 ### Installing the command
 
-Terminals of the native app, on remote hosts and in the Windows web app have it
-already. The web app on macOS and Linux doesn't install it, and neither app
-puts it on the `PATH` of other terminals; take it from the archive of the same
+Terminals of the app and on remote hosts have it already. The app doesn't put
+it on the `PATH` of other terminals; take it from the archive of the same
 release:
 
 ```bash
@@ -191,7 +181,7 @@ browser downloaded the archive, run
 
 | Connection | Transport | Session lifetime |
 |---|---|---|
-| Desktop, local terminals | Native IPC to an in-process Tauri service on Unix, or owned child pipes for Electron and WSL | End when the app quits |
+| Desktop, local terminals | In-process service on macOS and Linux, owned child pipes to the WSL backend on Windows | End when the app quits |
 | Explicit local daemon | Private Unix socket | Independent of the app |
 | SSH host | SSH data channel to the host’s private socket | Survive disconnects and app exit |
 | Explicit browser access | Loopback HTTP/WebSocket gateway to one selected backend | Follow that backend’s lifetime |
@@ -204,11 +194,10 @@ browser downloaded the archive, run
   so sessions survive disconnects and daemon restarts or updates.
 - For remote screens, the local server is a hub: it installs and starts
   Splitty on the host and relays it over SSH.
-- The server is Rust (Tokio, Axum, portable-pty); the UI is Svelte 5 with
-  [dockview](https://github.com/mathuo/dockview) and xterm.js (ghostty-web as
-  an option). Released desktop apps use [Tauri v2](https://v2.tauri.app) on
-  macOS and Windows, and Electron on Linux. On Windows the server runs in WSL 2
-  behind a native WebView2 window.
+- The server and the desktop app are Rust. The server uses Tokio, Axum and
+  portable-pty; the desktop app is built with [GPUI](https://www.gpui.rs) and
+  parses terminal output with libghostty-vt, Ghostty's terminal library. On
+  Windows the server runs in WSL 2.
 
 More in [`docs/architecture.md`](docs/architecture.md).
 
@@ -259,49 +248,40 @@ vulnerabilities privately through
 
 - The binaries are not code-signed (see [Install](#install)).
 - On Windows, local terminals need WSL 2. Without a supported
-  distribution the native app says so and does not start; the web app, built
-  from source, opens remote hosts only.
+  distribution the app says so and does not start.
 - On a Mac host, Splitty doesn't detect listening ports yet; forward them by
   number.
-- In the web app, xterm.js can garble IME and dead-key input on macOS
-  (see [known issues](docs/known-issues.md)).
 
 ## Documentation
 
 | Document | Content |
 |---|---|
-| [Remote development](docs/remote.md) | Remote screens, ports, remote windows, `splitty connect`, host requirements |
+| [Remote development](docs/remote.md) | Remote screens, ports, host requirements, installing Splitty on hosts |
 | [Files and editors](docs/files-and-editors.md) | Drop uploads, screenshots, `splitty download`, `splitty open`, VS Code, Zed and SFTP |
-| [The `splitty` command](docs/cli.md) | Server modes, `serve`, `daemon`, `attach`, in-pane commands, signing in |
+| [The `splitty` command](docs/cli.md) | Server modes, `daemon`, `attach`, in-pane commands |
 | [Managed terminal jobs](docs/cli-jobs.md) | `splitty run`, logs, agent grants |
 | [`SECURITY.md`](SECURITY.md) | Threat model and guarantees |
 | [Known issues](docs/known-issues.md) | Upstream bugs and platform quirks, with workarounds |
 | [Architecture](docs/architecture.md) | How the server, protocol and UI fit together |
-| [Connections and networking](docs/networking.md) | Visual guides to IPC, SSH, browser gateways, listeners and session lifetime |
+| [Connections and networking](docs/networking.md) | Visual guides to IPC, SSH, listeners and session lifetime |
 | [Development](docs/development.md) | Building, packaging and releasing |
-| [Native UI checkpoint](docs/native-ui-handoff.md) | Experimental GPUI branch, verified preview, remaining work and continuation on another machine |
+| [Desktop app](docs/native-ui-handoff.md) | State, packages and open work of the desktop app |
 | [Roadmap](roadmap/README.md) | Milestones and what comes next (German) |
 
 ## Building from source
 
-You need Rust (stable) and Node.js 24 with pnpm. The native app also needs
-Python 3 and a C toolchain for its terminal library and, on Linux, the
-development packages listed in [Development](docs/development.md#the-native-app).
-The web app's Tauri builds need the
-[Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
+You need Rust (stable), Node.js 24 with pnpm (the server embeds the assets
+built in `frontend/`), Python 3 and a C toolchain for the terminal library and,
+on Linux, the development packages listed in
+[Development](docs/development.md#the-native-app).
 
 ```bash
-make dev                  # server with the embedded UI on 127.0.0.1:9800, rebuilt on changes
-make native-package       # native app: deb, rpm and tar.gz (Linux) or dmg (macOS) in build/
+make native-package       # deb, rpm and tar.gz (Linux) or dmg (macOS) in build/
 make install-no-gui       # only splitty, to ~/.local/bin
-
-make install-electron     # web app on Linux → ~/.local/bin/Splitty-Electron.AppImage
-make dev-tauri            # web app in Tauri with rebuilds, native IPC
-make install-tauri        # web app in Tauri; on Linux also splitty in ~/.local/bin
 ```
 
-Running the native app from a checkout, the Windows installers, the web apps'
-packages and releases are described in [Development](docs/development.md). A
+Running the app from a checkout, the Windows installer and releases are
+described in [Development](docs/development.md). A
 build of your own installs itself on remote hosts only with a payload: set
 `SPLITTY_REMOTE_PAYLOAD` as
 [Remote development](docs/remote.md#installing-splitty-on-hosts) explains, or
