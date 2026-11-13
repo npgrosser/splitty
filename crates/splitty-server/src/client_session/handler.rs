@@ -95,6 +95,15 @@ pub(super) async fn run(
     }
 
     let mut hub_changes = hub.map(|hub| hub.changes());
+    // The SSH questions of this process's hub, for local hub authority only.
+    // Questions already pending are announced after the greeting.
+    let mut prompt_changes = hub.map(|_| {
+        let mut changes = splitty_remote::askpass::changes();
+        if !splitty_remote::askpass::prompts().is_empty() {
+            changes.mark_changed();
+        }
+        changes
+    });
 
     // Send welcome (replaces hello + mux.connect), then the listening ports
     // Subscribe before the first snapshot of the catalog: a concurrent launch
@@ -120,6 +129,15 @@ pub(super) async fn run(
             } => {
                 if changed.is_err() { hub_changes = None; }
                 else if sender.try_send_json(&serde_json::json!({"type":"hub.changed"})).is_err() { break; }
+            },
+            changed = async {
+                match prompt_changes.as_mut() {
+                    Some(changes) => changes.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() { prompt_changes = None; }
+                else if sender.try_send_json(&serde_json::json!({"type":splitty_core::protocol::SSH_PROMPTS_CHANGED})).is_err() { break; }
             },
             msg = read.recv() => {
                 let (msg, _incoming_bytes) = match msg {

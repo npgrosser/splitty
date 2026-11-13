@@ -29,3 +29,4 @@ splitty-server = { path = "../splitty-server", default-features = false }
 
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 splitty-core = { path = "../splitty-core", features = ["testing"] }
+splitty-remote = { path = "../splitty-remote", features = ["testing"] }

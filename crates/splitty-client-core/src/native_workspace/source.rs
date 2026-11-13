@@ -675,6 +675,7 @@ impl SourceRuntime {
             | CommandKind::RefreshForwards
             | CommandKind::ManageShare { .. }
             | CommandKind::RefreshShares
+            | CommandKind::AnswerSshPrompt { .. }
             | CommandKind::CancelForwardOpen { .. }
             | CommandKind::ManageHost { .. }
             | CommandKind::WithdrawHostConnect { .. }

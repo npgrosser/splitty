@@ -166,8 +166,9 @@ pub fn unbacked_relationships(dependencies: &Dependencies, model: &Model) -> Vec
         .collect()
 }
 
-/// Production code of the crate `source` names the crate `target` only from the components in
-/// `through`. Test code (see [`crate::code::is_test`]) may name it anywhere.
+/// Production code of the crate `source` names `target`, a crate or a module path within one
+/// (`crate::module`), only from the components in `through`. Test code (see
+/// [`crate::code::is_test`]) may name it anywhere.
 pub fn production_crossings(
     code: &Code,
     model: &Model,
@@ -176,11 +177,18 @@ pub fn production_crossings(
     through: &[&str],
 ) -> Vec<String> {
     let mut violations = scanned(code, source);
+    let prefix: Vec<&str> = target.split("::").collect();
     for reference in code.references.iter().filter(|r| !r.test) {
         let Some(file) = code.files.get(&reference.file) else {
             continue;
         };
-        if file.module[0] != source || reference.path[0] != target {
+        let named = reference.path.len() >= prefix.len()
+            && reference
+                .path
+                .iter()
+                .zip(&prefix)
+                .all(|(part, wanted)| part == wanted);
+        if file.module[0] != source || !named {
             continue;
         }
         let owner = owner(file, model).map(|c| c.name.as_str());
@@ -190,7 +198,11 @@ pub fn production_crossings(
                 relative(&reference.file, repository).display(),
                 reference.line,
                 display(&reference.path),
-                through.join(", ")
+                if through.is_empty() {
+                    "no component".to_owned()
+                } else {
+                    through.join(", ")
+                }
             ));
         }
     }
@@ -397,6 +409,15 @@ mod tests {
             production_crossings(&code, &model, dir.path(), ("gone", "server"), &[]),
             ["gone: no target of this crate was scanned"]
         );
+        // A module path within the crate narrows the rule to that path.
+        let module = ("client", "server::run");
+        assert!(production_crossings(&code, &model, dir.path(), module, &["link"]).is_empty());
+        assert_eq!(
+            production_crossings(&code, &model, dir.path(), module, &[]),
+            ["client/link.rs:1 names server::run: production code of client names server::run only from no component"]
+        );
+        let elsewhere = ("client", "server::other");
+        assert!(production_crossings(&code, &model, dir.path(), elsewhere, &[]).is_empty());
     }
 
     #[test]

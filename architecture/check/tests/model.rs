@@ -133,6 +133,22 @@ fn the_native_client_reaches_the_server_only_through_the_embedded_service() {
     ));
 }
 
+/// SSH questions reach the native client over the protocol (remote-hosts, SSH Questions Of
+/// The Local Service): production code of client-core names the question broker only from
+/// `embedded`, for the askpass helper entry the embedded service starts the app as. Tests may
+/// publish questions through it anywhere.
+#[test]
+fn the_native_client_reads_ssh_questions_only_over_the_protocol() {
+    let c = checked();
+    assert_none(check::production_crossings(
+        &c.code,
+        &c.model,
+        &repository(),
+        ("splitty_client_core", "splitty_remote::askpass"),
+        &["embedded"],
+    ));
+}
+
 /// The native app depends on no crate of the workspace but the client core, tests included
 /// (`crates/splitty-gpui/Cargo.toml`).
 #[test]

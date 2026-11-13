@@ -104,6 +104,7 @@ impl MuxHandler {
         if let ServerEvent::MuxWelcome { capabilities, .. } = &mut event {
             if self.hub_decisions {
                 capabilities.push("hub-host-decisions-v1".into());
+                capabilities.push(splitty_core::protocol::SSH_PROMPTS_CAPABILITY.into());
             }
             capabilities.push("serverDerivedPaneState".into());
             capabilities.push(super::editor::CAPABILITY.into());

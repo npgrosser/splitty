@@ -155,12 +155,12 @@ model {
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, worker-owned retained terminal focus before transport routing, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, exact-source remote Screen rename dispatch through the existing operation and ordered observation with no replay, local-owner captured Screen placement dispatch without navigation or uncertain-command replay, atomic creation-navigation and browsing withdrawal with exact remote execution dispatch, ordered model-before-delivery effects, identified host metadata preparation with request-scoped and global browse withdrawal, one-use host-update confirmation and cleanup-before-replacement with unconfirmed outcomes and connect-only reconciliation, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls. Each source connection also carries its file transfers: pasted images and files stored one chunk per answer on the server of that source, and offered files read only after the user chose Save into the download folder without replacing a file; both give up on an overdue answer. The worker also keeps the remembered open remote Screens in step with the window: open hosts are written as shown, a detached last Screen forgets its host, and a host closed as a whole or a quit app keeps its entries for the next connection; listed Screens reopen in one command.'
+      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, worker-owned retained terminal focus before transport routing, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, exact-source remote Screen rename dispatch through the existing operation and ordered observation with no replay, local-owner captured Screen placement dispatch without navigation or uncertain-command replay, atomic creation-navigation and browsing withdrawal with exact remote execution dispatch, ordered model-before-delivery effects, identified host metadata preparation with request-scoped and global browse withdrawal, one-use host-update confirmation and cleanup-before-replacement with unconfirmed outcomes and connect-only reconciliation, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls. Each source connection also carries its file transfers: pasted images and files stored one chunk per answer on the server of that source, and offered files read only after the user chose Save into the download folder without replacing a file; both give up on an overdue answer. The worker also keeps the remembered open remote Screens in step with the window: open hosts are written as shown, a detached last Screen forgets its host, and a host closed as a whole or a quit app keeps its entries for the next connection; listed Screens reopen in one command. The SSH questions of the local service are read on an API stream of their own after each notification, or polled from a service that does not notify, and their answers go back the same way.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
     embedded = component 'embedded' {
-      description 'Unix embedded service composition and lifecycle for the native client.'
+      description 'Unix embedded service composition and lifecycle for the native client, and the entry of the askpass helper the embedded service starts.'
       metadata { module 'splitty_client_core::embedded' }
     }
 
@@ -181,8 +181,6 @@ model {
     client_workspace -> splitty.core.native_api 'Bound remote catalog decoding before typed allocation'
     native_workspace -> client_templates 'Route identified library requests and results'
     native_workspace -> splitty.core.template 'Seed isolated saved-template fixtures in runtime tests'
-    client_root -> splitty.remote.ssh 'Expose native SSH prompt helper registration'
-    client_root -> splitty.remote.ssh_askpass 'Expose shared authentication prompts, responses, helper entry, confirmation recognition and helper parent lifetime'
     client_root -> connection 'Expose the native client API'
     client_root -> appearance 'Expose charged appearance snapshots'
     client_root -> local_service 'Expose the owned local settings API client'
@@ -276,6 +274,8 @@ model {
     native_workspace -> splitty.core.pty 'Gate embedded worker terminal tests on PTY availability'
     native_workspace -> client_root 'Own an isolated service and ordered native client'
     embedded -> splitty.remote.ssh 'Open the exact admitted target through the existing connector'
+    embedded -> splitty.remote.ssh_askpass 'Run the app executable as the embedded service\'s askpass helper'
+    native_workspace -> splitty.remote.ssh_askpass 'Publish SSH questions as an askpass helper does in runtime tests'
     embedded -> splitty.transport.budget 'Preserve charged host progress ownership'
     embedded -> connection 'Return a connection scoped to the embedded service'
     embedded -> api_stream 'Open the independent local directory API stream'

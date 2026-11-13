@@ -23,6 +23,11 @@ pub const MSG_INPUT_BYTES: &str = "input_bytes";
 pub const INPUT_BYTES_CAPABILITY: &str = "terminal-input-bytes-v1";
 /// The server reads program status and sends `program_status.changed`.
 pub const PROGRAM_STATUS_CAPABILITY: &str = "program-status-v1";
+/// A local main connection is told of the service's SSH questions with
+/// [`SSH_PROMPTS_CHANGED`] and reads them with `ssh.prompts.get`.
+pub const SSH_PROMPTS_CAPABILITY: &str = "ssh-prompts-v1";
+/// The service's pending SSH questions changed; carries none of them.
+pub const SSH_PROMPTS_CHANGED: &str = "ssh.prompts.changed";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_INPUT_ENCODED_BYTES: usize = MAX_INPUT_BYTES.div_ceil(3) * 4;
 pub const MSG_RESIZE: &str = "resize";

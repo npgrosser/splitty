@@ -72,6 +72,7 @@ dirs = "6"
 syn = { version = "2", features = ["full", "visit"] }
 async-trait = { workspace = true }
 splitty-core = { path = "../splitty-core", features = ["testing"] }
+splitty-remote = { path = "../splitty-remote", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 # `cookies` is needed so integration tests can hold the HttpOnly session cookie
 # the way a browser does.

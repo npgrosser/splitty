@@ -145,8 +145,12 @@ check:
    A relationship in the model does not let such a reference pass.
 10. The native app (`splitty_gpui`) names no crate of the workspace but `splitty_client_core`,
     tests included, as its manifest allows.
+11. The native client reads SSH questions only over the protocol: production code of
+    `splitty_client_core` names `splitty_remote::askpass` only from `embedded`, for the askpass
+    helper entry the embedded service starts the app executable as. Test code may publish
+    questions through it anywhere. Rule 9's check takes a module path as well as a crate.
 
-Rules 8 to 10 are tests in `check/tests/model.rs`; the unit tests of `check/src` show each rule
+Rules 8 to 11 are tests in `check/tests/model.rs`; the unit tests of `check/src` show each rule
 failing on a small fixture.
 
 A change that adds a crate, a top-level module or a dependency between components updates the

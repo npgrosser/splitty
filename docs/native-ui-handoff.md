@@ -100,8 +100,8 @@ without WSL arguments `main` starts the WSL preparation
 so WSL boots while the window is created; the workspace worker forwards its
 phases (looking for distributions, starting the distribution, installing the
 backend) and then reports starting the backend and connecting. A warm start
-runs two `wsl.exe` calls one after the other: the inspection, which also
-translates the SSH dialog's path with `wslpath`, and the backend itself;
+runs two `wsl.exe` calls one after the other: the inspection and the
+backend itself;
 listing the distributions (no remembered one) and installing (first start of
 a version) add one each. A failure stays on the page instead of ending the
 app; closing the window kills a running `wsl.exe` call of the preparation.
@@ -165,6 +165,25 @@ Reports the server marked `notify` become notifications under
 session that holds a record raises no bell notification of its own. The
 outgoing Screen of a transition shows no dots, as it shows no scratchpad
 marks.
+
+## SSH questions
+
+Passwords, key passphrases and host key confirmations OpenSSH asks the local
+service come to the window over the protocol, the same for the embedded
+service and the WSL backend (remote-hosts, SSH Questions Of The Local
+Service). The service announces `ssh-prompts-v1` and sends
+`ssh.prompts.changed`; the worker
+(`crates/splitty-client-core/src/native_workspace/ssh_prompts.rs`) then reads
+`ssh.prompts.get` on an API stream of its own, opened at the first
+notification, publishes `Update::SshPrompts` and sends
+`CommandKind::AnswerSshPrompt` as `ssh.prompts.answer`. A service without the
+capability is polled once a second until it refuses a read. The window
+(`crates/splitty-gpui/src/askpass.rs`) opens one dialog per question and
+closes those whose question went; closing a dialog cancels its question. On
+Linux and macOS the app executable is also the askpass helper the embedded
+service starts (`embedded::askpass_helper`, first thing in `main`); the WSL
+backend's helper is its own `splitty`. The Windows route has not been run on
+Windows yet (SPP-1 in `openspec/open-decisions.md`).
 
 ## PTY size
 

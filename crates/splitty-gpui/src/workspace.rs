@@ -1005,6 +1005,8 @@ pub struct Workspace {
     viewers: HashMap<PaneKey, viewer::ViewerPane>,
     /// The local ports shared with hosts, as the local service has them.
     shares: Option<Arc<splitty_client_core::hub::SharesSnapshot>>,
+    /// The dialogs of the local service's SSH questions.
+    ssh_prompts: crate::askpass::Prompts,
     pending_notified: Option<(ScreenKey, PaneKey)>,
     /// Dropped files waiting for the user's Send.
     /// Dropped files waiting for the user's Send, with the directory of the
@@ -1417,6 +1419,7 @@ impl Workspace {
                 activity_serial: 0,
                 viewers: HashMap::new(),
                 shares: None,
+                ssh_prompts: Default::default(),
                 pending_notified: None,
                 file_drops: HashMap::new(),
                 drawer_anchors: Rc::default(),
@@ -1887,6 +1890,24 @@ impl Workspace {
             }
         }
         cx.notify();
+    }
+    /// Questions are local hub work: answers go out on the window's own
+    /// lifecycle, whichever Screen is shown.
+    fn show_ssh_prompts(
+        &mut self,
+        list: &[splitty_client_core::native_workspace::SshPrompt],
+        cx: &mut Context<Self>,
+    ) {
+        let (commands, owner) = (self.commands.clone(), self.lifecycle_token());
+        let sink: crate::askpass::AnswerSink = std::rc::Rc::new(move |id, answer| {
+            if let Some(owner) = owner {
+                let _ = commands.try_send(WorkerCommand::new(
+                    owner,
+                    Command::AnswerSshPrompt { id, answer },
+                ));
+            }
+        });
+        self.ssh_prompts.show(list, &sink, cx);
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         let Some(source) = self.selected_model().map(SourceWorkspace::source_token) else {
@@ -3859,6 +3880,7 @@ impl Workspace {
                     self.shares = Some(list);
                     cx.notify();
                 }
+                Update::SshPrompts(list) => self.show_ssh_prompts(&list, cx),
                 Update::RememberedScreens(list) => {
                     self.hosts.remembered = Some(list);
                     cx.notify();

@@ -1,6 +1,6 @@
-//! Native presentation of the shared SSH authentication broker. Unix embedded
-//! backends share its connection-scoped credentials with the browser frontend.
-//! The standalone askpass window remains available for the Windows WSL helper.
+//! The SSH questions of the local service, embedded or the WSL backend, each
+//! in a window of its own. The workspace reads them over the service's API
+//! and publishes the list; an answer or a dismissal goes back the same way.
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
@@ -8,10 +8,16 @@ use gpui_kit::component::{
     ActiveTheme as _, Sizable as _,
 };
 use gpui_kit::{prelude::*, *};
-use std::{io::Write, time::Duration};
+use splitty_client_core::native_workspace::SshPrompt;
+use std::{collections::HashMap, rc::Rc};
+
+/// Hands an answer, or `None` to cancel, for the question with this id to
+/// the local service.
+pub type AnswerSink = Rc<dyn Fn(String, Option<String>)>;
 
 struct Askpass {
-    request: Option<String>,
+    /// The question's id and where its answer goes, until it is answered.
+    request: Option<(String, AnswerSink)>,
     prompt: String,
     confirm: bool,
     input: Entity<InputState>,
@@ -20,29 +26,23 @@ struct Askpass {
 }
 
 impl Drop for Askpass {
+    /// A dialog closed by the window manager cancels its question.
     fn drop(&mut self) {
-        if let Some(id) = &self.request {
-            splitty_client_core::answer_ssh_prompt(id, None);
+        if let Some((id, sink)) = self.request.take() {
+            sink(id, None);
         }
     }
 }
 
 impl Askpass {
-    fn finish(&self, answer: Option<String>, window: &mut Window) {
-        if let Some(id) = &self.request {
-            splitty_client_core::answer_ssh_prompt(id, answer);
-            window.remove_window();
-        } else {
-            let Some(value) = answer else {
-                std::process::exit(1)
-            };
-            let mut stdout = std::io::stdout().lock();
-            let result = writeln!(stdout, "{value}").and_then(|_| stdout.flush());
-            std::process::exit(if result.is_ok() { 0 } else { 1 });
+    fn finish(&mut self, answer: Option<String>, window: &mut Window) {
+        if let Some((id, sink)) = self.request.take() {
+            sink(id, answer);
         }
+        window.remove_window();
     }
 
-    fn submit(&self, window: &mut Window, cx: &App) {
+    fn submit(&mut self, window: &mut Window, cx: &App) {
         let answer = if self.confirm {
             "yes".to_owned()
         } else {
@@ -52,7 +52,7 @@ impl Askpass {
     }
 
     fn new(
-        request: Option<String>,
+        request: (String, AnswerSink),
         prompt: String,
         confirm: bool,
         window: &mut Window,
@@ -82,7 +82,7 @@ impl Askpass {
             focus.focus(window, cx);
         }
         Self {
-            request,
+            request: Some(request),
             prompt,
             confirm,
             input,
@@ -107,56 +107,44 @@ fn options(confirm: bool, cx: &App) -> WindowOptions {
     }
 }
 
-/// One application-level presenter, so multiple workspace windows cannot answer
-/// the same prompt. Dropped/cancelled SSH attempts also close their dialog.
-#[cfg(not(target_os = "windows"))]
-pub fn install(cx: &mut App) {
-    cx.spawn(async move |cx| {
-        let mut dialogs: std::collections::HashMap<String, AnyWindowHandle> = Default::default();
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(250))
-                .await;
-            let prompts = splitty_client_core::ssh_prompts();
-            cx.update(|cx| {
-                dialogs.retain(|id, handle| {
-                    if prompts.iter().any(|prompt| &prompt.id == id) {
-                        return true;
-                    }
-                    let _ = handle.update(cx, |_, window, _| window.remove_window());
-                    false
-                });
-                for prompt in prompts {
-                    if dialogs.contains_key(&prompt.id) {
-                        continue;
-                    }
-                    let id = prompt.id.clone();
-                    let result =
-                        gpui_kit::open_window(options(prompt.confirm, cx), cx, |window, cx| {
-                            cx.new(|cx| {
-                                Askpass::new(
-                                    Some(prompt.id),
-                                    format!("{}\n\n{}", prompt.target, prompt.prompt),
-                                    prompt.confirm,
-                                    window,
-                                    cx,
-                                )
-                            })
-                        });
-                    match result {
-                        Ok((handle, _)) => {
-                            dialogs.insert(id, handle);
-                            cx.activate(true);
-                        }
-                        Err(_) => {
-                            splitty_client_core::answer_ssh_prompt(&id, None);
-                        }
-                    }
-                }
+/// The open question dialogs, one per question of the local service.
+#[derive(Default)]
+pub struct Prompts {
+    dialogs: HashMap<String, (AnyWindowHandle, Entity<Askpass>)>,
+}
+
+impl Prompts {
+    /// Show `list`, the questions the service waits on now: a dialog for each
+    /// new one; a dialog whose question went closes without answering it. A
+    /// dialog the user closed stays closed while its cancel is on its way.
+    pub fn show(&mut self, list: &[SshPrompt], sink: &AnswerSink, cx: &mut App) {
+        self.dialogs.retain(|id, (handle, dialog)| {
+            if list.iter().any(|prompt| &prompt.id == id) {
+                return true;
+            }
+            dialog.update(cx, |dialog, _| dialog.request = None);
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+            false
+        });
+        for prompt in list {
+            if self.dialogs.contains_key(&prompt.id) {
+                continue;
+            }
+            let request = (prompt.id.clone(), sink.clone());
+            let text = format!("{}\n\n{}", prompt.target, prompt.prompt);
+            let confirm = prompt.confirm;
+            let result = gpui_kit::open_window(options(confirm, cx), cx, |window, cx| {
+                cx.new(|cx| Askpass::new(request, text, confirm, window, cx))
             });
+            match result {
+                Ok(dialog) => {
+                    self.dialogs.insert(prompt.id.clone(), dialog);
+                    cx.activate(true);
+                }
+                Err(_) => sink(prompt.id.clone(), None),
+            }
         }
-    })
-    .detach();
+    }
 }
 
 impl Render for Askpass {
@@ -260,50 +248,96 @@ impl Render for Askpass {
     }
 }
 
-pub fn run() -> anyhow::Result<()> {
-    splitty_client_core::watch_askpass_parent();
-    let prompt = std::env::args()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("Missing SSH prompt"))?;
-    anyhow::ensure!(prompt.len() <= 16 * 1024, "SSH prompt too long");
-    let confirm = splitty_client_core::ssh_prompt_is_confirmation(
-        &prompt,
-        std::env::var("SSH_ASKPASS_PROMPT").ok().as_deref(),
-    );
-    gpui_kit::application()
-        .with_assets(gpui_kit::assets::AllAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            cx.on_window_closed(|cx, _| {
-                if cx.windows().is_empty() {
-                    std::process::exit(1);
-                }
-            })
-            .detach();
-            // Do not leave an abandoned credential dialog alive indefinitely.
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(Duration::from_secs(110))
-                    .await;
-                std::process::exit(1);
-            })
-            .detach();
-            let result = gpui_kit::open_window(options(confirm, cx), cx, |window, cx| {
-                cx.new(|cx| Askpass::new(None, prompt, confirm, window, cx))
-            });
-            if let Err(error) = result {
-                eprintln!("Could not open SSH dialog: {error}");
-                std::process::exit(1);
-            }
-            cx.activate(true);
-        });
-    Ok(())
-}
-
 #[cfg(all(test, feature = "ui-test-support"))]
 mod tests {
-    use super::Askpass;
+    use super::{AnswerSink, Askpass, Prompts};
     use gpui_kit::{px, size, AppContext, TestAppContext};
+    use splitty_client_core::native_workspace::SshPrompt;
+    use std::{cell::RefCell, rc::Rc};
+
+    type Answers = Rc<RefCell<Vec<(String, Option<String>)>>>;
+
+    fn recording() -> (AnswerSink, Answers) {
+        let answers: Answers = Rc::default();
+        let recorded = answers.clone();
+        let sink: AnswerSink = Rc::new(move |id, answer| recorded.borrow_mut().push((id, answer)));
+        (sink, answers)
+    }
+
+    fn prompt(id: char, confirm: bool) -> SshPrompt {
+        SshPrompt {
+            id: id.to_string().repeat(64),
+            target: "demo@localhost:2223".into(),
+            prompt: "demo@localhost's password:".into(),
+            confirm,
+        }
+    }
+
+    /// Type `value` (for a password) and press the dialog's primary action,
+    /// or with `None` dismiss it.
+    fn act(app: &mut TestAppContext, prompts: &Prompts, id: &str, value: Option<&str>) {
+        let (handle, view) = prompts.dialogs[id].clone();
+        app.update(|cx| {
+            handle
+                .update(cx, |_, window, cx| {
+                    view.update(cx, |view, cx| match value {
+                        Some(value) => {
+                            view.input
+                                .update(cx, |input, cx| input.set_value(value, window, cx));
+                            view.submit(window, cx);
+                        }
+                        None => view.finish(None, window),
+                    })
+                })
+                .unwrap()
+        });
+        app.run_until_parked();
+    }
+
+    // remote-hosts, SSH Questions Of The Local Service: each listed question
+    // gets one dialog; its answer or dismissal goes to the service once, and
+    // a question that went closes its dialog without an answer.
+    #[test]
+    fn listed_questions_open_dialogs_that_answer_once() {
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let (sink, answers) = recording();
+        let mut prompts = Prompts::default();
+        let list = [
+            prompt('a', false),
+            prompt('b', true),
+            prompt('c', false),
+            prompt('d', false),
+        ];
+        let id = |index: usize| list[index].id.clone();
+        for _ in 0..2 {
+            app.update(|cx| prompts.show(&list, &sink, cx));
+            app.run_until_parked();
+            assert_eq!(app.windows().len(), 4, "one dialog per question");
+        }
+        act(&mut app, &prompts, &id(0), Some("private answer"));
+        act(&mut app, &prompts, &id(1), Some("ignored for a host key"));
+        act(&mut app, &prompts, &id(3), None);
+        assert_eq!(
+            *answers.borrow(),
+            [
+                (id(0), Some("private answer".to_owned())),
+                (id(1), Some("yes".to_owned())),
+                (id(3), None),
+            ]
+        );
+        assert_eq!(app.windows().len(), 1);
+        // The answered questions are still listed until the service settles
+        // them; their dialogs do not come back.
+        app.update(|cx| prompts.show(&list, &sink, cx));
+        app.run_until_parked();
+        assert_eq!(app.windows().len(), 1);
+        // The last question went without an answer from this window.
+        app.update(|cx| prompts.show(&[], &sink, cx));
+        app.run_until_parked();
+        assert!(app.windows().is_empty());
+        assert_eq!(answers.borrow().len(), 3, "closing answers nothing again");
+    }
 
     #[test]
     fn password_prompt_input_and_actions_fit_the_authentication_window() {
@@ -312,7 +346,7 @@ mod tests {
         let (_, window) = app.add_window_view(|window, cx| {
             let view = cx.new(|cx| {
                 Askpass::new(
-                    Some("layout-test".into()),
+                    ("layout-test".into(), recording().0),
                     "demo@localhost:2223\n\ndemo@localhost's password:".into(),
                     false,
                     window,

@@ -34,31 +34,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{ChildStderr, Command};
 use tokio::task::JoinHandle;
 
-static ASKPASS: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-
-/// Opt a desktop process into its own OpenSSH askpass UI. CLI and unattended
-/// callers retain batch mode. The helper writes only its answer to stdout.
-pub fn set_askpass_program(program: PathBuf) {
-    let _ = ASKPASS.set(program);
-}
-
-/// The trusted desktop launcher passes this to an owned backend process.
-pub fn askpass_program() -> Option<PathBuf> {
-    ASKPASS.get().cloned().or_else(inherited_askpass)
-}
-
-#[cfg(not(test))]
-fn inherited_askpass() -> Option<PathBuf> {
-    std::env::var_os("SPLITTY_ASKPASS_PROGRAM").map(PathBuf::from)
-}
-
-/// This crate's tests do not depend on the environment they run in: a
-/// terminal pane of the desktop app inherits the variable.
-#[cfg(test)]
-fn inherited_askpass() -> Option<PathBuf> {
-    None
-}
-
 /// Setup output owns its byte reservation beyond process exit, until callers
 /// finish parsing or inspecting both captured streams.
 pub type CapturedOutput = Charged<Output>;
@@ -226,7 +201,8 @@ fn is_port_suffix(tail: &str) -> bool {
 /// the tunnel is up. `BatchMode` stops ssh blocking on an interactive prompt in
 /// a context where nobody is watching for one; an unknown host key therefore
 /// fails instead of being accepted (see [`classify`]).
-/// Desktop callers explicitly opt into an askpass UI via [`set_askpass_program`].
+/// A local service hands its SSH questions to its clients instead (see
+/// [`crate::askpass`]).
 pub fn hardening_options() -> Vec<String> {
     [
         "-o",
@@ -543,9 +519,7 @@ impl Ssh {
     pub fn command(&self) -> Command {
         let mut command = Command::new(&self.program);
         let mut hardening = hardening_options();
-        if let Some(program) = askpass_program()
-            .or_else(|| crate::askpass::configure(&mut command, self.target.as_str()))
-        {
+        if let Some(program) = crate::askpass::configure(&mut command, self.target.as_str()) {
             configure_askpass(&mut command, &mut hardening, &program);
         }
         command
@@ -576,12 +550,6 @@ fn configure_askpass(command: &mut Command, options: &mut [String], program: &Pa
             "DISPLAY",
             std::env::var_os("DISPLAY").unwrap_or_else(|| ":0".into()),
         );
-    // WSL must explicitly forward these to the Windows GUI helper.
-    let inherited = std::env::var("WSLENV").unwrap_or_default();
-    command.env(
-        "WSLENV",
-        format!("{inherited}:SPLITTY_SSH_ASKPASS:SSH_ASKPASS_PROMPT"),
-    );
 }
 
 pub(crate) fn startup_timeout(command: &Command, default: Duration) -> Duration {

@@ -292,11 +292,10 @@ impl OwnedWorker {
 }
 
 fn main() -> anyhow::Result<()> {
-    if std::env::var_os("SPLITTY_BROWSER_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return splitty_client_core::ssh_askpass_helper().map_err(Into::into);
-    }
-    if std::env::var_os("SPLITTY_SSH_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        return askpass::run();
+    // The embedded service runs this executable as OpenSSH's askpass helper.
+    #[cfg(not(target_os = "windows"))]
+    if let Some(result) = splitty_client_core::embedded::askpass_helper() {
+        return result.map_err(Into::into);
     }
     if let Some(code) = offscreen::subprocess_exit() {
         std::process::exit(code);
@@ -320,8 +319,6 @@ fn main() -> anyhow::Result<()> {
                 );
         return Ok(());
     }
-    #[cfg(target_os = "windows")]
-    splitty_client_core::set_askpass_program(std::env::current_exe()?);
     // Started without a WSL target, the Windows workspace chooses a
     // distribution and installs the backend that ships beside the executable.
     // That starts now, on a thread of its own, so WSL boots while the window
@@ -351,8 +348,6 @@ fn main() -> anyhow::Result<()> {
     let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     application.run(move |cx| {
         gpui_kit::init(cx);
-        #[cfg(not(target_os = "windows"))]
-        askpass::install(cx);
         terminal::init(cx);
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,

@@ -125,6 +125,126 @@ async fn framed_reply(peer: &mut splitty_transport::peer::Peer) -> splitty_trans
     .expect("reply deadline")
 }
 
+/// The next text frame of `kind` on `peer`, skipping others.
+async fn next_text(peer: &mut splitty_transport::peer::Peer, kind: &str) -> Value {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let frame = peer.recv().await.expect("open connection");
+            if frame.frame.kind == splitty_transport::wire::Kind::Text {
+                let value: Value = frame.frame.decode().unwrap();
+                if value["type"] == kind {
+                    return value;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {kind}"))
+}
+
+// remote-hosts, SSH Questions Of The Local Service: a question the service's
+// askpass helper publishes is announced to local main connections, read and
+// answered over the native API, and kept from remote-window connections.
+#[tokio::test]
+async fn ssh_prompts_notify_local_connections_and_are_answered_over_the_native_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = ScriptedHost::new(dir.path());
+    let mut state = state(ADDR, dir.path());
+    let service = Arc::get_mut(&mut state.service).unwrap();
+    service.hub = Arc::new(hub(&host, dir.path()));
+    Arc::get_mut(&mut service.client_state).unwrap().hub = Some(service.hub.clone());
+    let capability = json!(splitty_core::protocol::SSH_PROMPTS_CAPABILITY);
+    let (mut local, local_task) = framed(&state, Role::Main).await;
+    let welcome = next_text(&mut local, "mux.welcome").await;
+    assert!(welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&capability));
+    let (mut remote, remote_task) = framed(&state, Role::Remote).await;
+    let welcome = next_text(&mut remote, "mux.welcome").await;
+    assert!(!welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&capability));
+
+    // The broker is process-wide: this test's question has a target of its own.
+    let target = format!("demo-{:016x}@conformance", rand::random::<u64>());
+    let answer = splitty_remote::askpass::testing::ask(&target, "demo@host's password:");
+    next_text(&mut local, "ssh.prompts.changed").await;
+    framed_call(&local, 1, "ssh.prompts.get", json!({}));
+    let reply = framed_reply(&mut local).await;
+    assert_eq!(reply.status, 200);
+    let prompts: Vec<Value> = serde_json::from_str(&reply.body).unwrap();
+    let prompt = prompts
+        .iter()
+        .find(|prompt| prompt["target"] == target.as_str())
+        .expect("the published question");
+    assert_eq!(prompt["prompt"], "demo@host's password:");
+    assert_eq!(prompt["confirm"], false);
+    let id = prompt["id"].as_str().unwrap().to_owned();
+
+    // A connection opened while the question waits is told after its greeting.
+    let (mut late, late_task) = framed(&state, Role::Main).await;
+    next_text(&mut late, "mux.welcome").await;
+    next_text(&mut late, "ssh.prompts.changed").await;
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                let frame = remote.recv().await.unwrap();
+                if frame.frame.kind == splitty_transport::wire::Kind::Text
+                    && frame.frame.decode::<Value>().unwrap()["type"] == "ssh.prompts.changed"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "remote-window connections must not learn of local SSH questions"
+    );
+    for (request, call, args) in [
+        (1, "ssh.prompts.get", json!({})),
+        (
+            2,
+            "ssh.prompts.answer",
+            json!({"body":{"id":id,"answer":"stolen"}}),
+        ),
+    ] {
+        framed_call(&remote, request, call, args);
+        assert_eq!(framed_reply(&mut remote).await.status, 403, "{call}");
+    }
+
+    framed_call(
+        &local,
+        2,
+        "ssh.prompts.answer",
+        json!({"body":{"id":id,"answer":"private answer"}}),
+    );
+    let reply = framed_reply(&mut local).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&reply.body).unwrap()["accepted"],
+        true
+    );
+    assert_eq!(
+        answer.recv_timeout(WAIT).unwrap().as_deref(),
+        Some("private answer")
+    );
+    next_text(&mut local, "ssh.prompts.changed").await;
+    framed_call(&local, 3, "ssh.prompts.get", json!({}));
+    let reply = framed_reply(&mut local).await;
+    let prompts: Vec<Value> = serde_json::from_str(&reply.body).unwrap();
+    assert!(prompts.iter().all(|prompt| prompt["id"] != id.as_str()));
+
+    for peer in [local, remote, late] {
+        peer.shutdown().await;
+    }
+    for task in [local_task, remote_task, late_task] {
+        task.await.unwrap().unwrap();
+    }
+}
+
 #[tokio::test]
 async fn hub_observations_notify_other_local_clients_and_respect_assigned_authority() {
     use splitty_transport::wire::Kind;

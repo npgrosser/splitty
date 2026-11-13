@@ -906,7 +906,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1" and "program-status-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1" and "program-status-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -3119,6 +3119,27 @@ interface HubDirectory {
 /** Sent only on the local service connection; no application frames are
  * injected into a host relay after remote.ready. Refresh passive reads. */
 interface HubChanged { type: "hub.changed" }
+/** ssh-prompts-v1: the questions OpenSSH asks the local service's askpass
+ * helper (passwords, key passphrases, host key confirmations).
+ * GET /api/remote/ssh-prompts (native ssh.prompts.get, localHub only) lists
+ * them; POST /api/remote/ssh-prompts (native ssh.prompts.answer, body
+ * SshPromptAnswer) settles one, once. A question waits at most 110 s. */
+interface SshPrompt {
+  id: string; // 64 hex digits
+  target: string; // the SSH target, at most 4096 bytes
+  prompt: string; // OpenSSH's question, untrusted, at most 16 KiB
+  confirm: boolean; // a host key to trust: answer "yes"
+}
+interface SshPromptAnswer {
+  id: string;
+  answer: string | null; // one line, at most 16 KiB; null cancels
+}
+interface SshPromptAnswered { accepted: boolean } // false: unknown or settled
+/** Sent on local main connections whose welcome lists ssh-prompts-v1, when a
+ * question appears or goes and once after the greeting while questions are
+ * pending. Carries no question; read them with ssh.prompts.get. Never sent to
+ * remote-window connections or into a host relay. */
+interface SshPromptsChanged { type: "ssh.prompts.changed" }
 /** Ordered follow-up observations; the hub owns validation and persistence.
  * Native remote-window roles and restricted sockets cannot submit this. */
 interface HubCatalogObservation {

@@ -9,6 +9,7 @@ mod remembered;
 mod remote;
 mod shares;
 mod source;
+mod ssh_prompts;
 mod viewers;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
@@ -42,6 +43,7 @@ pub use presence::{
     PtySize, SizePolicy, WindowPresence, WindowPresenceCell, ACTIVITY_INTERVAL, MAX_PTY_COLS,
     MAX_PTY_ROWS,
 };
+pub use ssh_prompts::SshPrompt;
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -139,6 +141,11 @@ pub enum CommandKind {
         request: crate::hub::ShareRequest,
     },
     RefreshShares,
+    /// Answer an SSH question of the local service; `None` cancels it.
+    AnswerSshPrompt {
+        id: String,
+        answer: Option<String>,
+    },
     /// Show a text, as a terminal's selection, in a viewer pane to the right
     /// of the terminal it came from.
     OpenTextViewer {
@@ -419,6 +426,9 @@ pub enum Update {
     RememberedScreens(Arc<crate::hub::RememberedScreens>),
     /// The local ports shared with hosts, as the local service has them.
     Shares(Arc<crate::hub::SharesSnapshot>),
+    /// The SSH questions the local service waits on, in full, whenever they
+    /// change; empty once they cannot be read any more.
+    SshPrompts(Arc<Vec<SshPrompt>>),
     /// The answer to a `ReadViewer`.
     Viewer(ViewerUpdate),
     /// The answer to an `AnswerReview`.
@@ -676,6 +686,16 @@ fn profile_fallback_status(
     Some(format!(
         "Shell profile {reason}; started {effective} instead"
     ))
+}
+
+fn supports_ssh_prompts(welcome: &serde_json::Value) -> bool {
+    welcome["capabilities"]
+        .as_array()
+        .is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability.as_str() == Some(splitty_core::protocol::SSH_PROMPTS_CAPABILITY)
+            })
+        })
 }
 
 fn supports_host_directory(welcome: &serde_json::Value) -> bool {
@@ -1559,6 +1579,7 @@ async fn run_service_with_presence(
     let mut remembered = None::<remembered::RuntimeRemembered<'_>>;
     let mut host_reports = host_catalog::HostCatalogReports::default();
     let mut shares = None::<shares::RuntimeShares<'_>>;
+    let mut prompts = None::<ssh_prompts::RuntimeSshPrompts<'_>>;
     // `remote.reconnectHosts` as first read; those hosts are reconnected once.
     let mut reconnect = None::<Vec<String>>;
     let mut reconnect_settled = false;
@@ -1575,6 +1596,7 @@ async fn run_service_with_presence(
             Hub(HubEvent),
             Remembered(Arc<crate::hub::RememberedScreens>),
             Shares(Arc<crate::hub::SharesSnapshot>),
+            SshPrompts(Arc<Vec<SshPrompt>>),
             Ports(PortsEvent),
             Event(std::io::Result<Option<Event>>),
             Remote(remote::Step),
@@ -1587,6 +1609,7 @@ async fn run_service_with_presence(
                 update = async { match &mut hub { Some(reader)=>reader.next_event().await, None=>std::future::pending().await } } => Next::Hub(update),
                 list = async { match &mut remembered { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Remembered(list),
                 list = async { match &mut shares { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Shares(list),
+                list = async { match &mut prompts { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::SshPrompts(list),
                 event = async { match &mut ports { Some(ports)=>ports.next_event().await,None=>std::future::pending().await } } => Next::Ports(event),
                 event = local.client.next_event() => Next::Event(event),
                 remote = remotes.next() => Next::Remote(remote),
@@ -1611,6 +1634,7 @@ async fn run_service_with_presence(
             match next {
                 Next::Remembered(list) => publish(&updates,Update::RememberedScreens(list),&stop).await?,
                 Next::Shares(list) => publish(&updates,Update::Shares(list),&stop).await?,
+                Next::SshPrompts(list) => publish(&updates,Update::SshPrompts(list),&stop).await?,
                 Next::Ports(event) => {
                     if let Some(ports)=&ports {ports.revalidate(&window);}
                     let update=match event {PortsEvent::Snapshot(snapshot)=>{forwards=Some(snapshot.clone());Update::Forwards(snapshot)},PortsEvent::Result(result)=>Update::Forward(*result)};
@@ -1734,6 +1758,10 @@ async fn run_service_with_presence(
                         }
                         CommandKind::RefreshForwards => {if let Some(ports)=&mut ports {ports.refresh();}}
                         CommandKind::RefreshShares => {if let Some(shares)=&mut shares {shares.refresh();}}
+                        CommandKind::AnswerSshPrompt {id,answer} => {
+                            let result=prompts.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"SSH questions are not available")).and_then(|prompts|prompts.answer(id,answer));
+                            if let Err(error)=result {publish(&updates,Update::Status(format!("SSH answer was not sent: {error}")),&stop).await?;}
+                        }
                         CommandKind::ManageShare {request} => {
                             let result=shares.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Sharing is not available")).and_then(|shares|shares.submit(request));
                             match result {
@@ -1843,8 +1871,12 @@ async fn run_service_with_presence(
                         let json=event.json().expect("JSON event");
                         let welcome=!local.welcomed && json["type"]=="mux.welcome";
                         let supports_hub=welcome && supports_host_directory(json);
+                        let notifies_prompts=welcome && supports_ssh_prompts(json);
                         if json["type"]=="settings.changed" {
                             if let Some(reader)=&mut settings { if let Err(error)=reader.settings_changed(event.connection_id) {publish(&updates,Update::AppearanceError {connection:event.connection_id,reason:error.to_string()},&stop).await?;} }
+                        }
+                        if json["type"]==splitty_core::protocol::SSH_PROMPTS_CHANGED {
+                            if let Some(prompts)=&mut prompts {prompts.changed();}
                         }
                         if json["type"]=="hub.changed" {
                             if let Some(ports)=&mut ports {ports.refresh();}
@@ -1861,6 +1893,8 @@ async fn run_service_with_presence(
                             ports=Some(PortsClient::new(&service,window.lifecycle_token(),supports_hub));
                             if supports_hub {remembered=Some(remembered::RuntimeRemembered::new(&service));}
                             if supports_hub {shares=Some(shares::RuntimeShares::new(&service));}
+                            // Only a local hub runs `ssh`, so only one asks.
+                            if supports_hub {prompts=Some(ssh_prompts::RuntimeSshPrompts::new(&service,notifies_prompts));}
                             settings=Some(RuntimeLocalService::new(&service,local.client.connection_id(),scheme));
                         }
                     }
@@ -1897,6 +1931,10 @@ async fn run_service_with_presence(
     }.await;
     let shares_cleanup = match shares.take() {
         Some(shares) => shares.finish().await.map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    let prompts_cleanup = match prompts.take() {
+        Some(prompts) => prompts.finish().await.map_err(anyhow::Error::from),
         None => Ok(()),
     };
     let (
@@ -1954,6 +1992,7 @@ async fn run_service_with_presence(
     drop(hub);
     drop(remembered);
     drop(shares);
+    drop(prompts);
     finish_owned_run(
         service,
         result,
@@ -1963,7 +2002,8 @@ async fn run_service_with_presence(
             .and(remote_cleanup)
             .and(ports_cleanup)
             .and(remembered_cleanup)
-            .and(shares_cleanup),
+            .and(shares_cleanup)
+            .and(prompts_cleanup),
         &cleanup_complete,
         &stop,
     )
@@ -2000,6 +2040,7 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::RefreshForwards
             | CommandKind::ManageShare { .. }
             | CommandKind::RefreshShares
+            | CommandKind::AnswerSshPrompt { .. }
             | CommandKind::CancelForwardOpen { .. }
             | CommandKind::ManageHost { .. }
             | CommandKind::WithdrawHostConnect { .. }

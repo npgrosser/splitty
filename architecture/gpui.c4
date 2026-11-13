@@ -8,7 +8,7 @@ model {
     }
 
     gpui_askpass = component 'gpui_askpass' {
-      description 'Native SSH authentication and explicit host-key confirmation windows over the shared broker for Unix embedded services, with connection-scoped credential reuse and cancellation; standalone OpenSSH askpass presentation for the Windows WSL helper.'
+      description 'Native SSH authentication and explicit host-key confirmation windows, one per question the local service (embedded or the WSL backend) waits on, as the workspace reads them; an answer or a dismissal goes back once.'
       metadata { module 'splitty_gpui::askpass' }
     }
 
@@ -57,9 +57,9 @@ model {
       metadata { module 'splitty_gpui::offscreen' }
     }
 
-    gpui_main -> gpui_askpass 'Handle SSH questions before ordinary application startup'
-    gpui_main -> splitty.client_core.client_root 'Register the native executable as the SSH prompt helper'
-    gpui_askpass -> splitty.client_core.client_root 'Recognize confirmation questions and exit when the SSH parent ends'
+    gpui_main -> splitty.client_core.embedded 'Run as the embedded service\'s askpass helper before ordinary startup'
+    gpui_askpass -> splitty.client_core.native_workspace 'The SSH questions the workspace publishes'
+    gpui_workspace -> gpui_askpass 'Show the local service\'s SSH questions and send their answers'
     gpui_main -> gpui_app 'Construct and close the probe window'
     gpui_main -> gpui_startup 'Validate process options before platform startup'
     gpui_main -> splitty.client_core.owned_service 'Replace the default backend with the prepared WSL launch target on Windows'

@@ -1,5 +1,6 @@
-//! Bounded, process-local SSH questions for browser clients. Only an askpass
-//! child holding the random capability can publish questions on the loopback IPC.
+//! Bounded, process-local SSH questions for the local service's clients, which
+//! read and answer them through its API. Only an askpass child holding the
+//! random capability can publish questions on the loopback IPC.
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -28,6 +29,21 @@ pub fn is_confirmation(prompt: &str, hint: Option<&str>) -> bool {
 }
 static PROGRAM: OnceLock<PathBuf> = OnceLock::new();
 static BROKER: OnceLock<Option<Broker>> = OnceLock::new();
+static CHANGES: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+
+fn change_feed() -> &'static tokio::sync::watch::Sender<u64> {
+    CHANGES.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
+
+/// Moves whenever a question is published or settled (answered, cancelled,
+/// timed out or abandoned by its helper). Values carry no question.
+pub fn changes() -> tokio::sync::watch::Receiver<u64> {
+    change_feed().subscribe()
+}
+
+fn changed() {
+    change_feed().send_modify(|generation| *generation = generation.wrapping_add(1));
+}
 
 tokio::task_local! {
     static SESSION: Arc<Session>;
@@ -187,6 +203,14 @@ pub fn enable(program: PathBuf) {
 }
 
 impl Broker {
+    fn respond(&self, id: &str, answer: Option<String>) -> bool {
+        let pending = self.pending.lock().unwrap().remove(id);
+        if pending.is_some() {
+            changed();
+        }
+        pending.is_some_and(|entry| entry.answer.send(answer).is_ok())
+    }
+
     fn start() -> io::Result<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
         let address = listener.local_addr()?.to_string();
@@ -306,6 +330,7 @@ fn serve(
             answer: send,
         },
     );
+    changed();
     let answer = loop {
         match receive.try_recv() {
             Ok(answer) => break answer,
@@ -317,7 +342,9 @@ fn serve(
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    pending.lock().unwrap().remove(&id);
+    if pending.lock().unwrap().remove(&id).is_some() {
+        changed();
+    }
     if let Some(credentials) = &mut credentials {
         if answer.is_none() {
             if let Some(invocation) = invocation {
@@ -401,11 +428,10 @@ pub fn respond(id: &str, answer: Option<String>) -> bool {
     {
         return false;
     }
-    let Some(broker) = BROKER.get().and_then(Option::as_ref) else {
-        return false;
-    };
-    let pending = broker.pending.lock().unwrap().remove(id);
-    pending.is_some_and(|entry| entry.answer.send(answer).is_ok())
+    BROKER
+        .get()
+        .and_then(Option::as_ref)
+        .is_some_and(|broker| broker.respond(id, answer))
 }
 
 pub fn respond_document(body: &serde_json::Value) -> bool {
@@ -479,6 +505,49 @@ pub fn watch_parent() {
     }
 }
 
+/// An askpass helper's side of the broker for tests outside this crate.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use super::*;
+
+    /// Publish `prompt` for `target` as OpenSSH's askpass child would, and
+    /// return the answer once a client settles it (`None`: cancelled).
+    pub fn ask(target: &str, prompt: &str) -> mpsc::Receiver<Option<String>> {
+        // As a service runtime would; the program itself is never started.
+        enable(std::env::current_exe().expect("test executable"));
+        let mut command = tokio::process::Command::new("ssh");
+        configure(&mut command, target).expect("the question broker runs");
+        let variable = |name: &str| {
+            command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .and_then(|value| value.to_str())
+                .expect("broker variable")
+                .to_owned()
+        };
+        let request = Request {
+            token: variable("SPLITTY_ASKPASS_TOKEN"),
+            target: target.to_owned(),
+            prompt: prompt.to_owned(),
+            confirm: false,
+            session: None,
+            invocation: None,
+        };
+        let mut stream = TcpStream::connect(variable("SPLITTY_ASKPASS_ADDRESS")).unwrap();
+        serde_json::to_writer(&mut stream, &request).unwrap();
+        stream.write_all(b"\n").unwrap();
+        let (send, receive) = mpsc::channel();
+        std::thread::spawn(move || {
+            let answer: Option<String> =
+                serde_json::from_reader(io::BufReader::new(stream)).unwrap_or(None);
+            let _ = send.send(answer);
+        });
+        receive
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +618,44 @@ mod tests {
             assert_eq!(received, answer);
             wait_for(&broker, 0);
         }
+    }
+
+    fn wait_changed(changes: &mut tokio::sync::watch::Receiver<u64>) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while !changes.has_changed().unwrap() {
+            assert!(std::time::Instant::now() < deadline, "no change notified");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        changes.borrow_and_update();
+    }
+
+    #[test]
+    fn publishing_and_settling_a_question_move_the_change_feed() {
+        let broker = Broker::start().unwrap();
+        let mut changes = changes();
+        changes.borrow_and_update();
+        // Answered: the published question and its settlement each notify.
+        let stream = connect(&broker, broker.token.clone());
+        wait_changed(&mut changes);
+        let id = broker
+            .pending
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(broker.respond(&id, Some("yes".into())));
+        wait_changed(&mut changes);
+        let answer: Option<String> = serde_json::from_reader(stream).unwrap();
+        assert_eq!(answer.as_deref(), Some("yes"));
+        // A helper that goes away settles its question too.
+        let stream = connect(&broker, broker.token.clone());
+        wait_for(&broker, 1);
+        wait_changed(&mut changes);
+        drop(stream);
+        wait_for(&broker, 0);
+        wait_changed(&mut changes);
     }
 
     #[test]

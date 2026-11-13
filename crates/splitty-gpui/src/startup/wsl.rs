@@ -14,12 +14,9 @@ const ARCHIVE_NAME: &str = "splitty-wsl-x86_64.tar.gz";
 #[cfg(target_os = "windows")]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Prints the facts a start needs in one `wsl.exe` round trip, including the
-/// Linux path of the SSH dialog executable, which the backend's start would
-/// otherwise translate with a `wsl.exe` call of its own.
-/// Parameters: `$1` version, `$2` expected archive checksum, `$3` the Windows
-/// path of the SSH dialog executable or empty.
-const INSPECT_SCRIPT: &str = r#"printf 'uid=%s\n' "$(id -u)"; printf 'arch=%s\n' "$(uname -m)"; printf 'id=%s\n' "$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d "\"'")"; base="$HOME/.local/share/splitty/desktop/$1"; if [ -x "$base/splitty" ] && [ -f "$base/.archive-sha256" ] && [ "$(cat "$base/.archive-sha256")" = "$2" ]; then printf 'backend=%s\n' "$base/splitty"; fi; if [ -n "$3" ] && askpass="$(wslpath -u "$3" 2>/dev/null)"; then printf 'askpass=%s\n' "$askpass"; fi"#;
+/// Prints the facts a start needs in one `wsl.exe` round trip.
+/// Parameters: `$1` version, `$2` expected archive checksum.
+const INSPECT_SCRIPT: &str = r#"printf 'uid=%s\n' "$(id -u)"; printf 'arch=%s\n' "$(uname -m)"; printf 'id=%s\n' "$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | head -n 1 | tr -d "\"'")"; base="$HOME/.local/share/splitty/desktop/$1"; if [ -x "$base/splitty" ] && [ -f "$base/.archive-sha256" ] && [ "$(cat "$base/.archive-sha256")" = "$2" ]; then printf 'backend=%s\n' "$base/splitty"; fi"#;
 
 /// Unpacks the archive on stdin beside the final path and swaps it in with one
 /// rename, so a start never sees a partial installation.
@@ -134,8 +131,6 @@ struct Inspection {
     arch: String,
     os_id: String,
     backend: Option<String>,
-    /// The Linux path of the SSH dialog executable.
-    askpass: Option<String>,
 }
 
 fn field<'a>(output: &'a str, key: &str) -> Option<&'a str> {
@@ -164,24 +159,17 @@ fn parse_inspection(output: &str) -> Inspection {
         arch: text("arch"),
         os_id: text("id").to_ascii_lowercase(),
         backend: backend_path(output),
-        askpass: absolute_path(output, "askpass"),
     }
 }
 
-/// The launch target of a checked distribution: the SSH dialog's path from
-/// the inspection is kept when it is valid; otherwise the backend's start
-/// translates it as before.
+/// The launch target of a checked distribution. The backend asks its SSH
+/// questions over its own connection, so the app hands it no askpass program.
 fn launch(
     distro: String,
     backend: String,
-    askpass: Option<String>,
 ) -> Result<splitty_client_core::owned_service::WslLaunch, String> {
-    let launch = splitty_client_core::owned_service::WslLaunch::new(distro, backend, None)
-        .map_err(|error| error.to_string())?;
-    Ok(match askpass {
-        Some(path) => launch.clone().with_askpass(path).unwrap_or(launch),
-        None => launch,
-    })
+    splitty_client_core::owned_service::WslLaunch::new(distro, backend, None)
+        .map_err(|error| error.to_string())
 }
 
 /// Why a distribution cannot run the backend, if it cannot. A root default
@@ -328,22 +316,9 @@ mod windows {
         }
     }
 
-    /// The Windows path of the SSH dialog executable, which is this app.
-    fn askpass_program() -> String {
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.to_str().map(str::to_owned))
-            .unwrap_or_default()
-    }
-
     /// Starts the distribution, which boots WSL first when it is not
     /// running, and reads what a start needs from it.
-    fn inspect(
-        distro: &str,
-        expected: &str,
-        askpass: &str,
-        stop: &AtomicBool,
-    ) -> Result<Inspection, String> {
+    fn inspect(distro: &str, expected: &str, stop: &AtomicBool) -> Result<Inspection, String> {
         let output = wsl(
             &[
                 "-d",
@@ -355,7 +330,6 @@ mod windows {
                 "splitty-inspect",
                 VERSION,
                 expected,
-                askpass,
             ],
             None,
             QUERY_TIMEOUT,
@@ -428,10 +402,10 @@ mod windows {
         expected: &str,
         progress: &PreparationProgress,
     ) -> Result<(String, Inspection), String> {
-        let (askpass, stop) = (askpass_program(), progress.stop());
+        let stop = progress.stop();
         if let Some(distro) = remembered_distro() {
             progress.phase(StartupPhase::StartingDistribution(distro.clone()));
-            let inspection = inspect(&distro, expected, &askpass, stop)?;
+            let inspection = inspect(&distro, expected, stop)?;
             return match unsupported(&distro, &inspection) {
                 None => Ok((distro, inspection)),
                 Some(why) => Err(format!(
@@ -466,7 +440,7 @@ mod windows {
                 return Err("The start was cancelled.".to_owned());
             }
             progress.phase(StartupPhase::StartingDistribution((*distro).to_owned()));
-            let problem = match inspect(distro, expected, &askpass, stop) {
+            let problem = match inspect(distro, expected, stop) {
                 Ok(inspection) => match unsupported(distro, &inspection) {
                     None => {
                         if ask {
@@ -570,7 +544,7 @@ mod windows {
                 install(&distro, &expected, progress.stop())?
             }
         };
-        launch(distro, backend, inspection.askpass)
+        launch(distro, backend)
     }
 
     #[link(name = "user32")]
@@ -694,7 +668,7 @@ mod tests {
 
     #[test]
     fn inspection_reads_its_fields_and_only_absolute_paths() {
-        let inspection = parse_inspection("uid=1000\r\narch=x86_64\nid=Ubuntu\nbackend=/home/a b/.local/share/splitty/desktop/1/splitty\naskpass=/mnt/c/Program Files/Splitty/splitty-gpui.exe\r\n");
+        let inspection = parse_inspection("uid=1000\r\narch=x86_64\nid=Ubuntu\nbackend=/home/a b/.local/share/splitty/desktop/1/splitty\r\n");
         assert_eq!(
             inspection,
             Inspection {
@@ -702,12 +676,7 @@ mod tests {
                 arch: "x86_64".into(),
                 os_id: "ubuntu".into(),
                 backend: Some("/home/a b/.local/share/splitty/desktop/1/splitty".into()),
-                askpass: Some("/mnt/c/Program Files/Splitty/splitty-gpui.exe".into()),
             }
-        );
-        assert_eq!(
-            parse_inspection("askpass=C:\\Splitty\\splitty-gpui.exe\n").askpass,
-            None
         );
         assert_eq!(unsupported("Ubuntu", &inspection), None);
         assert_eq!(
@@ -718,21 +687,12 @@ mod tests {
     }
 
     #[test]
-    fn the_launch_keeps_a_resolved_dialog_path_and_drops_an_invalid_one() {
+    fn the_launch_needs_an_absolute_backend_path_and_carries_no_askpass_program() {
         let backend = "/home/a/.local/share/splitty/desktop/1/splitty";
-        let resolved = launch(
-            "Ubuntu".into(),
-            backend.into(),
-            Some("/mnt/c/Splitty/splitty-gpui.exe".into()),
-        )
-        .unwrap();
-        assert_eq!(resolved.distro(), "Ubuntu");
-        assert!(format!("{resolved:?}").contains("/mnt/c/Splitty/splitty-gpui.exe"));
-        for askpass in [None, Some("relative/splitty-gpui.exe".to_owned())] {
-            let unresolved = launch("Ubuntu".into(), backend.into(), askpass).unwrap();
-            assert!(format!("{unresolved:?}").contains("askpass: None"));
-        }
-        assert!(launch("Ubuntu".into(), "relative".into(), None).is_err());
+        let launch_target = launch("Ubuntu".into(), backend.into()).unwrap();
+        assert_eq!(launch_target.distro(), "Ubuntu");
+        assert!(!format!("{launch_target:?}").contains("askpass"));
+        assert!(launch("Ubuntu".into(), "relative".into()).is_err());
     }
 
     #[test]
@@ -742,7 +702,6 @@ mod tests {
             arch: "x86_64".into(),
             os_id: "debian".into(),
             backend: None,
-            askpass: None,
         };
         assert_eq!(unsupported("Debian", &ok), None);
         for refused in [
@@ -842,52 +801,5 @@ mod tests {
             Some(backend.as_str())
         );
         std::fs::remove_dir_all(&home).unwrap();
-    }
-
-    /// The inspection translates the SSH dialog's Windows path with the
-    /// distribution's `wslpath` (here a stand-in first on `PATH`), prints
-    /// nothing for an empty path, and leaves a failed translation out.
-    #[cfg(unix)]
-    #[test]
-    fn the_inspection_resolves_the_dialog_path_in_the_same_call() {
-        use std::os::unix::fs::PermissionsExt;
-        use std::process::Command;
-        let root =
-            std::env::temp_dir().join(format!("splitty-wsl-askpass-{}", uuid::Uuid::new_v4()));
-        // Each stand-in in a directory of its own: a rewritten executable can
-        // be busy in a concurrently forked child.
-        let inspect = |name: &str, wslpath: &str, askpass: &str| {
-            let bin = root.join(name);
-            std::fs::create_dir_all(&bin).unwrap();
-            let tool = bin.join("wslpath");
-            std::fs::write(&tool, wslpath).unwrap();
-            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let path = format!(
-                "{}:{}",
-                bin.display(),
-                std::env::var("PATH").unwrap_or_default()
-            );
-            let output = Command::new("sh")
-                .args(["-c", INSPECT_SCRIPT, "test", "1.2.3", "sum", askpass])
-                .env("HOME", &root)
-                .env("PATH", path)
-                .output()
-                .unwrap();
-            assert!(output.status.success());
-            parse_inspection(&String::from_utf8(output.stdout).unwrap())
-        };
-        let translate = "#!/bin/sh\n[ \"$1\" = -u ] && [ \"$2\" = 'C:\\App Dir\\splitty-gpui.exe' ] && printf '/mnt/c/App Dir/splitty-gpui.exe\\n'\n";
-        let found = inspect("translates", translate, "C:\\App Dir\\splitty-gpui.exe");
-        assert_eq!(
-            found.askpass.as_deref(),
-            Some("/mnt/c/App Dir/splitty-gpui.exe")
-        );
-        assert!(!found.uid.is_empty() && found.backend.is_none());
-        assert_eq!(inspect("empty", translate, "").askpass, None);
-        assert_eq!(
-            inspect("fails", "#!/bin/sh\nexit 1\n", "C:\\App\\splitty-gpui.exe").askpass,
-            None
-        );
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }

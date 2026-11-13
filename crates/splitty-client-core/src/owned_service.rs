@@ -25,9 +25,6 @@ pub struct WslLaunch {
     distro: String,
     backend: String,
     config_dir: Option<String>,
-    /// The Linux path of the SSH dialog executable, when the preparation
-    /// already resolved it in this distribution.
-    askpass: Option<String>,
 }
 impl WslLaunch {
     pub fn new(distro: String, backend: String, config_dir: Option<String>) -> io::Result<Self> {
@@ -48,27 +45,14 @@ impl WslLaunch {
             distro,
             backend,
             config_dir,
-            askpass: None,
         })
-    }
-    /// Names the Linux path of the SSH dialog executable, as `wslpath -u`
-    /// printed it in this distribution, so the start needs no extra `wsl.exe`
-    /// call to translate it. A path that is not absolute is refused.
-    pub fn with_askpass(mut self, path: String) -> io::Result<Self> {
-        if !path.starts_with('/') || path.len() > 4096 || path.chars().any(char::is_control) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "The SSH dialog path must be an absolute Linux path",
-            ));
-        }
-        self.askpass = Some(path);
-        Ok(self)
     }
     pub fn distro(&self) -> &str {
         &self.distro
     }
-    /// `askpass` is the Linux path of the SSH dialog executable, when there is one.
-    fn arguments(&self, askpass: Option<&str>) -> Vec<String> {
+    /// The backend asks its SSH questions through its own connection, so it
+    /// needs no askpass program from Windows.
+    fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
             "-d".into(),
             self.distro.clone(),
@@ -77,9 +61,6 @@ impl WslLaunch {
         ];
         if let Some(config_dir) = &self.config_dir {
             arguments.push(format!("SPLITTY_CONFIG_DIR={config_dir}"));
-        }
-        if let Some(askpass) = askpass {
-            arguments.push(format!("SPLITTY_ASKPASS_PROGRAM={askpass}"));
         }
         arguments.extend(
             [
@@ -271,36 +252,7 @@ impl OwnedService {
                 "Windows workspace requires a WSL backend",
             )),
             LocalBackend::Wsl(launch) => {
-                let mut askpass = None;
-                let program = splitty_remote::ssh::askpass_program();
-                if program.is_some() && launch.askpass.is_some() {
-                    // Resolved by the preparation's inspection of the distribution.
-                    askpass = launch.askpass.clone();
-                } else if let Some(program) = program {
-                    // Resolve using the selected distro's mount configuration,
-                    // rather than assuming Windows drives are under /mnt.
-                    let mut translate = tokio::process::Command::new("wsl.exe");
-                    #[cfg(target_os = "windows")]
-                    translate.creation_flags(0x08000000);
-                    let output = translate
-                        .args(["-d", &launch.distro, "--exec", "wslpath", "-u"])
-                        .arg(program)
-                        .output()
-                        .await?;
-                    if !output.status.success() {
-                        return Err(io::Error::other(
-                            "Could not resolve the SSH dialog executable in WSL",
-                        ));
-                    }
-                    let path = std::str::from_utf8(&output.stdout)
-                        .map_err(|_| io::Error::other("Invalid WSL SSH dialog path"))?
-                        .trim();
-                    if !path.starts_with('/') || path.chars().any(char::is_control) {
-                        return Err(io::Error::other("Invalid WSL SSH dialog path"));
-                    }
-                    askpass = Some(path.to_owned());
-                }
-                let arguments = launch.arguments(askpass.as_deref());
+                let arguments = launch.arguments();
                 let mut command = tokio::process::Command::new("wsl.exe");
                 #[cfg(target_os = "windows")]
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW, no extra console
@@ -413,7 +365,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            launch.arguments(None),
+            launch.arguments(),
             [
                 "-d",
                 "Distro with spaces",
@@ -430,29 +382,11 @@ mod tests {
             ]
         );
         let default_config = WslLaunch::new("D".into(), "/home/a/splitty".into(), None).unwrap();
-        assert_eq!(
-            default_config.arguments(Some("/mnt/c/app/splitty.exe"))[..6],
-            [
-                "-d",
-                "D",
-                "--exec",
-                "env",
-                "SPLITTY_ASKPASS_PROGRAM=/mnt/c/app/splitty.exe",
-                "/home/a/splitty"
-            ]
-        );
-        assert_eq!(
-            default_config.arguments(None)[3..5],
-            ["env", "/home/a/splitty"]
-        );
-    }
-    #[test]
-    fn a_resolved_dialog_path_replaces_the_translation_and_must_be_absolute() {
-        let launch = WslLaunch::new("D".into(), "/home/a/splitty".into(), None).unwrap();
-        assert!(launch.clone().with_askpass("C:\\app.exe".into()).is_err());
-        assert!(launch.clone().with_askpass("/mnt/c/a\npp".into()).is_err());
-        let resolved = launch.with_askpass("/mnt/c/app.exe".into()).unwrap();
-        assert_eq!(resolved.askpass.as_deref(), Some("/mnt/c/app.exe"));
+        assert_eq!(default_config.arguments()[3..5], ["env", "/home/a/splitty"]);
+        assert!(!default_config
+            .arguments()
+            .iter()
+            .any(|argument| argument.contains("ASKPASS")));
     }
 
     fn sample_launch() -> WslLaunch {

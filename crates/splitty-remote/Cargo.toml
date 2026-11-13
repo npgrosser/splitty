@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Publishes SSH questions the way an askpass helper does, for other crates' tests.
+testing = []
+
 [dependencies]
 splitty-transport = { path = "../splitty-transport" }
 tokio = { workspace = true }

@@ -6,6 +6,15 @@ use splitty_transport::{budget::Charged, queue, wire};
 use std::{io, sync::Arc};
 use uuid::Uuid;
 
+/// The embedded service names the app's executable as OpenSSH's askpass
+/// program, so that executable is also the helper that hands a question to
+/// the service. Call first in `main`: `Some` is the outcome of the helper's
+/// run, after which the process ends; `None` is an ordinary start.
+pub fn askpass_helper() -> Option<io::Result<()>> {
+    (std::env::var_os("SPLITTY_BROWSER_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")))
+        .then(splitty_remote::askpass::helper)
+}
+
 pub struct EmbeddedService {
     runtime: Option<service::runtime::Runtime>,
     control: Option<control::ControlChannel>,

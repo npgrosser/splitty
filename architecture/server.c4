@@ -45,6 +45,7 @@ model {
     }
 
     client_session -> hub 'Passive change feed and validated catalog observations'
+    client_session -> splitty.remote.ssh_askpass 'Change feed and pending questions, announced to local hub connections'
     ws -> client_session 'One common service connection per WebSocket'
     native -> service 'Validated operation catalog, shared dispatch and bounded response serialization'
     native -> hub 'Owner-endpoint host streams use the same assigned service hub and forwarding lifetime'
@@ -180,7 +181,7 @@ model {
     client_session -> splitty.core.ids 'ids'
     client_session -> splitty.core.mux 'Store, Op, ScreenOp, Effect'
     client_session -> splitty.core.effect_runner 'EffectRunner, EnvContext'
-    client_session -> splitty.core.protocol 'Dispatcher, Request, ServerEvent, message types, the pty-size-v1 and program-status-v1 capabilities'
+    client_session -> splitty.core.protocol 'Dispatcher, Request, ServerEvent, message types, the pty-size-v1, program-status-v1 and ssh-prompts-v1 capabilities'
     client_session -> splitty.core.pty 'Backend, ports (the scan, ListeningPort), status (ProgramStatus, StatusState, each session\'s status revision and root record)'
     client_session -> splitty.core.shell_profiles 'ShellProfilesState'
     embed -> splitty.core.config 'load, themes_dir'
