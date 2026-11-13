@@ -80,28 +80,6 @@ const tauriAPI: WindowAPI = {
 };
 
 // ---------------------------------------------------------------------------
-// Electron
-// ---------------------------------------------------------------------------
-
-function electronInvoke(channel: string, ...args: unknown[]): Promise<unknown> {
-  return (window as any).__SPLITTY_ELECTRON__?.invoke(channel, ...args) ?? Promise.resolve();
-}
-
-const electronAPI: WindowAPI = {
-  minimize() { electronInvoke("window:minimize"); },
-  maximize() { electronInvoke("window:maximize"); },
-  unmaximize() { electronInvoke("window:unmaximize"); },
-  toggleMaximize() { electronInvoke("window:toggle-maximize"); },
-  close() { electronInvoke("window:close"); },
-  isMaximized() { return electronInvoke("window:is-maximized") as Promise<boolean>; },
-  openExternal(url) { electronInvoke("shell:open-external", url).catch(openFailed); return true; },
-  startDragFromMaximized(screenX, screenY) { electronInvoke("window:start-drag", screenX, screenY); },
-  startResizeDragging() {},
-  setTitleBarStyle() {},
-  setBackgroundColor() {},
-};
-
-// ---------------------------------------------------------------------------
 // Web (no-op)
 // ---------------------------------------------------------------------------
 
@@ -116,7 +94,7 @@ const webAPI: WindowAPI = {
     if (nativeShell) {
       // Restricted native documents have no OS-command grant and cannot open
       // a blank child. Their native navigation guard hands this exact web URL
-      // to the system browser and denies creating a WebContents for it.
+      // to the system browser and denies creating a webview for it.
       window.open(url, "_blank", "noopener,noreferrer");
       return true;
     }
@@ -146,9 +124,7 @@ const webAPI: WindowAPI = {
 export { tauriReady };
 
 export const windowAPI: WindowAPI =
-  shellKind === "tauri" ? tauriAPI :
-  shellKind === "electron" ? electronAPI :
-  webAPI;
+  shellKind === "tauri" ? tauriAPI : webAPI;
 
 // ---------------------------------------------------------------------------
 // External targets
@@ -169,9 +145,8 @@ export const windowAPI: WindowAPI =
  *
  * It is not the only check, and must not be relied on as one: libraries can
  * bypass it (ghostty-web opens OSC 8 hyperlinks with a bare `window.open`). The
- * desktop shells enforce the same rule natively for every new window — Electron
- * in its window-open handler, Tauri in its new-window guard (security review
- * SR-27, see docs/security/findings.md).
+ * Tauri shell enforces the same rule natively for every new window in its
+ * new-window guard (security review SR-27, see docs/security/findings.md).
  *
  * Returns false when nothing opened: a refused scheme, or a window the
  * browser blocked.
@@ -251,38 +226,16 @@ export function reserveExternalOpen(): ReservedExternalOpen | undefined {
 // Svelte actions for drag regions
 // ---------------------------------------------------------------------------
 
-/** Make an element a window drag region. */
+/** Make an element a window drag region. Tauri drags only elements that carry
+ * data-tauri-drag-region, so interactive children need no marking of their own. */
 export function dragRegion(node: HTMLElement): ActionReturn {
   if (shellKind === "tauri") {
     node.setAttribute("data-tauri-drag-region", "");
-  } else if (shellKind === "electron") {
-    node.style.setProperty("-webkit-app-region", "drag");
-    node.style.setProperty("app-region", "drag");
   }
   return {
     destroy() {
       if (shellKind === "tauri") {
         node.removeAttribute("data-tauri-drag-region");
-      } else if (shellKind === "electron") {
-        node.style.removeProperty("-webkit-app-region");
-        node.style.removeProperty("app-region");
-      }
-    },
-  };
-}
-
-/** Exclude an element from the drag region (for interactive children). */
-export function noDragRegion(node: HTMLElement): ActionReturn {
-  if (shellKind === "electron") {
-    node.style.setProperty("-webkit-app-region", "no-drag");
-    node.style.setProperty("app-region", "no-drag");
-  }
-  // Tauri: only elements with data-tauri-drag-region are draggable, so children are excluded by default.
-  return {
-    destroy() {
-      if (shellKind === "electron") {
-        node.style.removeProperty("-webkit-app-region");
-        node.style.removeProperty("app-region");
       }
     },
   };

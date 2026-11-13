@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Splitty has one version for everything it ships: the workspace version in
-# Cargo.toml, which the Tauri app, the Electron app and Cargo.lock repeat.
+# Cargo.toml, which the Tauri app and Cargo.lock repeat.
 # Hosts and the Windows WSL backend install a server per version, so every
 # release needs a version of its own, or clients keep an older server of the
 # same version.
@@ -18,7 +18,6 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO_TOML="$REPO_ROOT/Cargo.toml"
 CARGO_LOCK="$REPO_ROOT/Cargo.lock"
 TAURI_CONF="$REPO_ROOT/crates/splitty-tauri/tauri.conf.json"
-ELECTRON_PACKAGE="$REPO_ROOT/frontend-electron/package.json"
 
 usage() {
     echo "Usage: $0 <version>"
@@ -55,11 +54,10 @@ check() {
 
     local failed=0
     local name actual
-    for name in Cargo.toml tauri.conf.json package.json Cargo.lock; do
+    for name in Cargo.toml tauri.conf.json Cargo.lock; do
         case "$name" in
             Cargo.toml) actual=$(cargo_version) ;;
             tauri.conf.json) actual=$(json_version "$TAURI_CONF") ;;
-            package.json) actual=$(json_version "$ELECTRON_PACKAGE") ;;
             Cargo.lock) actual=$(lock_versions | paste -sd ' ' -) ;;
         esac
         if [ "$actual" != "$version" ]; then
@@ -101,19 +99,17 @@ bump() {
 
     # Read before writing, preserving file permissions. BSD sed (macOS) has
     # neither GNU sed's `-i` syntax nor its `0,/pattern/` address.
-    local updated file
+    local updated
     updated=$(sed "/^\[workspace\.package\]/,/^\[/ s/^version = \".*\"$/version = \"$version\"/" "$CARGO_TOML")
     printf '%s\n' "$updated" > "$CARGO_TOML"
-    for file in "$TAURI_CONF" "$ELECTRON_PACKAGE"; do
-        updated=$(sed "s/^  \"version\": \".*\",$/  \"version\": \"$version\",/" "$file")
-        printf '%s\n' "$updated" > "$file"
-    done
+    updated=$(sed "s/^  \"version\": \".*\",$/  \"version\": \"$version\",/" "$TAURI_CONF")
+    printf '%s\n' "$updated" > "$TAURI_CONF"
     # Records the new version of the workspace's crates, nothing else.
     cargo update --workspace --offline --quiet
 
     check "$tag"
 
-    git add -- "$CARGO_TOML" "$CARGO_LOCK" "$TAURI_CONF" "$ELECTRON_PACKAGE"
+    git add -- "$CARGO_TOML" "$CARGO_LOCK" "$TAURI_CONF"
     git commit --quiet -m "chore(release): $tag"
     git tag -a "$tag" -m "Splitty $tag"
 

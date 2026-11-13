@@ -67,7 +67,7 @@ finds the components of a capability.
 
 **Containers are the crates.** `splitty-core`, `splitty-server`, `splitty-gui`,
 `splitty-client-core` and `splitty-gpui` are containers,
-next to the web frontend, the Electron shell and the stores. The core is a container of its own,
+next to the web frontend and the stores. The core is a container of its own,
 although it is only ever linked into the `splitty` binary and the desktop app. That way each
 crate's components sit in one place, and a relationship into the core reads as the use of a
 library.

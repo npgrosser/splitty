@@ -4,7 +4,7 @@
 //! the main document's private capsule; the public document ID is not a proof.
 //!
 //! A parent-owned popout has no registration. Calls delegated through its
-//! parent share that parent's authority and quota, as they do in Electron.
+//! parent share that parent's authority and quota.
 
 pub(crate) mod bootstrap;
 pub(crate) mod carrier;

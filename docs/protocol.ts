@@ -2664,8 +2664,6 @@ type ReverseForwardConflictCode =
 // command:
 //   Tauri:    invoke("open_remote_editor", { target, cwd, editor? })
 //             invoke("open_local_editor", { editor, cwd, wslDistro? })
-//   Electron: invoke("editor:open-remote", { target, cwd, editor? })
-//             invoke("editor:open-local", { editor, cwd, wslDistro? })
 // Editor is "vscode" (remote default), "zed" or, for remote folders only,
 // "sftp" (the OS's handler for sftp: links); unknown values are rejected.
 // Both resolve after OS dispatch or reject with an error. Resolution is no
@@ -2675,7 +2673,7 @@ type ReverseForwardConflictCode =
 // The UI rechecks their identity at click time. Native handlers independently
 // validate inputs and generate only fixed folder URIs, never accepting an
 // arbitrary URI, executable or command string. Native access is restricted to
-// the exact-backend main UI (its top frame in Electron); remote windows, bundled
+// the exact-backend main UI; remote windows, bundled
 // setup pages and other origins gain no permission. Generic openers stay HTTP(S).
 // Browsers generate and dispatch the URI synchronously during the user click.
 // No new HTTP endpoint or WebSocket message.
@@ -2836,8 +2834,8 @@ export type ReviewServerMessage = {
 };
 
 // Dedicated desktop commands remain open_local_editor / open_remote_editor
-// (Electron editor:open-local / editor:open-remote) with {cwd,editor,target?,
-// wslDistro?,kind?:"file"|"folder"}; kind defaults to folder for old callers.
+// with {cwd,editor,target?,wslDistro?,kind?:"file"|"folder"}; kind defaults to
+// folder for old callers.
 
 // GET /api/client-assignment: browser-gateway-only, authenticated by its local
 // session cookie or owner bearer after Host/Origin/Fetch Metadata guards.

@@ -1,6 +1,6 @@
 # Local desktop packages
 
-The local build is the native app (`crates/splitty-gpui`), the only package a release publishes for each system. The legacy web apps (Tauri, Electron) are not released and are built locally only when requested; `docs/development.md` names their builds.
+The local build is the native app (`crates/splitty-gpui`), the only package a release publishes for each system. The legacy Tauri web app is not released and is built locally only when requested; `docs/development.md` names its build.
 
 Detect WSL before treating `uname -s = Linux` as a Linux desktop. Use the companion `scripts/downloads.py` probe. Do not change `HOME`, `home` or `CODEX_HOME` to stage builds. Paths with spaces and apostrophes need proper quoting; prefer argument arrays/PowerShell `-File` over interpolated command strings.
 
@@ -87,5 +87,3 @@ packaging/linux/native/build.sh \
 It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, and writes `splitty_<VERSION>_amd64.deb`, `splitty-<VERSION>-1.x86_64.rpm` and `splitty-<VERSION>-linux-x86_64.tar.gz` into `build/native-linux/` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this machine's own `splitty` instead of the release's static server; say so if that was used. The deb requires the glibc of the build machine or newer; the release builds on Ubuntu 22.04.
 
 Check the packages (`dpkg-deb --info`, `rpm -qip`, and `./splitty-gpui --help` from the unpacked tar.gz) and copy all three to the actual XDG Downloads folder with the helper. Do not install them or use `make install-*` for delivery to Downloads.
-
-The legacy Electron packages (only when requested) are `pnpm --dir frontend-electron run dist --publish never` after staging the static server as `target/release/splitty`, with `SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"` (fpm rejects an epoch of 0). They need `rpmbuild` and, on distributions without it, the `libcrypt.so.1` compatibility library (Fedora: `libxcrypt-compat`). The release renames `Splitty-<version>.AppImage` to `Splitty-Web-<version>-x86_64.AppImage`, `splitty-electron_<version>_amd64.deb` to `splitty-web_<version>_amd64.deb` and `splitty-electron-<version>.x86_64.rpm` to `splitty-web-<version>.x86_64.rpm`.

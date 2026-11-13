@@ -53,9 +53,6 @@ export async function applyPageZoom(factor: number, shell: ShellKind = shellKind
   if (shell === "tauri") {
     const { getCurrentWebview } = await import("@tauri-apps/api/webview");
     await getCurrentWebview().setZoom(factor);
-  } else if (shell === "electron") {
-    await (window as { __SPLITTY_ELECTRON__?: { invoke(channel: string, ...args: unknown[]): Promise<unknown> } })
-      .__SPLITTY_ELECTRON__?.invoke("window:set-zoom", factor);
   }
 }
 

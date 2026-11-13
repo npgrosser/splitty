@@ -6,7 +6,7 @@
     getScreens, getActiveScreenId, getHostOrder, setActiveScreen,
   } from "../../stores/screens.svelte.ts";
   import { getDesktopPlatform } from "../../lib/platform.ts";
-  import { windowAPI, dragRegion, noDragRegion } from "../../lib/window.ts";
+  import { windowAPI, dragRegion } from "../../lib/window.ts";
   import { shellKind } from "../../lib/platform.ts";
   import { isDrawerPinned } from "../../stores/ui.svelte.ts";
   import ConnectionIndicator from "./ConnectionIndicator.svelte";
@@ -64,7 +64,6 @@
   {#if !pinned}
     <button
       class="titlebar-drawer-toggle"
-      use:noDragRegion
       onclick={(e) => { e.stopPropagation(); emitUICommand({ type: "drawer.toggle" }); }}
       title="Toggle drawer (Ctrl+B)"
     >

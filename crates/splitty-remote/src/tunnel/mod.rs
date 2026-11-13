@@ -1274,7 +1274,7 @@ mod tests {
         serde_json::to_string(&event).expect("serialize")
     }
 
-    /// The lines the Electron shell parses (`cli`, Remote Connect
+    /// The machine-readable lines a launcher parses (`cli`, Remote Connect
     /// Machine-Readable Output).
     #[test]
     fn connect_events_encode_as_one_object_with_an_event_field() {

@@ -1,23 +1,24 @@
 import { afterEach, expect, it, vi } from "vitest";
-import type { ElectronNativeBridge } from "./electron_channel.ts";
+import type { TauriNativeBridge } from "./tauri_channel.ts";
 
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
-async function page(protocol: string, bridge?: Partial<ElectronNativeBridge>) {
+async function page(protocol: string, hostname: string, native?: Partial<TauriNativeBridge>) {
   vi.resetModules();
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
-  vi.stubGlobal("window", { location: { protocol, search: "?host=forged&bootstrap=untrusted" },
-    matchMedia: () => ({ matches: false }), __SPLITTY_ELECTRON__: { native: bridge }, __TAURI_INTERNALS__: {} });
+  vi.stubGlobal("window", { location: { protocol, hostname, port: "", search: "?host=forged&bootstrap=untrusted" },
+    matchMedia: () => ({ matches: false }), addEventListener: () => {},
+    __SPLITTY_TAURI__: { native, ready: Promise.resolve({ role: "main" }) }, __TAURI_INTERNALS__: {} });
   return { fetch, bootstrap: (await import("./bootstrap.ts")).bootstrapConnection };
 }
 it("keeps an HTTP browser on its gateway despite forged shell globals", async () => {
-  const open = vi.fn(), p = await page("http:", { open });
+  const open = vi.fn(), p = await page("http:", "127.0.0.1", { open });
   const finish = await p.bootstrap(); finish();
   expect(open).not.toHaveBeenCalled(); expect(p.fetch).not.toHaveBeenCalled();
   expect((await import("./connection.ts")).rootAssignment).toBeUndefined();
   expect((await import("../platform.ts")).shellKind).toBe("web");
 });
 it("latches packaged native mode before a failed assignment without HTTP fallback", async () => {
-  const p = await page("splitty:", { open: async () => { throw Error("not assigned"); } });
+  const p = await page("tauri:", "localhost", { open: async () => { throw Error("not assigned"); }, cancelOpen: vi.fn() });
   await expect(p.bootstrap()).rejects.toThrow("not assigned");
   const http = await import("./http.ts");
   await expect(http.apiFetch("/api/home/settings")).rejects.toThrow();
@@ -27,19 +28,21 @@ it("latches packaged native mode before a failed assignment without HTTP fallbac
 });
 it("separates startup reads from application welcome and uses the assigned role", async () => {
   let sequence = 0;
-  const bridge: ElectronNativeBridge = {
-    state: vi.fn(), onRetry: vi.fn(() => () => {}),
+  const native: TauriNativeBridge = {
+    state: vi.fn(),
     open: vi.fn(async () => ({ handle: `client-${++sequence}`, document: "doc", instance: "instance", generation: 1, role: "main" as const })),
-    cancelOpen: vi.fn(), listen: vi.fn(() => () => {}), start: vi.fn(), close: vi.fn(), write: vi.fn(),
+    cancelOpen: vi.fn(), listen: vi.fn(() => () => {}), start: vi.fn(async () => {}), close: vi.fn(),
+    write: vi.fn(async () => {}), consumed: vi.fn(async () => {}),
   };
-  const p = await page("splitty:", bridge), finish = await p.bootstrap();
+  const p = await page("tauri:", "localhost", native), finish = await p.bootstrap();
   const root = await import("./connection.ts");
   expect(root.rootAssignment?.role).toBe("main");
   expect((await import("../platform.ts")).isRemoteSession).toBe(false);
-  expect(bridge.start).toHaveBeenCalledTimes(1);
-  finish(); expect(bridge.close).toHaveBeenCalledWith("client-1");
-  expect(bridge.open).toHaveBeenCalledTimes(1);
-  await root.socket.connect(); expect(bridge.open).toHaveBeenCalledTimes(2);
+  expect((await import("../platform.ts")).shellKind).toBe("tauri");
+  expect(native.start).toHaveBeenCalledTimes(1);
+  finish(); expect(native.close).toHaveBeenCalledWith("client-1");
+  expect(native.open).toHaveBeenCalledTimes(1);
+  await root.socket.connect(); expect(native.open).toHaveBeenCalledTimes(2);
   root.socket.dispose(); expect(p.fetch).not.toHaveBeenCalled();
 });
 it("reports Tauri recovery expiry and retries the same assigned document on a native retry event", async () => {

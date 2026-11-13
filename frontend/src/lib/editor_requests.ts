@@ -102,10 +102,8 @@ export function watchEditorRequests(conn: ServerConnection): () => void {
           if (shellKind === "web") {
             window.location.assign(prepared.value.uri);
             dispatch = Promise.resolve();
-          } else if (shellKind === "tauri") {
-            dispatch = invokeTauri(target === undefined ? "open_local_editor" : "open_remote_editor", input);
           } else {
-            dispatch = (window as any).__SPLITTY_ELECTRON__.invoke(target === undefined ? "editor:open-local" : "editor:open-remote", input);
+            dispatch = invokeTauri(target === undefined ? "open_local_editor" : "open_remote_editor", input);
           }
           void dispatch.then(() => send(msg.requestId, "dispatched", requestEpoch), () => failed());
         } catch { failed(); }

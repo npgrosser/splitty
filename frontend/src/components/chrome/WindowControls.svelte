@@ -1,6 +1,6 @@
 <script lang="ts">
   import { getDesktopPlatform } from "../../lib/platform.ts";
-  import { windowAPI, noDragRegion } from "../../lib/window.ts";
+  import { windowAPI } from "../../lib/window.ts";
   import { getTheme, subscribeTheme } from "../../lib/theme.ts";
   import { onMount } from "svelte";
 
@@ -19,7 +19,6 @@
       class="window-control-btn"
       title="Minimize"
       style="color: {fg}aa"
-      use:noDragRegion
       onclick={() => windowAPI.minimize()}
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
@@ -30,7 +29,6 @@
       class="window-control-btn"
       title="Maximize"
       style="color: {fg}aa"
-      use:noDragRegion
       onclick={() => windowAPI.toggleMaximize()}
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1">
@@ -41,7 +39,6 @@
       class="window-control-btn window-control-close"
       title="Close"
       style="color: {fg}aa"
-      use:noDragRegion
       onclick={() => windowAPI.close()}
     >
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2">

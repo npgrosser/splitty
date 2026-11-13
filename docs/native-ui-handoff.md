@@ -1,10 +1,10 @@
 # Native app: state and open work
 
 The native client (`crates/splitty-gpui`) is the desktop app that CI builds
-and releases publish for Windows, macOS (Apple silicon and Intel) and Linux. The web
-shells (Tauri, Electron) remain in the repository as legacy apps: they keep
-their CI jobs and are released with "Web" in their names. Nothing of the web
-client was removed. Builds and packages are described in
+and releases publish for Windows, macOS (Apple silicon and Intel) and Linux. The
+Tauri shell around the web client remains in the repository as a legacy app: it
+keeps its CI jobs and is not released. The Electron shell was removed; the web
+client itself stays, served by `splitty serve` and shown in the Tauri shell. Builds and packages are described in
 [development](development.md#the-native-app); the acceptance records of the
 individual features are in the [GPUI runbook](gpui-spike.md).
 

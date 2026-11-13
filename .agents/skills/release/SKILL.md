@@ -18,7 +18,7 @@ An actual request to run this release workflow authorizes its version commit, an
 
 ## Create and push the release
 
-From the clean release checkout, run `bash scripts/release.sh VERSION`. It updates `Cargo.toml`, `Cargo.lock`, Tauri and Electron versions, commits them and creates annotated tag `vVERSION`. Verify with `bash scripts/release.sh --check vVERSION` and record `git rev-parse 'vVERSION^{commit}'` as `release_sha`.
+From the clean release checkout, run `bash scripts/release.sh VERSION`. It updates the versions in `Cargo.toml`, `Cargo.lock` and the Tauri config, commits them and creates annotated tag `vVERSION`. Verify with `bash scripts/release.sh --check vVERSION` and record `git rev-parse 'vVERSION^{commit}'` as `release_sha`.
 
 Push the release commit to the selected branch and only that tag in one atomic operation. For remote `origin` and the selected branch in `release_branch`:
 

@@ -9,18 +9,18 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("native platform assignment", () => {
   it("does not grant native UI capabilities from forged globals or host query parameters", async () => {
-    const platform = await loadPlatform("?host=vm1&desktop=1", { __TAURI_INTERNALS__: {}, __SPLITTY_ELECTRON__: {} });
+    const platform = await loadPlatform("?host=vm1&desktop=1", { __TAURI_INTERNALS__: {}, __SPLITTY_TAURI__: {} });
     expect(platform.shellKind).toBe("web");
     expect(platform.isRemoteSession).toBe(false);
     expect(platform.isDesktop).toBe(false);
   });
   it("uses the native assignment despite a conflicting query", async () => {
     const platform = await loadPlatform("?host=forged");
-    platform.assignPlatform("electron", "main");
-    expect(platform.shellKind).toBe("electron");
+    platform.assignPlatform("tauri", "main");
+    expect(platform.shellKind).toBe("tauri");
     expect(platform.isRemoteSession).toBe(false);
     expect(platform.isDesktop).toBe(true);
-    expect(() => platform.assignPlatform("electron", "remote")).toThrow();
+    expect(() => platform.assignPlatform("tauri", "remote")).toThrow();
   });
   it("keeps remote windows restricted even when no query names a host", async () => {
     const platform = await loadPlatform("", { __TAURI_INTERNALS__: {} });

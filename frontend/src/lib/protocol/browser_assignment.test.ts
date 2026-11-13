@@ -4,7 +4,7 @@ afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 async function page() {
   vi.resetModules();
   vi.stubGlobal("window", { location: { protocol: "http:", search: "?host=forged&role=main" },
-    matchMedia: () => ({ matches: false }), __SPLITTY_ELECTRON__: {}, __TAURI_INTERNALS__: {} });
+    matchMedia: () => ({ matches: false }), __SPLITTY_TAURI__: {}, __TAURI_INTERNALS__: {} });
   const fetch = vi.fn(); vi.stubGlobal("fetch", fetch);
   return { fetch, bootstrap: (await import("./browser_assignment.ts")).bootstrapBrowser };
 }

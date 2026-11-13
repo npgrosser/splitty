@@ -70,7 +70,7 @@ export class NativeHubSocket implements HubWebSocket {
   private failed(error: Error): void {
     if (this.ended) return;
     // Rust carries the bounded, typed host failure inside Closed.message.
-    // Preserve incompatibility/update details through contextBridge, whose
+    // Preserve incompatibility/update details through the shell's IPC, whose
     // Error cloning otherwise drops custom fields.
     let failure: unknown;
     try { const parsed = JSON.parse(error.message); if (parsed?.type === "remote.error") failure = parsed; } catch { /* Ordinary pipe error. */ }

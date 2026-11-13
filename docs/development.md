@@ -13,7 +13,7 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 | Frontend (web app, browser) | Svelte 5, TypeScript, Vite, Tailwind CSS |
 | Terminal (web app, browser) | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
 | Layout | dockview-core |
-| Desktop | Native app: GPUI with `libghostty-vt` (`crates/splitty-gpui`; Windows, macOS, Linux). Legacy web app: Tauri v2 (Windows, macOS; Linux source build) and Electron (Linux: AppImage, deb, rpm) |
+| Desktop | Native app: GPUI with `libghostty-vt` (`crates/splitty-gpui`; Windows, macOS, Linux). Legacy web app: Tauri v2 (Windows, macOS; Linux source build) |
 | Backend | Rust (Tokio, Axum) |
 | PTY | portable-pty |
 | Config | TOML (`~/.config/splitty/config.toml`) |
@@ -70,20 +70,13 @@ resolved inside the owning `ServerConnection`.
   Linux the development packages named under [The native app](#the-native-app)
 - (web app, Tauri builds) Tauri v2 prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
 
-Frontend conformance tests import the actual Electron adapters. Install both
-`frontend/` and `frontend-electron/` dependencies before running `pnpm check` or
-`pnpm test` in `frontend/`. `ELECTRON_SKIP_BINARY_DOWNLOAD=1` can be set for the
-Electron dependency install when only types and unit tests are needed. The
-Electron build also requires the frontend dependencies to package shared assets.
-
 ## Running from source
 
 The native app (`crates/splitty-gpui`) is the desktop app releases install;
 [The native app](#the-native-app) below describes its build and packages, the
 [GPUI runbook](gpui-spike.md) its smoke modes and acceptance records, and the
 [native UI handoff](native-ui-handoff.md) its state and open work. The web
-app's shells (Tauri, Electron) are legacy: they keep building and are released
-with "Web" in their names.
+app's Tauri shell is legacy: it keeps building and is not released.
 
 The workspace applies an explicit path patch to the pinned Linux platform
 dependency in `vendor/gpui-pre-linux`. Its [patch notes](../vendor/gpui-pre-linux/SPLITTY-PATCH.md)
@@ -234,9 +227,10 @@ which it loads at run time) and the glibc version of the build system; the rpm
 names them by library, which Fedora and openSUSE share. The release builds on
 Ubuntu 22.04, so its packages need glibc 2.35 or later. A pre-release version
 is written with a tilde inside the packages (`0.3.0~rc.1`), so the release
-that follows counts as newer. The legacy Electron packages (package
-`splitty-electron`, `/opt/Splitty`, `splitty-web.desktop`) share no file with
-these and install beside them.
+that follows counts as newer. The packages of the removed Electron shell
+(package `splitty-electron`, `/opt/Splitty`, `splitty-web.desktop`) share no
+file with these; an installed one stays until it is uninstalled with the
+system's package manager.
 
 ### macOS
 
@@ -278,12 +272,11 @@ cache behavior, alternative distributions and fast iteration options, and
 
 ## The web app's packages
 
-The legacy shells are not released (v0.3.0 was the last release with their
-packages); CI keeps them building, and they build locally:
+The legacy Tauri shell is not released (v0.3.0 was the last release with web
+app packages); CI keeps it building, and it builds locally:
 
 ```bash
 make build/splitty        # server and CLI binary (embeds the frontend)
-make electron             # Linux: Electron AppImage, deb, rpm (needs rpmbuild and libcrypt.so.1; Fedora: rpm-build, libxcrypt-compat)
 make build/splitty-gui    # Tauri desktop binary (Linux source build)
 make build/Splitty.app    # macOS app bundle (Tauri)
 make dmg                  # macOS disk image (Tauri)
@@ -325,9 +318,6 @@ the script passes its arguments on to `build.ps1`:
 ## Installation from source
 
 ```bash
-# Web app on Linux: Electron AppImage
-make install-electron     # → ~/.local/bin/Splitty-Electron.AppImage + splitty-web.desktop
-
 # Web app in Tauri from source — includes both GUI and server binary
 make install-tauri
 # macOS: → /Applications/Splitty.app
@@ -338,10 +328,13 @@ make install-no-gui       # → ~/.local/bin/splitty
 
 # Uninstall
 make uninstall-tauri      # remove app, binary, desktop entry, icon
-make uninstall-electron
 make uninstall-no-gui     # remove server binary
 make uninstall-config     # remove ~/.config/splitty (separate step)
 ```
+
+The Electron shell was removed. An AppImage that `make install-electron`
+installed earlier goes with `rm ~/.local/bin/Splitty-Electron.AppImage
+~/.local/share/applications/splitty-web.desktop`.
 
 ## Continuous integration
 
@@ -365,7 +358,7 @@ macOS and Windows, and packs the Linux packages (a release build on Ubuntu
 22.04, as the release does, with the deb installed afterwards) and the macOS
 disk image with the release's scripts. The Windows installer needs the WSL
 backend and is built by the release and the **Windows installers** workflow
-only. The legacy shells keep their jobs.
+only. The legacy Tauri shell keeps its jobs.
 
 Release packages are built on `v*` tags or by manually starting the release
 workflow. Ordinary pushes do not publish packages.
@@ -383,7 +376,7 @@ Every distributed build needs a version of its own: hosts and the Windows WSL
 backend install a server per version. On a remote host, reusing a version can
 replace the payload on disk while leaving an existing daemon of that same
 version running. One command sets the version in `Cargo.toml`, `Cargo.lock`,
-the Tauri and the Electron configuration, commits and tags:
+and the Tauri configuration, commits and tags:
 
 ```bash
 scripts/release.sh 0.1.2
@@ -422,8 +415,8 @@ saved on `main`: by that weekly run, and for Linux by CI's native package
 job. Pull requests restore caches and save none.
 
 For a branch preview without a release tag, set a distinct prerelease such as
-`0.2.0-dev.1` in `Cargo.toml`, `crates/splitty-tauri/tauri.conf.json` and
-`frontend-electron/package.json`, then run `cargo update --workspace --offline`
+`0.2.0-dev.1` in `Cargo.toml` and `crates/splitty-tauri/tauri.conf.json`,
+then run `cargo update --workspace --offline`
 and `scripts/release.sh --check v0.2.0-dev.1`. The check does not create a tag.
 Commit these files and `Cargo.lock` before building a Windows preview. The
 branch name and commit hash do not automatically change the version. Increment

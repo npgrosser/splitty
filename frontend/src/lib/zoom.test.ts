@@ -43,7 +43,6 @@ describe("zoom keys", () => {
     expect(handlesZoomKeys("window", "web")).toBe(false);
     expect(handlesZoomKeys("terminals", "web")).toBe(true);
     expect(handlesZoomKeys("window", "tauri")).toBe(true);
-    expect(handlesZoomKeys("window", "electron")).toBe(true);
   });
 
   it("keeps the zoom keys from a focused terminal when Splitty takes them (Zoom in from a terminal)", () => {

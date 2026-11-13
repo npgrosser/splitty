@@ -99,19 +99,6 @@
           }
         }).then((fn) => { quitCleanup = fn; });
       });
-    } else if (shellKind === "electron") {
-      const electron = (window as any).__SPLITTY_ELECTRON__;
-      const forceClose = () => electron.invoke("window:force-close");
-      quitCleanup = electron.onCloseRequested(() => {
-        const processes = runningOnQuit();
-        const scratchpads = scratchpadsOnQuit();
-        const annotations = annotationsOnQuit();
-        if (processes.length > 0 || scratchpads > 0 || annotations > 0) {
-          quitRequest = { processes, scratchpads, annotations, hostScreens: hostScreensOpen(), quit: forceClose };
-        } else {
-          forceClose();
-        }
-      });
     } else {
       // Web / PWA: use native beforeunload dialog
       const handleBeforeUnload = (e: BeforeUnloadEvent) => {

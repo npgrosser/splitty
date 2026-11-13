@@ -39,7 +39,7 @@ is closed in the current code; where a test pins the behavior, it is named.
 | SR-25 | Info | Windows build could not be verified locally | Fixed: built in CI |
 | SR-26 | Medium | Tauri opener had no URL scope; fallback opened pages in a WebView2 popup | Fixed |
 | SR-27 | Medium | No navigation/new-window guard in Tauri; OSC 8 links bypassed the scheme check | Fixed |
-| SR-28 | High | Electron 35 end-of-life; all permissions granted; no fuses | Fixed |
+| SR-28 | High | Electron 35 end-of-life; all permissions granted; no fuses | Fixed: shell removed |
 | SR-29 | Medium | Planned dependency updates never applied; unused TLS stack shipped | Fixed |
 | SR-30 | Low | `splitty server` printed the process token | Fixed: removed |
 | SR-31 | Low | Cross-port GETs with the session cookie safe only by convention | Fixed |
@@ -115,13 +115,13 @@ bounds remain outside the application-owned transport contract. See the
 [verification status](../../openspec/changes/native-client-transports/verification.md).
 
 **SR-10.** CI runs `cargo deny check advisories bans sources` and `pnpm audit`
-for both frontends on every push and weekly; Dependabot proposes updates
+for the frontend and the architecture tooling on every push and weekly; Dependabot proposes updates
 (`.github/workflows/ci.yml`, `deny.toml`).
 
 **SR-11.** Deny-by-default CSP and baseline headers
 (`app_document_carries_a_strict_csp`,
 `app_document_carries_baseline_security_headers`); DevTools only in a
-`devtools` feature build (Tauri) or unpackaged runs (Electron). Accepted
+`devtools` feature build (Tauri). Accepted
 deviation: `style-src 'unsafe-inline'`, because xterm.js and dockview inject
 style elements at runtime and there is no HTML injection point.
 
@@ -180,24 +180,23 @@ WebView2 popup inside Splitty. The capability now scopes the opener to
 `http://*` and `https://*`, and the fallback is gone.
 
 **SR-27.** Terminal output is untrusted, and ghostty-web opens OSC 8 hyperlinks
-with a bare `window.open`, bypassing `openExternalTarget`. Both desktop shells
-now decide every navigation and new-window request natively: assigned packaged
+with a bare `window.open`, bypassing `openExternalTarget`. The Tauri shell now
+decides every navigation and new-window request natively: assigned packaged
 entries and parent-owned popouts stay in the app, other web URLs go to the system
 browser, everything else is dropped (`crates/splitty-tauri/src/navigation.rs`
-with unit tests; `hardenWebContents` in `frontend-electron/src/main.ts`). App
-responses carry COOP and CORP `same-origin`.
+with unit tests). App responses carry COOP and CORP `same-origin`.
 
 **SR-28.** Electron 35.7.5 had 37 open Electron/Chromium advisories. Upgraded
 to 44; a permission handler allows only notifications and clipboard writes, and
 only for allowed packaged documents; fuses disable `ELECTRON_RUN_AS_NODE`,
 `NODE_OPTIONS` and inspector flags and load app code only from an
-integrity-checked asar.
+integrity-checked asar. The Electron shell was later removed from the
+repository (`remove-electron-shell`, 2026-11-13).
 
 **SR-29.** The updates planned in August were never applied. `cargo update` and
 `pnpm update` cleared all advisories; reqwest no longer compiles a TLS stack the
-product never uses. Remaining exception: GHSA-ch52-4w7c-c8xp in electron-builder's
-download tooling (no fixed release published; not applicable to a single-user
-cache), documented in `frontend-electron/pnpm-workspace.yaml`. Informational:
+product never uses. The one exception, GHSA-ch52-4w7c-c8xp in electron-builder's
+download tooling, went with the Electron shell. Informational:
 `serial` (via `portable-pty` 0.8, unused serial-port support) and
 `proc-macro-error` (build time) are unmaintained.
 

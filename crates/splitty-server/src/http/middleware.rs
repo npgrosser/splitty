@@ -185,8 +185,8 @@ fn is_websocket_path(path: &str) -> bool {
 /// the API through a navigation, so `none` (a URL typed into the address bar) is
 /// rejected as well.
 ///
-/// An absent header is accepted. The CLI, the Electron main process and older
-/// engines do not send one, and for them the `Origin` rules above still apply.
+/// An absent header is accepted. The CLI, native clients and older engines do
+/// not send one, and for them the `Origin` rules above still apply.
 pub fn fetch_site_allowed(request: &Request) -> bool {
     match request.headers().get("sec-fetch-site") {
         None => true,

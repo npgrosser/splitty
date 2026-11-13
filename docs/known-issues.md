@@ -58,7 +58,6 @@ Ctrl+V and Ctrl+Shift+V paste it. Linux middle-click paste reads a separate
 buffer, `PRIMARY`, which a web page cannot write, and the terminal's selection
 is drawn by Splitty rather than being a native text selection. In the browser,
 middle-click therefore does not paste what you selected in a terminal. The
-desktop apps on Linux have not been checked for this since the move to Tauri
-and Electron.
+desktop apps on Linux have not been checked for this since the move to Tauri.
 
 **Workaround:** Paste with Ctrl+Shift+V.

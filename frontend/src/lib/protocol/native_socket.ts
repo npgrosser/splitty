@@ -6,8 +6,15 @@ import type { IncomingMessage } from "./types.ts";
 import { describeRequest, isNativeReply, NativeRequestError, type NativeApi, type NativeReply, type NativeRequest } from "./native_api.ts";
 import { application, dataFrame, MAX_NATIVE_API_BYTES, MAX_NATIVE_FRAME_BYTES, NativeKind, type NativeFrame } from "./native_wire.ts";
 
-import type { NativeAssignment } from "../../../../frontend-electron/src/native_types.ts";
-export type { NativeAssignment } from "../../../../frontend-electron/src/native_types.ts";
+/** Assigned by the native composition root, never reconstructed from a URL. */
+export interface NativeAssignment {
+  readonly handle: string;
+  readonly document: string;
+  readonly generation: number;
+  readonly instance: string;
+  readonly role: "main" | "remote";
+  readonly target?: string;
+}
 export interface NativeDelivery {
   readonly handle: string;
   readonly document: string;

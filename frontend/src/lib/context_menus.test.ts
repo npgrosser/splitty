@@ -67,7 +67,7 @@ beforeEach(() => {
   invoke.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("window", {
     location: { assign, search: "" },
-    __SPLITTY_TAURI__: { invoke }, __SPLITTY_ELECTRON__: { invoke },
+    __SPLITTY_TAURI__: { invoke },
   });
 });
 afterEach(() => {
@@ -169,14 +169,14 @@ it("reports browser refusal with setup help and no native fallback", () => {
   expect(invoke).not.toHaveBeenCalled();
 });
 
-it.each(["tauri", "electron"])("uses only the %s dedicated native command and reports rejection", async (shell) => {
-  state.shellKind = shell;
+it("uses only the Tauri dedicated native command and reports rejection", async () => {
+  state.shellKind = "tauri";
   const selected = screen("host:user@192.0.2.10", "/a #?");
   const item = editor("tab", selected.api)!;
   invoke.mockRejectedValue(new Error("No handler"));
   item.action();
   await vi.waitFor(() => expect(notice.error).toHaveBeenCalled());
-  expect(invoke).toHaveBeenCalledExactlyOnceWith(shell === "tauri" ? "open_remote_editor" : "editor:open-remote", { editor: "vscode", target: "user@192.0.2.10", cwd: "/a #?" });
+  expect(invoke).toHaveBeenCalledExactlyOnceWith("open_remote_editor", { editor: "vscode", target: "user@192.0.2.10", cwd: "/a #?" });
   expect(assign).not.toHaveBeenCalled();
   expect(notice.info).not.toHaveBeenCalled();
 });
@@ -235,15 +235,15 @@ for (const kind of ["pane", "tab"] as const) describe(`${kind} editor submenu`, 
     expect(assign).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["tauri", "electron"])("dispatches local folders only via %s native IPC", async (shell) => {
-    state.shellKind = shell;
+  it("dispatches local folders only via Tauri native IPC", async () => {
+    state.shellKind = "tauri";
     const local = screen("local", "/srv/app");
     for (const name of ["VS Code", "Zed"]) editor(kind, local.api, name)!.action();
-    expect(invoke).toHaveBeenNthCalledWith(1, shell === "tauri" ? "open_local_editor" : "editor:open-local", { editor: "vscode", cwd: "/srv/app", wslDistro: undefined });
-    expect(invoke).toHaveBeenNthCalledWith(2, shell === "tauri" ? "open_local_editor" : "editor:open-local", { editor: "zed", cwd: "/srv/app", wslDistro: undefined });
+    expect(invoke).toHaveBeenNthCalledWith(1, "open_local_editor", { editor: "vscode", cwd: "/srv/app", wslDistro: undefined });
+    expect(invoke).toHaveBeenNthCalledWith(2, "open_local_editor", { editor: "zed", cwd: "/srv/app", wslDistro: undefined });
     setLocalWslDistro("Ubuntu");
     editor(kind, local.api)!.action();
-    expect(invoke).toHaveBeenLastCalledWith(shell === "tauri" ? "open_local_editor" : "editor:open-local", { editor: "vscode", cwd: "/srv/app", wslDistro: "Ubuntu" });
+    expect(invoke).toHaveBeenLastCalledWith("open_local_editor", { editor: "vscode", cwd: "/srv/app", wslDistro: "Ubuntu" });
     expect(assign).not.toHaveBeenCalled();
     await Promise.resolve();
     expect(notice.info).not.toHaveBeenCalled();
@@ -263,10 +263,10 @@ for (const kind of ["pane", "tab"] as const) describe(`${kind} editor submenu`, 
     expect(notice.info).not.toHaveBeenCalled();
   });
 
-  it.each(["tauri", "electron"])("opens the SFTP client only via %s native IPC", (shell) => {
-    state.shellKind = shell;
+  it("opens the SFTP client only via Tauri native IPC", () => {
+    state.shellKind = "tauri";
     editor(kind, screen("host:me@vm1:2222", "/srv").api, "SFTP Client")!.action();
-    expect(invoke).toHaveBeenCalledExactlyOnceWith(shell === "tauri" ? "open_remote_editor" : "editor:open-remote", { editor: "sftp", target: "me@vm1:2222", cwd: "/srv" });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("open_remote_editor", { editor: "sftp", target: "me@vm1:2222", cwd: "/srv" });
     expect(assign).not.toHaveBeenCalled();
   });
 

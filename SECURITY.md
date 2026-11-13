@@ -155,11 +155,12 @@ isolation.
   `app_document_carries_baseline_security_headers`,
   `static_assets_carry_the_security_headers`).
 
-## Desktop shells
+## Desktop shell
 
-Splitty never renders foreign web content. Both shells decide every
-navigation and every new-window request natively, whatever code in the page
-asked for it: exact packaged entries and parent-owned popouts stay in Splitty,
+Splitty never renders foreign web content. The Tauri shell around the web
+frontend decides every navigation and every new-window request natively,
+whatever code in the page asked for it: exact packaged entries and
+parent-owned popouts stay in Splitty,
 other `http(s)` URLs open in the system browser, and every other scheme
 (`file:`, `javascript:`, OS protocol handlers) is dropped.
 
@@ -173,12 +174,6 @@ other `http(s)` URLs open in the system browser, and every other scheme
   Parent-owned popouts share their parent's trust and quota; denying their
   direct IPC is not isolation from their parent's JavaScript. DevTools exist
   only in builds with `--features devtools`.
-- **Electron** (`frontend-electron/src/main.ts`). Sandboxed renderer with
-  context isolation and no Node integration, exact packaged resources,
-  restricted preload methods, native document proofs, and a permission
-  allowlist for notifications and clipboard writes. Packaged builds have no
-  DevTools. Fuses disable `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` and inspector
-  flags and load app code only from an integrity-checked asar.
 - **WSL** (`crates/splitty-tauri/src/windows_wsl.rs`). A root default user is
   refused (`root_default_user_is_rejected`). Provisioning output is separately
   bounded; protocol traffic uses raw native pipes with no port/bootstrap text
@@ -218,7 +213,7 @@ distinguishes these current runs from excluded historical evidence.
   `terminal.allowOsc52Write` is enabled; payloads over 64 KiB are dropped
   (`frontend/src/lib/terminal/clipboard_policy.test.ts`).
 - **Links** are scheme-checked in the UI (`openExternalTarget`) and enforced again
-  by the shells, because a renderer library can bypass the UI.
+  by the Tauri shell, because a renderer library can bypass the UI.
 - **Templates** that carry commands show them and need confirmation before
   anything runs (`frontend/src/lib/template_guard.test.ts`).
 

@@ -1,7 +1,7 @@
 // The shell bridge for remote windows (`desktop-remote`, Remote Window Shell
 // API): list the known hosts, open one in a window of its own, cancel an open
-// in flight, and follow its progress. The contract is the same in both shells;
-// only the transport differs.
+// in flight, and follow its progress. Only the Tauri shell has it; browsers and
+// remote sessions get a bridge that is unavailable.
 
 import { shellKind, type ShellKind } from "./platform.ts";
 import { parseKnownHosts, type KnownHost } from "./remote/known_hosts.ts";
@@ -114,44 +114,6 @@ function tauriBridge(scope: any): RemoteWindowsAPI {
 }
 
 // ---------------------------------------------------------------------------
-// Electron: preload channels
-// ---------------------------------------------------------------------------
-
-/** What `remote:open` resolves with: `ipcRenderer.invoke` rejections lose their fields. */
-type ElectronOpenResult = { ok: true } | { ok: false; error?: unknown };
-
-function electronBridge(scope: any): RemoteWindowsAPI {
-  const electron = scope.__SPLITTY_ELECTRON__;
-
-  return {
-    // A preload without the subscription predates remote windows.
-    available: typeof electron?.onRemoteProgress === "function",
-    async hosts() {
-      return parseKnownHosts(await electron.invoke("remote:hosts"));
-    },
-    async open(target, options) {
-      let result: ElectronOpenResult | undefined;
-      try {
-        result = options?.update === true
-          ? await electron.invoke("remote:open", target, { update: true })
-          : await electron.invoke("remote:open", target);
-      } catch (cause) {
-        throw toOpenError(cause);
-      }
-      if (!result?.ok) throw toOpenError(result?.error);
-    },
-    async cancel(target) {
-      await electron.invoke("remote:cancel", target).catch(() => {});
-    },
-    onProgress(callback) {
-      return electron.onRemoteProgress((progress: unknown) => {
-        if (isProgress(progress)) callback(progress);
-      });
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Web and remote sessions: nothing to open
 // ---------------------------------------------------------------------------
 
@@ -166,10 +128,6 @@ const unavailable: RemoteWindowsAPI = {
 /** The bridge for a shell; `scope` holds the shell's globals (`window`). */
 export function createRemoteWindows(kind: ShellKind, scope: any = window): RemoteWindowsAPI {
   if (kind === "tauri") return tauriBridge(scope);
-  if (kind === "electron") {
-    const bridge = electronBridge(scope);
-    return bridge.available ? bridge : unavailable;
-  }
   return unavailable;
 }
 

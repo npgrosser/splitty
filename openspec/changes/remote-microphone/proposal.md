@@ -43,3 +43,7 @@ To be decided when the change is next. Likely candidates:
 - **Frontend**: microphone capture and resampling, the recording mark, the host setting.
 - **Desktop shells**: microphone permission in Electron and in Tauri on Windows (WebView2), macOS (WKWebView, usage description) and Linux (WebKitGTK).
 - **Security**: a new direction of trust, since a process on the host triggers a capture device on the user's machine. That is equivalent to a local process with microphone access, bounded to the focused pane on an enabled host.
+
+## Carried-over design notes
+
+- 2026-11-13, `remove-electron-shell`: the Electron shell (`frontend-electron/`) is removed. What this change says about Electron, its main process, preload or packaged assets no longer applies; the desktop shell around the web frontend is Tauri, and the native app (`crates/splitty-gpui`) is the default desktop app.

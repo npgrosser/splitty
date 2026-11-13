@@ -1,4 +1,4 @@
-export type ShellKind = "electron" | "tauri" | "web";
+export type ShellKind = "tauri" | "web";
 
 const params = new URLSearchParams(typeof window === "undefined" ? "" : window.location.search);
 
@@ -27,13 +27,6 @@ export let isPWA = !isDesktop && typeof window !== "undefined"
   && window.matchMedia("(display-mode: window-controls-overlay)").matches;
 
 export function getDesktopPlatform(): "mac" | "linux" | "windows" | "other" {
-  if (shellKind === "electron") {
-    const p = (window as any).__SPLITTY_ELECTRON__?.platform;
-    if (p === "darwin") return "mac";
-    if (p === "linux") return "linux";
-    if (p === "win32") return "windows";
-    return "other";
-  }
   const ua = navigator.userAgent.toLowerCase();
   const platform = navigator.platform.toLowerCase();
 

@@ -68,9 +68,6 @@ echo "[1/4] Preparing frontend"
     cd "$repo_root/frontend"
     pnpm install --frozen-lockfile
     if [ "$skip_tests" = false ]; then
-        # The check type-checks the actual Electron adapters, which need their
-        # types; the Electron binary itself is not needed.
-        ELECTRON_SKIP_BINARY_DOWNLOAD=1 pnpm install --frozen-lockfile --dir "$repo_root/frontend-electron"
         pnpm check
     fi
     pnpm build

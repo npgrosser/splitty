@@ -43,11 +43,6 @@ model {
       description 'The UI: screens, panes and terminals, with confirmed upload destinations and cancellable per-pane transfer progress. Built into frontend/dist and embedded into the splitty binary, which serves it; runs in a browser or in a desktop shell\'s WebView. Applies layout changes optimistically and sends them as ops. Viewer panes show files and terminal selections, read in chunks over the connection and rendered inert in a shadow root without frames; annotations on them anchor by quote and go to a terminal as a Markdown review. Shows each terminal at the PTY size its server decides, reports the sizes of shown panes and its user\'s activity, and marks a size set by another client. The Ports controller joins discovered, active and saved mappings, supports manual Save without SSH and opt-in Remember, and refreshes both APIs across windows; Stop pauses saved consent, Resume is explicit, and Forget leaves live forwarding running.'
     }
 
-    electron = container 'Electron shell' {
-      technology 'Electron, frontend-electron/'
-      description 'Alternative desktop shell: loads manifest-checked packaged frontend assets and assigns document-bound private MessagePorts to an app-owned embedded helper or fixed-host SSH helpers. Native APIs supply startup metadata; shell commands require the actual main document challenge. Pending remote opens retain capacity through observed cleanup, and app exit awaits owned helpers.'
-    }
-
     remote = container 'splitty-remote' {
       technology 'Rust library, crates/splitty-remote'
       description 'Reaching a remote host over SSH, installing the client\'s server there and keeping a native SSH exec stream to its daemon; the hosts the user knows. Platform-neutral and free of the server crates: linked into the splitty binary for splitty connect, and into the desktop app for remote windows (remote-window).'
@@ -98,10 +93,6 @@ model {
   }
   splitty.desktop -> splitty.web 'shows'
   splitty.gpui -> splitty.client_core 'uses the native client and embedded service'
-  splitty.electron -> splitty.server 'owns embedded and fixed-host native helpers in' {
-    technology 'bounded native-v1 child pipes'
-  }
-  splitty.electron -> splitty.web 'shows'
   splitty.desktop -> wsl 'starts the server in' {
     technology 'wsl.exe, stdio'
   }

@@ -50,7 +50,6 @@ already running. It neither attaches to that daemon nor adopts its old keepers.
 | Desktop shell | Local backend location | Connection |
 | --- | --- | --- |
 | Tauri on Linux/macOS | Embedded in the native application process | WebView IPC to the native broker, then in-process byte channels |
-| Electron on Linux | An application-owned `splitty` helper process | Document-bound MessagePort to the main process, then inherited child pipes |
 | Tauri on Windows | An application-owned Linux helper in the selected WSL 2 distribution | WebView IPC, then the owned `wsl.exe` stdin/stdout pipes |
 
 The native process assigns each UI document its backend and permissions. A

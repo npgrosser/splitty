@@ -40,11 +40,9 @@ export type RevealDownload = (url: string) => Promise<unknown>;
 
 /** The desktop shell's, which knows where it saved its downloads; a browser has none. */
 export const revealDownload: RevealDownload | null =
-  shellKind === "tauri" ? (url) => invokeTauri("reveal_download", { url }) :
-  shellKind === "electron" ? (url) => (window as any).__SPLITTY_ELECTRON__.invoke("download:reveal", url) :
-  null;
+  shellKind === "tauri" ? (url) => invokeTauri("reveal_download", { url }) : null;
 
-/** A download of the window: the browser, Electron and the Tauri shell save it as they are set up to. */
+/** A download of the window: the browser and the Tauri shell save it as they are set up to. */
 export function saveAsDownload(name: string, blob: Blob): string {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");

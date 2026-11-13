@@ -124,11 +124,6 @@ Line numbers refer to the tree at commit `b495e1c`.
   `~/Library/Application Support/splitty/run/`, and `agent-<uuid>.sock` there exceeds the 104 bytes of a macOS socket
   address for user names longer than about 8 characters, so agent grants fail. A hub's server on a Mac uses
   `~/.config/splitty/run/` and is not affected. Not reproduced yet.
-- **The Electron shell's children outlive a killed app** (found on 2026-10-12 while checking `remote-window` by hand).
-  When the Electron process is killed by a signal instead of quitting, `will-quit` does not run: its backend
-  (`splitty serve --oneshot-token`, without `--desktop-stdio`) and every `splitty connect --json` of a remote window
-  keep running, the latter with their tunnels. The Tauri app does not have this problem, because it holds the tunnels
-  in-process. Candidate fix: `--desktop-stdio` for the backend, and `connect` ending when its standard input closes.
 - **Fixed (2026-10-14): `splitty serve` ignored SIGTERM** (found while checking the remote screens by hand). Only
   Ctrl+C shut it down; a `kill` or a service manager's stop ended the process at once, and the hub's forward `ssh`
   processes lived on, holding their local ports, so the next server forwarded the same host port to another one.
@@ -147,8 +142,8 @@ Line numbers refer to the tree at commit `b495e1c`.
   matched only up to the line break; sessions now start with `FORCE_HYPERLINK=1`, so Claude Code sends them as
   OSC 8 hyperlinks that open whole from every line (Codex sends them without it). Plain text that a program wraps
   itself is still matched per line, and xterm.js underlines only the hovered line of a wrapped hyperlink.
-- **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium, Edge, WebView2 (Windows app) and
-  Electron** (verified in Chromium on 2026-10-15): both call `navigator.clipboard.readText()`
+- **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium, Edge and WebView2 (Windows
+  app)** (verified in Chromium on 2026-10-15): both call `navigator.clipboard.readText()`
   (`lib/context_menus.ts`, `Workspace.svelte`), which the page's own `Permissions-Policy: clipboard-read=()` blocks
   ("The Clipboard API has been blocked because of a permissions policy"). The paste shortcuts work, since they use
   the browser's `paste` event. Options: drop the menu entry and the command, or read the clipboard natively in the
@@ -258,11 +253,6 @@ Hardening candidates, not open holes.
   for the exact origin of its backend (`crates/splitty-tauri/src/capability.rs`, `access-control`,
   Desktop Shell Command Scope), and remote windows are in no capability.
 
-- **The Electron shell has no download guard** (found in `show-saved-download`, 2026-10-31). The Tauri shell
-  saves only `blob:` URLs of its backend origin (`crates/splitty-tauri/src/navigation.rs`, `download`);
-  Electron's `will-download` (`frontend-electron/src/main.ts`) only remembers what a main window saved and
-  refuses nothing. The navigation guard keeps foreign pages out of its windows, so only the backend's own
-  pages can start one. Possible fix: cancel every download that is not a `blob:` URL of the window's origin.
 - The server never sets `SPLITTY_TOKEN`/`SPLITTY_SERVER` for panes but does not scrub them from its own inherited
   environment either (`pty/session.rs:110-119`).
 - The control socket's peer-uid check only exists on Linux; elsewhere only file modes protect it
@@ -382,7 +372,7 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 - **Dead code.** `DockviewManager.addTerminalPane`, `moveScreen` in the screens store, the UI command
   `overlay.toggle`, the Drawer's "Templates" placeholder, `SplittyWebSocket.reconnect`, `setAuthState`,
   `loadTheme`, the unread `terminal.theme` setting, and the identical `getUnreadForPane`/`getUnreadForSession`.
-  `editor_target.ts` exists in `frontend/`, `frontend-electron/` and, in Rust, in the Tauri shell.
+  `editor_target.ts` exists in `frontend/` and, in Rust, in the Tauri shell.
 - Found on 2026-11-06 with `splitty-open`:
   - `terminalDirectoryItems` matches only `terminal-…` pane IDs, so terminals the CLI creates (`pane-…`) get no folder
     actions in their context menu.
@@ -516,7 +506,7 @@ that area touches them.
 - **file-transfer,** left when it was archived (2026-10-29): checked end to end once by hand against a local `serve`
   in Chromium (Playwright, one-off: a 1.5 MiB drop, its sanitized name, mode and pasted path; `splitty download`
   saved and dismissed). Untested: the same through the hub to an SSH host, downloads in the desktop shells
-  (WebView2, WebKitGTK, WKWebView, Electron), pasting files from the system clipboard, uploads over 10 MiB.
+  (WebView2, WebKitGTK, WKWebView), pasting files from the system clipboard, uploads over 10 MiB.
 - **version skew** (noted 2026-11-12, narrowed by `version-skew-smoke-test` the same day):
   `tests/version_skew.rs` runs the last release's static Linux x86_64 `splitty` (fetched and checked against the
   release's `SHA256SUMS` by `scripts/testing/fetch-last-release.sh`) against the current build, in CI on Linux and

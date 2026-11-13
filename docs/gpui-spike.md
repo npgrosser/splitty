@@ -8,7 +8,7 @@ sessions, local Screens, split panes, tab groups and draggable dividers. Layouts
 come from the shared mux tree; terminal views survive layout updates and Screen
 switches.
 Closing the window ends its owned service. Saved production workspaces and the
-released Electron/Tauri apps remain separate.
+Tauri app remain separate.
 
 The current terminal uses statically linked `libghostty-vt` 1.0.0 through a
 UI-independent owned engine. The [terminal build instructions](development.md#native-terminal-library-for-gpui)

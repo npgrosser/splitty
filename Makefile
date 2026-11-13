@@ -3,14 +3,12 @@ FRONTEND_SRC := $(shell find frontend/src frontend/public -type f 2>/dev/null) \
 UNAME   := $(shell uname -s)
 BUILD   := build
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-# The workspace version, which scripts/release.sh sets.
-VERSION := $(shell sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$$/\1/p' Cargo.toml)
 
 FRONTEND_STAMP := frontend/.build-stamp
 
-.PHONY: dev dev-tauri clean test icons electron dmg native-package \
-       install-no-gui install-tauri install-electron \
-       uninstall-no-gui uninstall-tauri uninstall-electron uninstall-config \
+.PHONY: dev dev-tauri clean test icons dmg native-package \
+       install-no-gui install-tauri \
+       uninstall-no-gui uninstall-tauri uninstall-config \
        check-splitty-not-running
 
 # --- Frontend ---
@@ -41,7 +39,7 @@ $(BUILD)/splitty-gui: $(FRONTEND_STAMP) | $(BUILD)
 # --- Run targets ---
 
 dev:
-	cargo watch -i frontend/ -i frontend-electron/ -x 'run -p splitty-server -- serve'
+	cargo watch -i frontend/ -x 'run -p splitty-server -- serve'
 
 dev-tauri: frontend/node_modules
 	cd frontend && pnpm build
@@ -137,36 +135,9 @@ else
 	@echo "Removed Splitty (Tauri)"
 endif
 
-uninstall-electron:
-	rm -f $(HOME)/.local/bin/Splitty-Electron.AppImage
-	rm -f $(HOME)/.local/share/applications/splitty-web.desktop
-	rm -f $(HOME)/.local/share/icons/hicolor/128x128/apps/splitty.png
-	@echo "Removed Splitty (Electron)"
-
 uninstall-config:
 	rm -rf $(HOME)/.config/splitty
 	@echo "Removed $(HOME)/.config/splitty"
-
-# --- Electron ---
-
-frontend-electron/node_modules: frontend-electron/package.json
-	cd frontend-electron && pnpm install
-	@touch $@
-
-electron: $(BUILD)/splitty frontend-electron/node_modules
-	cd frontend-electron && pnpm run dist
-
-install-electron: electron
-	mkdir -p $(HOME)/.local/bin $(HOME)/.local/share/applications $(HOME)/.local/share/icons/hicolor/128x128/apps
-	cp frontend-electron/dist/Splitty-$(VERSION).AppImage $(HOME)/.local/bin/Splitty-Electron.AppImage
-	chmod +x $(HOME)/.local/bin/Splitty-Electron.AppImage
-	cp packaging/linux/splitty.png $(HOME)/.local/share/icons/hicolor/128x128/apps/splitty.png
-	sed 's|Splitty-Electron.AppImage|$(HOME)/.local/bin/Splitty-Electron.AppImage|g' \
-		packaging/electron/linux/splitty.desktop > $(HOME)/.local/share/applications/splitty-web.desktop
-	@echo "Installed to $(HOME)/.local/bin/Splitty-Electron.AppImage + desktop entry"
-
-run-electron: $(BUILD)/splitty frontend-electron/node_modules
-	cd frontend-electron && pnpm run dev
 
 # --- Icons ---
 

@@ -116,11 +116,8 @@ generate_ico  "$TAURI_ICONS/icon.ico"
 # ── macOS icon (project root) ──
 generate_icns "$ROOT/icon-macos.icns"
 
-# ── AppImage / Electron source icon (1024px) ──
+# ── Linux desktop entry icon (1024px) ──
 resize 1024 "$ROOT/packaging/linux/splitty.png"
-
-# ── Electron ──
-resize 512 "$ROOT/packaging/electron/icon.png"
 
 # ── Frontend (React) — favicon + PWA icons ──
 resize 48  "$ROOT/frontend/public/favicon.png"

@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
   vi.clearAllMocks(); state.remote = false; state.shell = "tauri"; state.contextReady = true; state.distro = undefined;
   invoke.mockResolvedValue(undefined); notice.show.mockReturnValue("toast");
-  vi.stubGlobal("window", { __SPLITTY_TAURI__: { invoke }, __SPLITTY_ELECTRON__: { invoke }, location: { assign } });
+  vi.stubGlobal("window", { __SPLITTY_TAURI__: { invoke }, location: { assign } });
 });
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -52,11 +52,11 @@ describe("confirmed editor requests", () => {
     server.socket.message(request());
     expect(notice.show).toHaveBeenCalledTimes(1);
   });
-  it.each(["web", "electron"])("dispatches immediately during %s confirmation", async (shell) => {
+  it.each(["web", "tauri"])("dispatches immediately during %s confirmation", async (shell) => {
     state.shell = shell; const server = fixture("local"); server.socket.message(request({ editor: "vscode" }));
     prompt().action.onClick();
     if (shell === "web") expect(assign).toHaveBeenCalledExactlyOnceWith("vscode://file/srv/file.rs");
-    else expect(invoke).toHaveBeenCalledExactlyOnceWith("editor:open-local", { editor: "vscode", cwd: "/srv/file.rs", kind: "file", wslDistro: undefined });
+    else expect(invoke).toHaveBeenCalledExactlyOnceWith("open_local_editor", { editor: "vscode", cwd: "/srv/file.rs", kind: "file", wslDistro: undefined });
     await Promise.resolve(); expect(outcome(server)).toBe("dispatched");
   });
   it("refuses host-owned pages and servers without capability", () => {
