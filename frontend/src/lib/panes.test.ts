@@ -52,6 +52,25 @@ describe("terminal pane layout operations", () => {
     expect([...binding.activeTabs]).toEqual(["new-pane"]);
   });
 
+  // workspace-model, Screen Creation: a server that removed the screen with its
+  // last pane creates it anew, so the op carries the name the window shows.
+  it("re-creates an empty screen around the new pane under the window's name", async () => {
+    const { createScreen, removeScreen } = await import("../stores/screens.svelte.ts");
+    createScreen("Logs", "remote-screen", { activate: false });
+    const { socket, conn } = fakeServer("host:vm1");
+    socket.message({ type: "mux.welcome", clientId: "c1", screens: [] });
+    const binding = new ScreenBinding("remote-screen", conn, "host-screen");
+    const api = { id: "empty-test", activePanel: undefined, panels: [], addPanel: vi.fn() } as unknown as DockviewApi;
+    registerScreenApi(api, binding);
+    layouts.push(api);
+    addTerminalPane(api, { id: "first-pane" });
+    expect(socket.sentOfType("mux.op")).toEqual([{
+      type: "mux.op", screenId: "host-screen",
+      op: { type: "create_screen", screenId: "host-screen", name: "Logs", newPaneId: "first-pane", shellProfileId: undefined },
+    }]);
+    removeScreen("remote-screen");
+  });
+
   it("targets the clicked group's tab even when another group is active", () => {
     const { api, socket } = setup();
     const group = { activePanel: { id: "other-pane" } } as DockviewGroupPanel;

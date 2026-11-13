@@ -2387,14 +2387,43 @@ mod tests {
         workspace
             .close_pane(&client, &first_pane)
             .expect("close final pane");
-        until(&mut client, &mut workspace, |workspace| {
-            workspace
-                .snapshot()
-                .is_some_and(|screen| screen.panes.is_empty())
-        })
-        .await;
+        // The service removes a Screen with its last pane (workspace-model,
+        // Closing a Pane): its catalog no longer lists it.
         let old_screen_id = workspace.screen_id().to_owned();
-        let old_screen_name = workspace.snapshot().unwrap().name.clone();
+        client.request_workspace().expect("catalog request");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = next(&mut client, &mut workspace).await;
+                if let Some(catalog) = event
+                    .json()
+                    .filter(|value| value["type"] == "mux.workspace_snapshot")
+                {
+                    let listed = catalog["screens"]
+                        .as_array()
+                        .expect("screens")
+                        .iter()
+                        .any(|screen| screen["id"] == old_screen_id.as_str());
+                    assert!(!listed, "the emptied Screen left the catalog");
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("catalog before timeout");
+        // A service of an earlier version keeps the Screen without panes and
+        // reports it so; a new terminal then fills it under the same ID.
+        let mut emptied = serde_json::to_value(workspace.snapshot().expect("snapshot")).unwrap();
+        emptied["revision"] = (emptied["revision"].as_u64().unwrap() + 1).into();
+        emptied["panes"] = serde_json::json!({});
+        emptied["sessions"] = serde_json::json!({});
+        emptied["root"] = serde_json::json!({"type": "slot", "id": "root", "paneIds": []});
+        workspace
+            .apply_snapshot(
+                client.connection_id(),
+                &serde_json::json!({"type": "mux.screen_snapshot", "screen": emptied}),
+            )
+            .expect("empty snapshot");
+        assert!(workspace.snapshot().unwrap().panes.is_empty());
         let restored_pane = workspace
             .new_terminal(&client)
             .expect("refill empty screen");
@@ -2407,7 +2436,6 @@ mod tests {
         })
         .await;
         assert_eq!(workspace.screen_id(), old_screen_id);
-        assert_eq!(workspace.snapshot().unwrap().name, old_screen_name);
         assert_eq!(workspace.focused_pane(), Some(restored_pane.as_str()));
         let old_connection = client.connection_id();
         let revoked = workspace.reset_connection(Uuid::new_v4());

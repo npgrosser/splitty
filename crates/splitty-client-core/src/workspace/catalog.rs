@@ -1163,6 +1163,14 @@ impl SourceWorkspace {
         self.mark_catalog_dirty();
         Ok(())
     }
+    /// Whether the Screen's confirmed snapshot holds no pane at all, in its
+    /// layout or floating.
+    pub fn screen_ran_empty(&self, id: &str) -> bool {
+        self.screen(id)
+            .and_then(ScreenModel::server_snapshot)
+            .is_some_and(|screen| screen.panes.is_empty())
+    }
+
     pub fn close_screen(&mut self, client: &Client, id: &str) -> io::Result<()> {
         self.require_routes_settled()?;
         self.check_known(client, id)?;
@@ -1225,8 +1233,10 @@ impl SourceWorkspace {
         }
         result
     }
+    /// Start a terminal in the shown Screen when it has no pane. A host's
+    /// Screen takes it as a local one does: the Screen's own service starts
+    /// the session.
     pub fn new_terminal(&mut self, client: &Client) -> io::Result<String> {
-        self.require_local()?;
         self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self.shown_mut()?.new_terminal(client);

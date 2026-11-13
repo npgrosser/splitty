@@ -1314,6 +1314,42 @@ mod tests {
 
     /// Reducer-created layout with no running processes, for layout-only
     /// session handler tests. Panes without sessions close without effects.
+    /// workspace-model, Closing a Pane (Close the last pane of a screen): the
+    /// others are nudged for the removed screen, and the `close_screen` a
+    /// window of an earlier version sends after it is refused and changes
+    /// nothing.
+    #[tokio::test]
+    async fn closing_the_last_pane_publishes_the_removed_screen() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "sender", &others);
+        handler
+            .handle_value(serde_json::json!({"type":"mux.op", "screenId":"screen-2", "op":{"type":"close_pane", "paneId":"p4"}}))
+            .await;
+        let events = std::mem::take(&mut *others.lock().expect("recorder"));
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["type"], "mux.nudge");
+        assert_eq!(events[0]["reason"], "mux_op");
+        assert_eq!(events[0]["screenId"], "screen-2");
+        assert!(sent.try_recv().is_err(), "no sender notification");
+        assert!(store.get_screen(&ScreenId::from("screen-2")).is_none());
+        let (catalog, active) = store.workspace_catalog();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(active, Some(ScreenId::from("screen-1")));
+
+        handler
+            .handle_value(serde_json::json!({"type":"mux.op", "screenId":"screen-2", "op":{"type":"close_screen"}}))
+            .await;
+        let Message::Text(text) = sent.try_recv().expect("failure").value else {
+            panic!("text event")
+        };
+        let failure: Value = serde_json::from_str(text.as_str()).expect("event");
+        assert_eq!(failure["type"], "mux.op_failed");
+        assert_eq!(failure["op"], "close_screen");
+        assert!(others.lock().expect("recorder").is_empty());
+        assert_eq!(store.workspace_catalog().0.len(), 1);
+    }
+
     fn layout_store() -> Arc<Store> {
         let seed = Store::new();
         for (screen, pane) in [("screen-1", "p1"), ("screen-2", "p4")] {

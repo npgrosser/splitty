@@ -104,9 +104,9 @@ impl Observer {
                     exit_code,
                     close,
                 };
-                let Ok((effects, screens)) =
+                let Ok((effects, (screens, removed))) =
                     state.mux_store.dispatch_inspect(op, |before, after| {
-                        after
+                        let changed = after
                             .screens
                             .values()
                             .filter(|screen| {
@@ -116,7 +116,13 @@ impl Observer {
                                     .is_some_and(|old| old.revision != screen.revision)
                             })
                             .map(|screen| (screen.id.clone(), screen.revision))
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>();
+                        // A screen whose last pane closed on exit went with it.
+                        let removed = before
+                            .screens
+                            .keys()
+                            .any(|id| !after.screens.contains_key(id));
+                        (changed, removed)
                     })
                 else {
                     continue;
@@ -146,6 +152,14 @@ impl Observer {
                         "session_metadata".into(),
                         Some(screen.to_string()),
                     ));
+                }
+                if removed {
+                    // Without a screen ID: the workspace's screens changed, and
+                    // a client reads them again instead of a screen that is gone.
+                    state
+                        .client_state
+                        .notify_tx
+                        .send(&ServerEvent::mux_nudge("session_metadata".into(), None));
                 }
             }
         }

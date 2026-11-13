@@ -84,6 +84,35 @@ impl WindowWorkspace {
         Ok(())
     }
 
+    /// A shown Screen `kept` without panes, as a service reports one it kept
+    /// after its last pane closed: of the local source, or of a ready host.
+    #[doc(hidden)]
+    pub fn ui_test_empty_screen_fixture(
+        &mut self,
+        remote_target: Option<&str>,
+    ) -> io::Result<ScreenKey> {
+        let key = self
+            .ui_test_screen_order_fixture(&[("kept", "Kept")], remote_target)?
+            .remove(0);
+        {
+            let mut source = self
+                .source_mut(key.source_id())
+                .ok_or_else(|| invalid("fixture source missing"))?;
+            let connection = source.connection_id();
+            source.apply_snapshot(
+                connection,
+                &json!({"type":"mux.screen_snapshot","screen":{
+                    "id":"kept","revision":2,
+                    "root":{"type":"slot","id":"slot","paneIds":[]},
+                    "panes":{},
+                    "sessions":{}
+                }}),
+            )?;
+        }
+        self.select(self.lifecycle_token(), &key)?;
+        Ok(key)
+    }
+
     /// Ordered canonical catalogs for production Drawer interaction tests.
     #[doc(hidden)]
     pub fn ui_test_screen_order_fixture(

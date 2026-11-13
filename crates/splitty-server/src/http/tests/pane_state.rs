@@ -6,7 +6,7 @@ use splitty_core::{
 };
 
 #[tokio::test]
-async fn unattended_exit_uses_the_host_policy_and_keeps_empty_screens() {
+async fn unattended_exit_uses_the_host_policy_and_removes_an_emptied_screen() {
     if !pty_available() {
         return;
     }
@@ -69,16 +69,27 @@ async fn unattended_exit_uses_the_host_policy_and_keeps_empty_screens() {
                 .contains_key(&"pane".into()),
             "final-output grace"
         );
+        let (event_sender, mut events) = crate::client_session::sender::ClientSender::channel();
+        let _subscription = app.client_state.notify_tx.subscribe(Arc::new(event_sender));
         observer
             .refresh(&app.service, now + Duration::from_secs(4))
             .await;
-        let screen = app
-            .mux_store
-            .get_screen(&"moved".into())
-            .expect("empty screen remains");
-        assert_eq!(screen.panes.is_empty(), removed, "{policy}/{code}");
+        let screen = app.mux_store.get_screen(&"moved".into());
+        assert_eq!(screen.is_none(), removed, "{policy}/{code}");
         assert_eq!(backend.get(sid.as_str()).is_none(), removed);
-        if !removed {
+        // Clients learn of the removed screen by a nudge without a screen ID.
+        let mut workspace_nudges = 0;
+        while let Ok(event) = events.try_recv() {
+            let crate::client_session::Message::Text(text) = &event.value else {
+                panic!("text event");
+            };
+            let event: serde_json::Value = serde_json::from_str(text).expect("event");
+            if event["type"] == "mux.nudge" && event.get("screenId").is_none() {
+                workspace_nudges += 1;
+            }
+        }
+        assert_eq!(workspace_nudges, usize::from(removed), "{policy}/{code}");
+        if let Some(screen) = screen {
             assert_eq!(screen.sessions[&sid].status, SessionStatus::Exited);
             assert_eq!(screen.sessions[&sid].exit_code, Some(code));
             assert!(!screen.sessions[&sid].busy);

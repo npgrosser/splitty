@@ -640,8 +640,14 @@ Typed lifecycle operations create, rename, activate and close Screens. Typed
 `ScreenOp`s request splits, tabs, pane closure and split resizing, followed by an
 explicit screen snapshot because a successful op does not nudge its own connection.
 Tab selection is window-local and also persisted through `select_tab` on servers
-advertising `tab-select-v1`. An empty Screen can receive a new terminal under its
-existing ID and name; closing the final Screen leaves an explicit empty workspace.
+advertising `tab-select-v1`. The server removes a Screen with its last pane, so the
+Screen leaves the window through the catalog like a closed one. A service of an
+earlier version keeps it without panes: once the close of a pane the window
+requested is confirmed and the snapshot lists no pane, the source sends
+`close_screen`. A Screen without panes that the window only observes stays and can
+receive a new terminal under its existing ID and name, on a host as well. A window
+without any Screen shows an explicit empty workspace with one action that creates
+a Screen.
 Shared admission counts all attached and pending terminal routes across Screens,
 with separate catalog retention bounds. Authoritative removal retires only that
 Screen's routes and entities. Focus restoration is tied to navigation or terminal
@@ -984,7 +990,7 @@ The reader thread holds its own descriptor of the PTY master, so `close` hangs u
 
 The service owns an observer (`service::pane_state`) for all mux sessions, including screens with no attached client. It samples process and OSC information every half second and dispatches trusted `UpdateSessionMetadata` facts through the pure reducer. The session ID locates the current screen, so pane moves do not leave stale titles or close the former screen's pane. Session snapshots carry `displayTitle` and `busy`; ordinary pane titles follow the display title, while managed job labels and lifecycle records remain owned by the job runtime. Busy describes a known foreground process other than the original shell, and clears at exit. When a session's busy state changes to not busy, the observer tells the session, which ends its `working`, `blocked` and `idle` program status records: an agent killed without clearing its record leaves no block behind, also in a shell that marks no prompts. `TitleInfo::display_title` applies one OSC/process/shell/home-directory display policy to snapshots and per-connection title events, removes control and bidirectional formatting characters and bounds the title to 500 characters. CLI listing cells also replace controls in cwd and other fields before printing them.
 
-Ordinary mux operations and observer updates share the effect runner's publication gate: dispatch, effects and spawn announcements complete before metadata can nudge a client. The observer applies the current host's `close_on_exit` setting after a three-second final-output grace (longer than the session stream's two-second drain bound), using normal close effects. Managed jobs are excluded and empty screens remain. The observer holds only weak ownership of the service between ticks.
+Ordinary mux operations and observer updates share the effect runner's publication gate: dispatch, effects and spawn announcements complete before metadata can nudge a client. The observer applies the current host's `close_on_exit` setting after a three-second final-output grace (longer than the session stream's two-second drain bound), using normal close effects. Managed jobs are excluded. A screen whose last pane closes, by an op or by this policy, is removed in the same reducer step (`remove_screen_without_panes`); a floating, viewer or job pane keeps its screen. After a removal by the observer, clients get a nudge without a screen ID. The observer holds only weak ownership of the service between ticks.
 
 The `serverDerivedPaneState` welcome capability gates the web client's title and busy consumption, server ownership of exit closure and omission of unspecified launch overrides. Older hosts retain client derivation and exit handling. The reducer names omitted new screen names with the first unused `Screen N`, leaving explicit names and retained empty-screen names intact.
 

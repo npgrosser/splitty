@@ -39,6 +39,20 @@ pub(crate) fn fixture() -> (Runtime, PathBuf) {
 pub(crate) fn fixture_with_connector(
     connector: Box<dyn splitty_server::hub::Connector>,
 ) -> (Runtime, PathBuf) {
+    fixture_with(connector, Store::new())
+}
+
+/// A service that starts with `workspace`, as one that restored it.
+pub(crate) fn fixture_with_workspace(
+    workspace: splitty_core::mux::WorkspaceState,
+) -> (Runtime, PathBuf) {
+    fixture_with(Box::new(SshConnector), Store::with_state(workspace))
+}
+
+fn fixture_with(
+    connector: Box<dyn splitty_server::hub::Connector>,
+    store: Store,
+) -> (Runtime, PathBuf) {
     let path = std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4()));
     let mut config = HomeConfig::default();
     config.appearance.theme_mode = "auto".into();
@@ -51,7 +65,7 @@ pub(crate) fn fixture_with_connector(
         profiles.clone(),
         Arc::new(splitty_core::pty::terminal::LocalTerminals),
     ));
-    let store = Arc::new(Store::new());
+    let store = Arc::new(store);
     let dispatcher = Arc::new(Dispatcher::new(pty.clone()));
     let effects = Arc::new(EffectRunner::new(pty.clone()));
     let hub = Arc::new(Hub::new(connector, path.clone(), None));

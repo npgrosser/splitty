@@ -3,6 +3,7 @@ use gpui_kit::base::FocusTrapElement as _;
 mod chrome;
 mod drawer;
 mod drawer_ports;
+mod empty_page;
 mod file_transfer;
 mod floating;
 mod host_drag;
@@ -436,18 +437,15 @@ fn layout_node_by_id<'a>(node: &'a LayoutNode, id: &str) -> Option<&'a LayoutNod
     }
 }
 
-/// A tab narrower than this is marked whole, as in dockview.
-const TAB_HALF_MARK_MIN: f32 = 100.;
-
-/// The tab under `position` in a tab strip whose visible part is `viewport`,
-/// and the area to mark: the half toward the pointer on a wide tab, otherwise
-/// the whole tab, clipped to the strip.
+/// The index a tab dropped at `position` is inserted at, in a tab strip whose
+/// visible part is `viewport`, and the area to mark: the half toward the
+/// pointer of the tab under it, whatever its width, clipped to the strip. The
+/// left half inserts before that tab, the right half after it.
 fn tab_drop(
     viewport: Bounds<Pixels>,
     position: Point<Pixels>,
     count: usize,
     offset_x: Pixels,
-    scale: f32,
     mut bounds_for: impl FnMut(usize) -> Option<Bounds<Pixels>>,
 ) -> Option<(usize, Bounds<Pixels>)> {
     if !viewport.contains(&position) {
@@ -460,20 +458,16 @@ fn tab_drop(
         if position.x < left || position.x >= right {
             return None;
         }
-        let (left, right) = if tab.size.width >= px(TAB_HALF_MARK_MIN * scale) {
-            let middle = left + tab.size.width / 2.;
-            if position.x < middle {
-                (left, middle)
-            } else {
-                (middle, right)
-            }
+        let middle = left + tab.size.width / 2.;
+        let (insert, left, right) = if position.x < middle {
+            (index, left, middle)
         } else {
-            (left, right)
+            (index + 1, middle, right)
         };
         let left = left.max(viewport.left());
         let right = right.min(viewport.right());
         Some((
-            index,
+            insert,
             Bounds::new(
                 point(left, viewport.top()),
                 size(right - left, viewport.size.height),
@@ -482,20 +476,19 @@ fn tab_drop(
     })
 }
 
-/// The tab a dropped tab is placed before when dropped on the tab at
-/// `hovered`: as in dockview, which removes a moved tab before inserting it
-/// at the hovered index, a tab moved right within its group lands after it.
+/// The tab a dropped tab is placed before when inserted at index `insert` of
+/// its target group: the tab at that index, skipping the dragged tab itself,
+/// or none when it lands last.
 fn tab_drop_before<'a>(
     pane_ids: &'a [impl AsRef<str>],
-    hovered: usize,
+    insert: usize,
     dragged: &str,
 ) -> Option<&'a str> {
-    let source = pane_ids.iter().position(|pane| pane.as_ref() == dragged);
-    let index = match source {
-        Some(source) if source < hovered => hovered + 1,
-        _ => hovered,
-    };
-    pane_ids.get(index).map(AsRef::as_ref)
+    pane_ids
+        .iter()
+        .skip(insert)
+        .map(AsRef::as_ref)
+        .find(|pane| *pane != dragged)
 }
 
 /// A group's content area below its tab bar.
@@ -1895,6 +1888,33 @@ impl Workspace {
                 cx.notify();
             }
         }
+    }
+    /// The page of a window without any Screen, local or of a host.
+    fn render_no_screens_page(&self, cx: &mut Context<Self>) -> Div {
+        self.render_empty_page(
+            empty_page::EmptyPage {
+                id: "no-screens-page",
+                icon: IconName::PanelsTopLeft,
+                title: "No Screens open",
+                detail: "Create a Screen to start a terminal.",
+                action_id: "new-screen-empty",
+                action: "New Screen",
+                shortcut: Shortcut::NewScreen,
+                disabled: self
+                    .local_model()
+                    .is_none_or(SourceWorkspace::has_pending_create),
+            },
+            cx,
+            |this, window, cx| {
+                if this
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.opened().is_empty())
+                {
+                    this.create_screen(window, cx);
+                }
+            },
+        )
     }
     fn create_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.close_drawer_panel(window, cx);
@@ -4611,14 +4631,13 @@ impl Workspace {
                     origin: point(marker.left() - bounds.left(), marker.top() - bounds.top()),
                     size: marker.size,
                 };
-                // As in dockview: over a tab, mark its left/right half and place before/after it;
+                // Over a tab, mark its left/right half and place before/after it;
                 // over the empty bar space, mark that space and place last.
                 let (before, marker) = match tab_drop(
                     scroll.handle.bounds(),
                     position,
                     pane_ids.len(),
                     scroll.handle.offset().x,
-                    self.appearance.zoom.window_scale(),
                     |index| scroll.handle.bounds_for_item(index),
                 ) {
                     Some((index, marker)) => (
@@ -6061,7 +6080,6 @@ impl Render for Workspace {
         } else {
             None
         };
-        let toolbar_source = self.lifecycle_token();
         let view = div()
             .relative()
             .size_full()
@@ -6162,72 +6180,33 @@ impl Render for Workspace {
             {
                 main_content = main_content.child(self.render_template_preview(preview, cx));
             } else if model.screens().is_empty() {
-                if self.is_remote_selected() {
-                    main_content = main_content.child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("Remote Screen content unavailable"),
-                    );
-                } else {
-                    main_content = main_content.child(
-                        div().flex_1().flex().items_center().justify_center().child(
-                            div()
-                                .id("new-screen-empty")
-                                .px_4()
-                                .py_2()
-                                .cursor_pointer()
-                                .bg(rgb(self.appearance.overlay))
-                                .child("New screen")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if toolbar_source.is_some_and(|source| {
-                                        this.lifecycle_token() == Some(source)
-                                            && this
-                                                .local_model()
-                                                .is_some_and(|model| model.screens().is_empty())
-                                    }) {
-                                        this.create_screen(window, cx);
-                                    }
-                                })),
-                        ),
-                    );
-                }
+                main_content = main_content.child(self.render_no_screens_page(cx));
             } else if let Some(screen) = model.snapshot() {
                 if screen.panes.is_empty() {
-                    main_content = main_content.child(
-                        div().flex_1().flex().items_center().justify_center().child(
-                            div()
-                                .id("new-terminal-empty")
-                                .px_4()
-                                .py_2()
-                                .cursor_pointer()
-                                .bg(rgb(self.appearance.overlay))
-                                .child("New terminal")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if toolbar_source.is_some_and(|source| {
-                                        this.lifecycle_token() == Some(source)
-                                            && this.selected_model().is_some_and(|model| {
-                                                model
-                                                    .snapshot()
-                                                    .is_some_and(|screen| screen.panes.is_empty())
-                                            })
-                                    }) {
-                                        this.tab(cx);
-                                    }
-                                })),
-                        ),
-                    );
-                } else if screen.panes.is_empty() {
-                    main_content = main_content.child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child("No terminals in this Screen"),
-                    );
+                    // Reached only with a service that keeps a Screen without
+                    // panes; the same action as the new-tab shortcut.
+                    main_content = main_content.child(self.render_empty_page(
+                        empty_page::EmptyPage {
+                            id: "empty-screen-page",
+                            icon: IconName::Terminal,
+                            title: "No terminals in this Screen",
+                            detail: "Start a terminal to use this Screen again.",
+                            action_id: "new-terminal-empty",
+                            action: "New Terminal",
+                            shortcut: Shortcut::NewTab,
+                            disabled: false,
+                        },
+                        cx,
+                        |this, _, cx| {
+                            if this.selected_model().is_some_and(|model| {
+                                model
+                                    .snapshot()
+                                    .is_some_and(|screen| screen.panes.is_empty())
+                            }) {
+                                this.tab(cx);
+                            }
+                        },
+                    ));
                 } else {
                     let entity = cx.entity();
                     let weak_move = entity.downgrade();
@@ -6395,6 +6374,10 @@ impl Render for Workspace {
                         "Loading local Screen…"
                     }));
             }
+        } else if self.model.as_ref().is_some_and(|window| {
+            window.opened().is_empty() && window.local_source().catalog_initialized()
+        }) {
+            main_content = main_content.child(self.render_no_screens_page(cx));
         } else {
             main_content = main_content.child(div().flex_1().p_4().child("Connecting…"));
         }
@@ -6759,19 +6742,12 @@ mod tests {
                 size(px(180.), px(97.)),
             ))
         };
-        // At 3x zoom the half-mark minimum is 300 px, so a 180 px tab is
-        // marked whole; a wider one is marked on the pointer's half.
+        // The mark is the pointer's half of the tab and as high as the
+        // scaled tab bar.
         assert_eq!(
-            super::tab_drop(viewport, point(px(530.), px(48.)), 3, px(0.), 3., tab),
+            super::tab_drop(viewport, point(px(530.), px(48.)), 3, px(0.), tab),
             Some((
-                2,
-                Bounds::new(point(px(360.), px(0.)), size(px(180.), px(97.)))
-            ))
-        );
-        assert_eq!(
-            super::tab_drop(viewport, point(px(530.), px(48.)), 3, px(0.), 1., tab),
-            Some((
-                2,
+                3,
                 Bounds::new(point(px(450.), px(0.)), size(px(90.), px(97.)))
             ))
         );
@@ -7465,24 +7441,25 @@ mod tests {
                 size(px(60.), px(32.)),
             ))
         };
-        // Narrow tabs are marked whole; the point beyond the last tab is the
-        // bar's empty space, not a tab.
+        // A narrow tab is marked on the pointer's half like a wide one, and
+        // the right half inserts after the tab; the
+        // point beyond the last tab is the bar's empty space, not a tab.
         for (x, expected_index, expected_left) in
-            [(10., 0, 0.), (40., 0, 0.), (90., 1, 60.), (170., 2, 120.)]
+            [(10., 0, 0.), (40., 1, 30.), (90., 2, 90.), (170., 3, 150.)]
         {
             assert_eq!(
-                super::tab_drop(viewport, point(px(x), px(16.)), 3, px(0.), 1., tab),
+                super::tab_drop(viewport, point(px(x), px(16.)), 3, px(0.), tab),
                 Some((
                     expected_index,
-                    Bounds::new(point(px(expected_left), px(0.)), size(px(60.), px(32.)))
+                    Bounds::new(point(px(expected_left), px(0.)), size(px(30.), px(32.)))
                 )),
             );
         }
         assert_eq!(
-            super::tab_drop(viewport, point(px(190.), px(16.)), 3, px(0.), 1., tab),
+            super::tab_drop(viewport, point(px(190.), px(16.)), 3, px(0.), tab),
             None
         );
-        // A scrolled strip clips the marked tab to its visible part.
+        // A scrolled strip clips the marked half to its visible part.
         let clipped = Bounds::new(point(px(100.), px(0.)), size(px(120.), px(32.)));
         let shifted = |index| {
             Some(Bounds::new(
@@ -7491,20 +7468,24 @@ mod tests {
             ))
         };
         assert_eq!(
-            super::tab_drop(clipped, point(px(105.), px(16.)), 3, px(-20.), 1., shifted),
+            super::tab_drop(clipped, point(px(105.), px(16.)), 3, px(-20.), shifted),
             Some((
-                0,
+                1,
                 Bounds::new(point(px(100.), px(0.)), size(px(20.), px(32.)))
             )),
         );
         assert_eq!(
-            super::tab_drop(clipped, point(px(99.), px(16.)), 3, px(-20.), 1., shifted),
+            super::tab_drop(clipped, point(px(99.), px(16.)), 3, px(-20.), shifted),
             None
         );
-        // Moving right within a group lands after the hovered tab.
+        // The marked half decides the place: the insertion index names the
+        // tab the dropped one lands before, never the dragged tab itself.
         let panes = ["a", "b", "c"];
-        assert_eq!(super::tab_drop_before(&panes, 1, "a"), Some("c"));
-        assert_eq!(super::tab_drop_before(&panes, 2, "a"), None);
+        assert_eq!(super::tab_drop_before(&panes, 1, "a"), Some("b"));
+        assert_eq!(super::tab_drop_before(&panes, 2, "a"), Some("c"));
+        assert_eq!(super::tab_drop_before(&panes, 3, "a"), None);
+        assert_eq!(super::tab_drop_before(&panes, 0, "a"), Some("b"));
+        assert_eq!(super::tab_drop_before(&panes, 2, "c"), None);
         assert_eq!(super::tab_drop_before(&panes, 0, "c"), Some("a"));
         assert_eq!(super::tab_drop_before(&panes, 1, "other"), Some("b"));
         let slot = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(120.)));

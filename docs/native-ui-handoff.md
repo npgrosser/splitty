@@ -59,6 +59,17 @@ Keep temporary fixture paths short enough for Unix sockets.
   resize, a reset, a scroll or selection in the view, a search query, or one
   second after it began (`SYNCHRONIZED_UPDATE_TIMEOUT` in `terminal.rs`).
 
+- Closing the last pane of a Screen removes the Screen on its server (mux
+  reducer, local and host alike); the window drops it through the catalog and
+  shows another Screen. For a service of an earlier version, which keeps the
+  Screen without panes, `SourceRuntime` sends `close_screen` after the close
+  of a pane the window requested settles (`screen_ran_empty`). Two centered
+  pages share `workspace/empty_page.rs`: a window without any Screen offers
+  "New Screen", and a Screen without panes that the window only observes (a
+  process exited on such a service, or another client closed the pane) offers
+  "New terminal", which also works on a host Screen. Their look is covered by
+  view tests of structure only, not by a rendered image.
+
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec
 validation at that checkpoint; later feature work added to them. The Linux

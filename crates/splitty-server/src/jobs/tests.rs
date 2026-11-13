@@ -1011,13 +1011,12 @@ async fn closing_during_spawn_stops_the_late_process_without_resurrecting_the_pa
     f.backend.release.notify_one();
     stop.await.expect("stop task").expect("stopped");
     caller.await.expect("caller").expect("accepted attempt");
-    assert!(!f
+    // The job's pane was the last of its screen, which went with it.
+    assert!(f
         .jobs
         .store
         .get_screen(&job.screen_id)
-        .expect("screen")
-        .panes
-        .contains_key(&job.pane_id));
+        .is_none_or(|screen| !screen.panes.contains_key(&job.pane_id)));
     assert!(f
         .jobs
         .live(&job.job_id)

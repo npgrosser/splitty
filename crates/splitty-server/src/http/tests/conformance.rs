@@ -1686,16 +1686,24 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
             shell_profile_id: None,
         })
         .unwrap();
-    state
-        .mux_store
-        .dispatch_screen(
-            &"empty".into(),
-            ScreenOp::ClosePane {
-                pane_id: "gone".into(),
-                resulting_sizes: None,
-            },
-        )
-        .unwrap();
+    // A screen without a terminal: only a viewer pane is left on it.
+    let viewer: ScreenOp = serde_json::from_value(json!({
+        "type": "open_viewer", "paneId": "gone", "newPaneId": "viewer",
+        "source": {"kind": "file", "path": "/project/PLAN.md"},
+    }))
+    .unwrap();
+    for op in [
+        viewer,
+        ScreenOp::ClosePane {
+            pane_id: "gone".into(),
+            resulting_sizes: None,
+        },
+    ] {
+        state
+            .mux_store
+            .dispatch_screen(&"empty".into(), op)
+            .unwrap();
+    }
     let browser = crate::http::build_router(state.clone());
     let owner = crate::http::build_control_router(state.clone());
     let (mut peer, task) = framed(&state, Role::Remote).await;

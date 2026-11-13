@@ -96,6 +96,7 @@ pub fn reduce_workspace(
                 screen.revision += 1;
             }
             let mut effects = vec![];
+            let closes = !close_panes.is_empty();
             for pane_id in close_panes {
                 let screen = state.screens.remove(&id).expect("located screen");
                 let (screen, more) = reduce_screen(
@@ -107,6 +108,9 @@ pub fn reduce_workspace(
                 )?;
                 state.screens.insert(id.clone(), screen);
                 effects.extend(more);
+            }
+            if closes {
+                effects.extend(remove_screen_without_panes(&mut state, &id));
             }
             Ok((state, effects))
         }
@@ -138,8 +142,12 @@ pub fn reduce_workspace(
                 .remove(&screen_id)
                 .ok_or_else(|| MuxError::ScreenNotFound(screen_id.clone()))?;
 
-            let (new_screen, effects) = reduce_screen(screen, op)?;
-            state.screens.insert(screen_id, new_screen);
+            let closes = matches!(op, ScreenOp::ClosePane { .. });
+            let (new_screen, mut effects) = reduce_screen(screen, op)?;
+            state.screens.insert(screen_id.clone(), new_screen);
+            if closes {
+                effects.extend(remove_screen_without_panes(&mut state, &screen_id));
+            }
             mark_closing_jobs(&mut state, &effects);
             Ok((state, effects))
         }
@@ -152,9 +160,10 @@ pub fn reduce_workspace(
         } => {
             let id = screen_id.unwrap_or_else(|| ScreenId::with_prefix("screen"));
 
-            // Re-creating an existing screen resets it to a single pane (a
-            // client whose screen ran empty asks for this). Keep its name and
-            // its place in the screen order. A screen that still has panes is
+            // Re-creating an existing screen without panes resets it to a
+            // single pane (a workspace saved before screens went with their
+            // last pane can hold one). Keep its name and its place in the
+            // screen order. A screen that still has panes is
             // never re-created: that dropped its sessions from the model while
             // their processes kept running, which is what a reloading client
             // used to do to every screen it had not seen a snapshot for yet.
@@ -231,27 +240,11 @@ pub fn reduce_workspace(
         }
 
         Op::CloseScreen { screen_id } => {
-            let screen = state
-                .screens
-                .remove(&screen_id)
-                .ok_or_else(|| MuxError::ScreenNotFound(screen_id.clone()))?;
-
-            let effects: Vec<Effect> = screen
-                .sessions
-                .keys()
-                .map(|id| Effect::KillSession {
-                    session_id: id.clone(),
-                })
-                .collect();
-
-            state.screen_order.retain(|id| id != &screen_id);
-            mark_closing_jobs(&mut state, &effects);
-
-            // Update active screen if needed
-            if state.active_screen_id.as_ref() == Some(&screen_id) {
-                state.active_screen_id = state.screen_order.first().cloned();
+            if !state.screens.contains_key(&screen_id) {
+                return Err(MuxError::ScreenNotFound(screen_id));
             }
-
+            let effects = remove_screen(&mut state, &screen_id);
+            mark_closing_jobs(&mut state, &effects);
             Ok((state, effects))
         }
 
@@ -489,6 +482,40 @@ fn reduce_move_pane_to_screen(
     }
     state.screens.insert(target_id, target);
     Ok((state, vec![]))
+}
+
+/// Take a screen out of the workspace, as `close_screen` does: its sessions
+/// end, it leaves the screen order, and the first remaining screen becomes
+/// active when it was the active one.
+fn remove_screen(state: &mut WorkspaceState, screen_id: &ScreenId) -> Vec<Effect> {
+    let Some(screen) = state.screens.remove(screen_id) else {
+        return vec![];
+    };
+    state.screen_order.retain(|id| id != screen_id);
+    if state.active_screen_id.as_ref() == Some(screen_id) {
+        state.active_screen_id = state.screen_order.first().cloned();
+    }
+    screen
+        .sessions
+        .keys()
+        .map(|id| Effect::KillSession {
+            session_id: id.clone(),
+        })
+        .collect()
+}
+
+/// A screen whose last pane was just closed goes with it. A pane of a
+/// floating entry, a viewer pane and a job's pane all count as panes.
+fn remove_screen_without_panes(state: &mut WorkspaceState, screen_id: &ScreenId) -> Vec<Effect> {
+    if state
+        .screens
+        .get(screen_id)
+        .is_some_and(|screen| screen.panes.is_empty())
+    {
+        remove_screen(state, screen_id)
+    } else {
+        vec![]
+    }
 }
 
 /// The first slot of a layout, depth first.
@@ -2501,6 +2528,83 @@ mod tests {
         assert!(matches!(new_state.root, LayoutNode::Slot { .. }));
     }
 
+    /// workspace-model, Closing a Pane (Close the last pane of a screen).
+    #[test]
+    fn closing_the_last_pane_of_a_screen_removes_the_screen() {
+        let close = |screen: &str, pane: &str| Op::ModifyScreen {
+            screen_id: ScreenId::from(screen),
+            op: ScreenOp::ClosePane {
+                pane_id: PaneId::from(pane),
+                resulting_sizes: None,
+            },
+        };
+        let store = two_screen_store();
+        store.dispatch(split_op("scr1", "p1", "p3")).unwrap();
+        assert_eq!(
+            store.get_workspace_state().active_screen_id,
+            Some(ScreenId::from("scr1"))
+        );
+
+        // A screen that keeps a pane stays.
+        store.dispatch(close("scr1", "p3")).unwrap();
+        assert!(store.get_screen(&ScreenId::from("scr1")).is_some());
+
+        let untouched = store.get_screen(&ScreenId::from("scr2")).unwrap();
+        let effects = store.dispatch(close("scr1", "p1")).unwrap();
+        assert!(
+            matches!(effects.as_slice(), [Effect::KillSession { .. }]),
+            "only the closed pane's session ends"
+        );
+        let state = store.get_workspace_state();
+        assert!(!state.screens.contains_key(&ScreenId::from("scr1")));
+        assert_eq!(state.screen_order, [ScreenId::from("scr2")]);
+        assert_eq!(state.active_screen_id, Some(ScreenId::from("scr2")));
+        let other = store.get_screen(&ScreenId::from("scr2")).unwrap();
+        assert_eq!(other.revision, untouched.revision);
+        assert_eq!(other.panes.len(), 1);
+
+        // The workspace's last screen goes the same way.
+        store.dispatch(close("scr2", "p2")).unwrap();
+        let state = store.get_workspace_state();
+        assert!(state.screens.is_empty());
+        assert!(state.screen_order.is_empty());
+        assert_eq!(state.active_screen_id, None);
+
+        // A rejected close removes nothing.
+        let store = two_screen_store();
+        assert!(store.dispatch(close("scr1", "absent")).is_err());
+        assert_eq!(store.get_workspace_state().screens.len(), 2);
+    }
+
+    /// workspace-model, Server Close On Exit (Unattended exit of the last pane).
+    #[test]
+    fn a_pane_closed_on_exit_takes_its_emptied_screen_along() {
+        let exit = |session: &SessionId| Op::UpdateSessionMetadata {
+            session_id: session.clone(),
+            display_title: "sh".into(),
+            cwd: "/work".into(),
+            busy: false,
+            exited: true,
+            exit_code: Some(0),
+            close: true,
+        };
+        let store = two_screen_store();
+        store.dispatch(split_op("scr1", "p1", "p3")).unwrap();
+        let session = |pane: &str| session_of(&store.get_workspace_state(), "scr1", pane).unwrap();
+        let (first, second) = (session("p1"), session("p3"));
+
+        store.dispatch(exit(&second)).unwrap();
+        let screen = store.get_screen(&ScreenId::from("scr1")).unwrap();
+        assert_eq!(screen.panes.len(), 1, "the other pane keeps the screen");
+
+        let effects = store.dispatch(exit(&first)).unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::KillSession { .. }]));
+        let state = store.get_workspace_state();
+        assert!(!state.screens.contains_key(&ScreenId::from("scr1")));
+        assert_eq!(state.screen_order, [ScreenId::from("scr2")]);
+        assert_eq!(state.active_screen_id, Some(ScreenId::from("scr2")));
+    }
+
     // ── resize_split tests ───
 
     #[test]
@@ -2583,7 +2687,8 @@ mod tests {
         .unwrap();
         let (mut state, _) = reduce_workspace(state, create("scr2", None, "p2")).unwrap();
 
-        // The screen runs empty: its last pane is closed.
+        // A screen without panes, as a workspace saved by an earlier version
+        // can hold it: the screen-level op alone leaves the screen in place.
         let screen = state.screens.remove(&ScreenId::from("scr1")).unwrap();
         let close = ScreenOp::ClosePane {
             pane_id: PaneId::from("p1"),
@@ -2593,7 +2698,7 @@ mod tests {
         assert!(screen.panes.is_empty());
         state.screens.insert(ScreenId::from("scr1"), screen);
 
-        // A client whose screen ran empty re-creates it around a fresh pane.
+        // A client re-creates the empty screen around a fresh pane.
         let (state, effects) = reduce_workspace(state, create("scr1", None, "p9")).unwrap();
 
         assert_eq!(
@@ -2823,22 +2928,36 @@ mod tests {
                 },
             })
             .unwrap();
-        // scr2's grid runs empty, keeping a bare root slot.
-        store
-            .dispatch(Op::ModifyScreen {
-                screen_id: ScreenId::from("scr2"),
-                op: ScreenOp::ClosePane {
-                    pane_id: PaneId::from("p2"),
-                    resulting_sizes: None,
-                },
-            })
-            .unwrap();
+        // scr2's grid runs empty, keeping a bare root slot: its other pane floats.
+        store.dispatch(split_op("scr2", "p2", "p4")).unwrap();
+        for op in [
+            ScreenOp::FloatPane {
+                pane_id: PaneId::from("p4"),
+                bounds: None,
+            },
+            ScreenOp::ClosePane {
+                pane_id: PaneId::from("p2"),
+                resulting_sizes: None,
+            },
+        ] {
+            store
+                .dispatch(Op::ModifyScreen {
+                    screen_id: ScreenId::from("scr2"),
+                    op,
+                })
+                .unwrap();
+        }
+        let emptied = store.get_workspace_state();
+        let grid = &emptied.screens[&ScreenId::from("scr2")];
+        assert_eq!(grid.root.count_panes(), 0);
+        assert_eq!(grid.floating.len(), 1, "a floating pane keeps its screen");
 
         store.dispatch(move_op("scr1", "p3", "scr2", None)).unwrap();
 
         let after = store.get_workspace_state();
         assert!(after.screens[&ScreenId::from("scr1")].floating.is_empty());
         let target = &after.screens[&ScreenId::from("scr2")];
+        assert_eq!(target.floating.len(), 1);
         assert!(matches!(
             &target.root,
             LayoutNode::Slot { pane_ids, .. } if pane_ids == &[PaneId::from("p3")]
@@ -4822,9 +4941,12 @@ mod tests {
             )
             .expect("viewer closed");
         assert!(effects.is_empty(), "no session to end");
-        let screen = store.get_screen(&scr1).expect("screen");
-        assert!(screen.panes.is_empty());
-        assert_eq!(shape(&screen.root), ["slot [] None"]);
+        // The viewer was the screen's last pane: the screen goes with it.
+        assert!(store.get_screen(&scr1).is_none());
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            [ScreenId::from("scr2")]
+        );
     }
 
     /// viewer-panes, Viewer Pane Lifetime (Moved to another screen),

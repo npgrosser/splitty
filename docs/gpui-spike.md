@@ -272,7 +272,7 @@ Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
 | Shortcut | Action |
 | --- | --- |
-| Mod+T | New tab (or terminal on an empty Screen) |
+| Mod+T | New tab (or terminal on a Screen without panes) |
 | Mod+D / Mod+Shift+D | Split right / below |
 | Mod+W | Close the focused pane |
 | Mod+M | Maximize or restore the focused tab group |
@@ -2189,8 +2189,9 @@ the web rule they match.
   within 10 px and are marked 20 px wide; a drop there places the pane beside
   all groups through the existing `MovePane` split target (the root, or the
   child a two-child root collapses into). Over a tab bar, the hovered tab is
-  marked (its pointer-side half from 100 px width) and the tab goes before it,
-  or after it when moved right within its group; the empty bar space appends.
+  marked on its pointer-side half, whatever its width, and the tab goes to that
+  side: before it on the left half, after it on the right; the empty bar space
+  appends.
   The dragged tab is drawn 30 px left of the pointer and 4 px below its tip.
 - **Menus:** the tab menu and the new-tab profile picker share the web
   client's context menu look. The tab menu offers Close Tab, Close Other Tabs,
@@ -2247,7 +2248,6 @@ Different by choice:
   the closes run one at a time and stop at the first failure.
 - Screen drag starts after 2 px (GPUI's threshold), shows the arrow cursor,
   and updates the Screen numbers when the service's order arrives.
-- Drop targets narrower than 100 px use the regular marker.
 - The floating group shadow uses GPUI's default instead of the theme's shadow
   color.
 - Icons are Kit's Lucide shapes.

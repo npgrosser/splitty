@@ -1291,6 +1291,22 @@ impl SourceRuntime {
                             terminated = model.as_ref().map(|source| source.screen_key(screen));
                         }
                     }
+                    if settled.is_ok() {
+                        if let (CloseTarget::Pane { screen, .. }, Some(model)) =
+                            (&close.target, &mut model)
+                        {
+                            // A service removes a Screen with its last pane. One
+                            // of an earlier version keeps it without panes, and
+                            // the window closes it there with a second operation.
+                            if model.screen_ran_empty(screen) {
+                                if let Err(error) = model.close_screen(&self.client, screen) {
+                                    out.push(Update::Status(format!(
+                                        "Empty Screen was not closed: {error}"
+                                    )));
+                                }
+                            }
+                        }
+                    }
                     let update = match settled {
                         Ok(()) => Update::CloseSettled {
                             source: close.source,

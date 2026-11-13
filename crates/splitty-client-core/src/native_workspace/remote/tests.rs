@@ -1645,3 +1645,425 @@ async fn a_scratchpad_save_on_a_remote_screen_reaches_its_host() {
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
 }
+
+/// A host served by `client`, with its Screen `screen` opened and shown in
+/// `window`. The host keeps its place in the window without a Screen.
+#[cfg(not(target_os = "windows"))]
+async fn opened_host_screen<'a>(
+    service: &'a OwnedService,
+    window: &mut WindowWorkspace,
+    client: Client,
+    screen: &str,
+) -> (Remotes<'a>, SourceId, SourceToken) {
+    let id = window
+        .admit_remote(window.lifecycle_token(), "close.test")
+        .unwrap();
+    window.test_bind_remote_client(id, &client);
+    let token = window.source(id).unwrap().source_token();
+    window.confirm_ready(token).unwrap();
+    let action = window.host(id).unwrap().action_target().clone();
+    let mut host = Host::new(service, action.clone()).unwrap();
+    host.setup = None;
+    host.source = Some(SourceRuntime::new(client, token));
+    let mut remotes = Remotes::new(service);
+    remotes.hosts.push(host);
+    pump_first_host(&mut remotes, window, |window, source| {
+        window
+            .source(id)
+            .unwrap()
+            .live_catalog()
+            .is_some_and(|catalog| catalog.len() == 1)
+            && !source.observation_pending(window)
+    })
+    .await;
+    let host = window.host_mut(&action).unwrap();
+    host.catalog = crate::workspace::CatalogState::Ready;
+    host.browsing = true;
+    let key = window.source(id).unwrap().screen_key(screen);
+    window.open_existing(token, &key).unwrap();
+    pump_first_host(&mut remotes, window, |window, source| {
+        window
+            .source(id)
+            .unwrap()
+            .screen(screen)
+            .is_some_and(|screen| screen.snapshot().is_some())
+            && !source.observation_pending(window)
+    })
+    .await;
+    (remotes, id, token)
+}
+
+/// The IDs of the Screens the service lists now.
+#[cfg(not(target_os = "windows"))]
+async fn listed_screens(client: &mut Client) -> Vec<String> {
+    client.request_workspace().unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let event = client.next_event().await.unwrap().unwrap();
+            if let Some(catalog) = event
+                .json()
+                .filter(|value| value["type"] == "mux.workspace_snapshot")
+            {
+                return catalog["screens"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|screen| screen["id"].as_str().unwrap().to_owned())
+                    .collect();
+            }
+        }
+    })
+    .await
+    .expect("the service lists its Screens")
+}
+
+/// Close `pane` of the host's shown Screen and drive the host until the
+/// close settled and the Screen left the window. `report` may replace an
+/// event of the host's service by what another service would have sent.
+#[cfg(not(target_os = "windows"))]
+async fn close_last_pane(
+    remotes: &mut Remotes<'_>,
+    window: &mut WindowWorkspace,
+    id: SourceId,
+    token: SourceToken,
+    screen: &str,
+    pane: &str,
+    report: impl Fn(&serde_json::Value) -> Option<serde_json::Value>,
+) {
+    let plan = window
+        .source(id)
+        .unwrap()
+        .assess_close(
+            1,
+            CloseTarget::Pane {
+                screen: screen.to_owned(),
+                pane: pane.to_owned(),
+            },
+        )
+        .unwrap();
+    let close = Command::new(
+        token,
+        CommandKind::RequestClose {
+            plan,
+            confirmed: true,
+        },
+    );
+    let effects = remotes.command(window, close).unwrap();
+    assert!(
+        matches!(effects.updates.as_slice(), [Update::CloseSubmitted { .. }]),
+        "a pane of a host's Screen closes through the remote command gate"
+    );
+    let mut settled = false;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            remotes.reconcile(window).unwrap();
+            if settled && window.source(id).unwrap().screens().is_empty() {
+                break;
+            }
+            let source = remotes.hosts[0].source.as_mut().expect("bound source");
+            source.reconcile(window).unwrap();
+            let event = source.client.next_event().await.unwrap().unwrap();
+            let event = match event.json().and_then(&report) {
+                Some(value) => Event::ui_test_json(event.connection_id, &value)
+                    .await
+                    .unwrap(),
+                None => event,
+            };
+            let effects = source.event(window, Box::new(event)).unwrap();
+            settled |= effects
+                .updates
+                .iter()
+                .any(|update| matches!(update, Update::CloseSettled { .. }));
+        }
+    })
+    .await
+    .expect("the emptied Screen leaves the window");
+}
+
+/// workspace-model, Closing a Pane (Close the last pane of a screen), seen
+/// from a window: the host removes the Screen with its last pane, the Screen
+/// leaves the window, and the window shows another Screen.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn closing_the_last_pane_of_a_host_screen_takes_the_screen_out_of_the_window() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let mut local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let ids = client.create_screen("Host screen").unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let other = window
+        .ui_test_screen_order_fixture(&[("local", "Local")], None)
+        .unwrap()
+        .remove(0);
+    let (mut remotes, id, token) =
+        opened_host_screen(&service, &mut window, client, &ids.screen_id).await;
+    assert_eq!(
+        window.shown_key(),
+        Some(window.source(id).unwrap().screen_key(&ids.screen_id))
+    );
+
+    close_last_pane(
+        &mut remotes,
+        &mut window,
+        id,
+        token,
+        &ids.screen_id,
+        &ids.pane_id,
+        |_| None,
+    )
+    .await;
+
+    assert_eq!(
+        window.shown_key(),
+        Some(other),
+        "the window shows a Screen that still exists"
+    );
+    assert!(
+        listed_screens(&mut local).await.is_empty(),
+        "the host removed the Screen with its last pane"
+    );
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// A host whose service keeps a Screen without panes, as an earlier version
+/// does: once the close of the last pane settled, the window closes the
+/// Screen there with `close_screen`. The fixture's service removes an
+/// emptied Screen itself, so the Screen keeps a second pane the window is
+/// not told about; its end shows that `close_screen` reached the host.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn a_host_that_keeps_an_emptied_screen_gets_it_closed() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let mut local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let ids = client.create_screen("Host screen").unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let (mut remotes, id, token) =
+        opened_host_screen(&service, &mut window, client, &ids.screen_id).await;
+    let key = window.source(id).unwrap().screen_key(&ids.screen_id);
+    let split = Command::new(
+        token,
+        CommandKind::Split {
+            screen: key,
+            pane: ids.pane_id.clone(),
+            axis: Axis::Horizontal,
+        },
+    );
+    assert!(remotes
+        .command(&mut window, split)
+        .unwrap()
+        .updates
+        .is_empty());
+    let screen_id = ids.screen_id.clone();
+    pump_first_host(&mut remotes, &mut window, |window, source| {
+        window
+            .source(id)
+            .unwrap()
+            .screen(&screen_id)
+            .and_then(|screen| screen.snapshot())
+            .is_some_and(|snapshot| snapshot.sessions.len() == 2)
+            && !source.observation_pending(window)
+    })
+    .await;
+
+    let reported = ids.screen_id.clone();
+    close_last_pane(
+        &mut remotes,
+        &mut window,
+        id,
+        token,
+        &ids.screen_id,
+        &ids.pane_id,
+        move |event| {
+            (event["type"] == "mux.screen_snapshot" && event["screen"]["id"] == reported.as_str())
+                .then(|| {
+                    let mut event = event.clone();
+                    let screen = &mut event["screen"];
+                    screen["panes"] = serde_json::json!({});
+                    screen["sessions"] = serde_json::json!({});
+                    screen["floating"] = serde_json::json!([]);
+                    screen["root"] =
+                        serde_json::json!({"type": "slot", "id": "root", "paneIds": []});
+                    event
+                })
+        },
+    )
+    .await;
+
+    assert!(
+        listed_screens(&mut local).await.is_empty(),
+        "the window closed the Screen its host had kept"
+    );
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// A Screen without panes on a host, as a host of an earlier version keeps
+/// it: a new terminal passes the worker's source admission and the remote
+/// command gate, and the host starts it in that Screen, which keeps its name.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn an_empty_host_screen_takes_a_new_terminal() {
+    use splitty_core::{
+        ids::ScreenId,
+        mux::{ScreenState, WorkspaceState},
+    };
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let mut workspace = WorkspaceState::default();
+    let kept = ScreenId::from("kept");
+    let mut screen = ScreenState::new(kept.clone(), Some("Kept".into()));
+    screen.revision = 1;
+    workspace.screens.insert(kept.clone(), screen);
+    workspace.screen_order.push(kept.clone());
+    workspace.active_screen_id = Some(kept);
+    let (runtime, path) = crate::appearance::local::tests::fixture_with_workspace(workspace);
+    let service: OwnedService = crate::EmbeddedService::from_runtime(runtime).into();
+    let local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let (mut remotes, id, token) = opened_host_screen(&service, &mut window, client, "kept").await;
+    assert!(window.source(id).unwrap().screen_ran_empty("kept"));
+
+    let command = Command::new(
+        token,
+        CommandKind::NewTerminal {
+            screen: "kept".into(),
+            connection: token.connection_id(),
+        },
+    );
+    crate::native_workspace::validate_worker_command_source(&window, &command)
+        .expect("worker ingress admits a new terminal on a host's Screen");
+    let effects = remotes.command(&mut window, command).unwrap();
+    assert!(effects.updates.is_empty(), "the terminal is not rejected");
+    assert!(
+        window.host(id).unwrap().diagnostic().is_none(),
+        "the terminal leaves no rejection on the host"
+    );
+    pump_first_host(&mut remotes, &mut window, |window, source| {
+        window
+            .source(id)
+            .unwrap()
+            .screen("kept")
+            .and_then(|screen| screen.snapshot())
+            .is_some_and(|snapshot| snapshot.panes.len() == 1 && snapshot.sessions.len() == 1)
+            && !source.observation_pending(window)
+    })
+    .await;
+    let source = window.source(id).unwrap();
+    assert_eq!(source.screens().len(), 1);
+    assert_eq!(source.screens()[0].name.as_deref(), Some("Kept"));
+
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+/// mux-protocol, Exact Tab Placement, for a host's Screen: the host's
+/// welcome announces `tab-placement-v1` to the window as the local service's
+/// does, and a tab dropped before another one is placed there on the host.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn a_tab_of_a_host_screen_is_placed_exactly() {
+    use splitty_core::mux::LayoutNode;
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let ids = client.create_screen("Host screen").unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let (mut remotes, id, token) =
+        opened_host_screen(&service, &mut window, client, &ids.screen_id).await;
+    assert!(
+        window.source(id).unwrap().tab_placement_supported(),
+        "the host's welcome reached the window's source"
+    );
+    let key = window.source(id).unwrap().screen_key(&ids.screen_id);
+    let tab = Command::new(
+        token,
+        CommandKind::Tab {
+            screen: key,
+            pane: ids.pane_id.clone(),
+        },
+    );
+    assert!(remotes
+        .command(&mut window, tab)
+        .unwrap()
+        .updates
+        .is_empty());
+    let screen_id = ids.screen_id.clone();
+    let tabs = |window: &WindowWorkspace| -> Option<(String, Vec<String>)> {
+        let screen = window.source(id)?.screen(&screen_id)?.server_snapshot()?;
+        match &screen.root {
+            LayoutNode::Slot { id, pane_ids, .. } => Some((
+                id.to_string(),
+                pane_ids.iter().map(ToString::to_string).collect(),
+            )),
+            LayoutNode::Split { .. } => None,
+        }
+    };
+    pump_first_host(&mut remotes, &mut window, |window, source| {
+        tabs(window).is_some_and(|(_, panes)| panes.len() == 2)
+            && window
+                .source(id)
+                .unwrap()
+                .screen(&screen_id)
+                .and_then(|screen| screen.snapshot())
+                .is_some_and(|snapshot| snapshot.sessions.len() == 2)
+            && !source.observation_pending(window)
+    })
+    .await;
+    let (slot, panes) = tabs(&window).unwrap();
+    assert_eq!(panes[0], ids.pane_id);
+    let source = window.source(id).unwrap();
+    let drag = source.capture_drag(&panes[1]).expect("a tab to drag");
+    assert!(source.can_place_tab(&drag, &slot, Some(&panes[0])));
+
+    let place = Command::new(
+        token,
+        CommandKind::PlaceTab {
+            drag,
+            target: slot,
+            before: Some(panes[0].clone()),
+        },
+    );
+    assert!(remotes
+        .command(&mut window, place)
+        .unwrap()
+        .updates
+        .is_empty());
+    let moved = [panes[1].clone(), panes[0].clone()];
+    pump_first_host(&mut remotes, &mut window, |window, _| {
+        !window.source(id).unwrap().placement_pending()
+            && tabs(window).is_some_and(|(_, panes)| panes == moved)
+    })
+    .await;
+
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

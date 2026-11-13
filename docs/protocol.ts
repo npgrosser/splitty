@@ -1165,6 +1165,13 @@ interface SplitPaneOp {
   shellProfileId?: string;
 }
 
+/**
+ * Closing the last pane of a screen (root layout and floating entries, any
+ * pane kind) removes the screen with the same op, as close_screen does. A
+ * close_screen for it afterwards fails like one for any unknown screen. Servers
+ * of earlier versions keep the screen without panes; create_screen with its ID
+ * fills it again.
+ */
 interface ClosePaneOp {
   type: "close_pane";
   paneId: string;
@@ -3124,6 +3131,8 @@ interface HubCatalogObservation {
 /**
  * serverDerivedPaneState: ordinary terminal panes follow the owning server's
  * terminal.closeOnExit policy (always / graceful / never); managed jobs remain.
+ * A screen whose last pane closes this way is removed with it, announced by a
+ * mux.nudge without screenId.
  * Clients omit cwd/profile for inherited splits/tabs unless explicitly selected.
  * Replay bytes before attached are filtered at the server for terminal report
  * queries and clipboard operations. Live bytes and trailing incomplete sequences

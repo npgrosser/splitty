@@ -10,6 +10,7 @@ import {
   type ViewerPanelParams,
 } from "./viewer/panel.ts";
 import { arrangementSlots } from "../layout/arrangement.ts";
+import { getScreens } from "../stores/screens.svelte.ts";
 
 /**
  * Add a terminal pane to the screen whose layout is `api` and register it with
@@ -105,8 +106,11 @@ export function addTerminalPane(
   if (muxManaged && !options?.skipMuxNotify) {
     if (!refPaneId) {
       // First pane of an otherwise empty screen (watermark) — there is no pane
-      // to split off, so re-create the screen around this one.
-      binding.sendOp(createScreenOp(binding.wireId, undefined, id, shellProfileId));
+      // to split off, so re-create the screen around this one. A server that
+      // removed the screen with its last pane creates it anew, under the name
+      // it has in this window.
+      const name = getScreens().find((screen) => screen.id === binding.key)?.name;
+      binding.sendOp(createScreenOp(binding.wireId, name, id, shellProfileId));
     } else if (direction) {
       binding.sendOp(splitOp(refPaneId, id, direction, dir, shellProfileId));
     } else {
