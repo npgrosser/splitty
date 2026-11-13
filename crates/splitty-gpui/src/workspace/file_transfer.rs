@@ -6,6 +6,7 @@ use super::scratchpad::ScratchpadSessionKey;
 use super::*;
 use crate::terminal::PastedFile;
 use gpui_kit::component::input::TextareaState;
+use splitty_client_core::annotations::SentEntry;
 use splitty_client_core::native_workspace::{
     file_route, preferred_editor, quote_path, AppEditor, EditorOutcome, EditorUpdate, FileRoute,
     FileUpdate, PathKind, StoreItem,
@@ -65,6 +66,27 @@ pub(super) enum StoreTarget {
         key: ScratchpadSessionKey,
         input: WeakEntity<TextareaState>,
     },
+    /// A viewer pane's review stored as a file for the terminal `target`:
+    /// its entries are handed over once the path is inserted.
+    Review {
+        route: TerminalToken,
+        terminal: WeakEntity<Terminal>,
+        viewer: PaneKey,
+        target: PaneKey,
+        entries: Vec<SentEntry>,
+        /// The user asked for a paste the program would have run line by line.
+        instead_of_paste: bool,
+    },
+}
+
+impl StoreTarget {
+    /// The title of the notice that the store failed.
+    fn failure_title(&self) -> &'static str {
+        match self {
+            Self::Review { .. } => "The review was not sent",
+            Self::Terminal { .. } | Self::Scratchpad { .. } => "Nothing was pasted",
+        }
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -381,14 +403,14 @@ impl Workspace {
             .file_stores
             .iter()
             .filter(|(_, (source, _))| gone(*source))
-            .map(|(id, (source, _))| (*id, *source))
+            .map(|(id, (source, target))| (*id, *source, target.failure_title()))
             .collect();
-        for (request_id, source) in lost {
+        for (request_id, source, title) in lost {
             self.file_stores.remove(&request_id);
             self.file_failure(
                 format!("store-{request_id}"),
                 source,
-                "Nothing was pasted",
+                title,
                 "The connection was lost.".into(),
                 cx,
             );
@@ -690,7 +712,7 @@ impl Workspace {
             Err(error) => self.file_failure(
                 format!("store-{request_id}"),
                 source,
-                "Nothing was pasted",
+                target.failure_title(),
                 format!("The paste was not sent: {error}"),
                 cx,
             ),
@@ -856,24 +878,51 @@ impl Workspace {
                 if paths.is_empty() || self.execution_token(source.source_id()) != Some(source) {
                     return;
                 }
+                let text = paths
+                    .iter()
+                    .map(|path| quote_path(path))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let accepts = |this: &Self, route: &TerminalToken| {
+                    this.model
+                        .as_ref()
+                        .is_some_and(|model| model.accepts_terminal(route))
+                };
                 match target {
                     StoreTarget::Terminal { route, terminal } => {
-                        if !self
-                            .model
-                            .as_ref()
-                            .is_some_and(|model| model.accepts_terminal(&route))
-                        {
+                        if !accepts(self, &route) {
                             return;
                         }
-                        let text = paths
-                            .iter()
-                            .map(|path| quote_path(path))
-                            .collect::<Vec<_>>()
-                            .join(" ");
                         let _ = terminal.update(cx, |terminal, cx| {
                             terminal.paste_text(&text);
                             cx.notify();
                         });
+                    }
+                    StoreTarget::Review {
+                        route,
+                        terminal,
+                        viewer,
+                        target,
+                        entries,
+                        instead_of_paste,
+                    } => {
+                        let pasted = accepts(self, &route)
+                            && terminal
+                                .update(cx, |terminal, cx| {
+                                    terminal.paste_text(&text);
+                                    cx.notify();
+                                })
+                                .is_ok();
+                        if !pasted {
+                            self.status = "The review was not sent: its terminal is gone".into();
+                            return cx.notify();
+                        }
+                        let status = if instead_of_paste {
+                            "The review went as a file: the terminal's program takes no bracketed paste, so its path is at the prompt"
+                        } else {
+                            "The review is stored as a file; its path is at the prompt"
+                        };
+                        self.viewer_review_sent(viewer, target, entries, status, window, cx);
                     }
                     StoreTarget::Scratchpad { key, input } => {
                         if !self.scratchpads.editors.contains_key(&key) {
@@ -890,11 +939,11 @@ impl Workspace {
                 reason,
                 ..
             } => {
-                if self.file_stores.remove(&request_id).is_some() {
+                if let Some((_, target)) = self.file_stores.remove(&request_id) {
                     self.file_failure(
                         format!("store-{request_id}"),
                         source,
-                        "Nothing was pasted",
+                        target.failure_title(),
                         reason,
                         cx,
                     );
@@ -1227,7 +1276,7 @@ mod tests {
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod view_tests {
-    use super::{FileUpdate, NoticeKind, StoreItem};
+    use super::{FileUpdate, NoticeKind, StoreItem, StoreTarget};
     use crate::workspace::chrome::view_tests::with_view;
     use crate::workspace::Command;
     use gpui_kit::{px, size, Modifiers, MouseButton, VisualTestContext};
@@ -1543,6 +1592,127 @@ mod view_tests {
             window.update(|window, cx| window.draw(cx).clear(cx));
             assert!(window.debug_bounds("file-notice").is_none());
             assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    /// viewer-annotations, Handing A Review To A Terminal: a review stored
+    /// as a file is handed over once its path is in the terminal, and a
+    /// failed store hands nothing over.
+    #[test]
+    fn a_review_sent_as_a_file_is_handed_over_only_once_it_is_stored() {
+        use splitty_client_core::annotations::SentEntry;
+        use splitty_client_core::native_workspace::AnnotationOp;
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let (_, route) = model.ui_test_remote_viewer_fixture("vm.test").unwrap();
+            let source = route.source_token();
+            let (commands, mut receiver) = mpsc::channel(32);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.reconcile(model, window, cx);
+                    workspace.ensure_pane(
+                        route.clone(),
+                        workspace.current_screen_key().expect("shown remote Screen"),
+                        0,
+                        crate::terminal::LinkOrigin::Remote,
+                        window,
+                        cx,
+                    );
+                })
+            });
+            while receiver.try_recv().is_ok() {}
+            let entry = SentEntry {
+                id: "ann-1".into(),
+                kind: None,
+                body: Some("Split step one.".into()),
+                replacement: None,
+                target: None,
+            };
+            let send = |window: &mut VisualTestContext| {
+                window.update(|_, cx| {
+                    view.update(cx, |workspace, cx| {
+                        let model = workspace.model.as_ref().unwrap();
+                        let viewer = model.source(source.source_id()).unwrap().pane_key("v1");
+                        let terminal = workspace.panes[&route.pane_key()].terminal.downgrade();
+                        workspace.store_pasted_files(
+                            source,
+                            vec![crate::terminal::PastedFile::Image {
+                                extension: "md",
+                                bytes: b"# Review\n".to_vec(),
+                            }],
+                            StoreTarget::Review {
+                                route: route.clone(),
+                                terminal,
+                                viewer,
+                                target: route.pane_key(),
+                                entries: vec![entry.clone()],
+                                instead_of_paste: true,
+                            },
+                            cx,
+                        );
+                    })
+                });
+            };
+            let stored =
+                |receiver: &mut mpsc::Receiver<crate::workspace::WorkerCommand>| match receiver
+                    .try_recv()
+                    .expect("the review is stored")
+                    .kind()
+                {
+                    Command::StoreFiles { request_id, .. } => *request_id,
+                    _ => panic!("a store request"),
+                };
+
+            send(window);
+            let request_id = stored(&mut receiver);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.file_update(
+                        FileUpdate::StoreFailed {
+                            source,
+                            request_id,
+                            reason: "disk full".into(),
+                            needs_update: false,
+                        },
+                        window,
+                        cx,
+                    )
+                })
+            });
+            assert!(
+                receiver.try_recv().is_err(),
+                "a failed store hands nothing over"
+            );
+
+            send(window);
+            let request_id = stored(&mut receiver);
+            assert!(receiver.try_recv().is_err(), "nothing is handed over yet");
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.file_update(
+                        FileUpdate::Stored {
+                            source,
+                            request_id,
+                            paths: vec!["/tmp/paste-review.md".into()],
+                        },
+                        window,
+                        cx,
+                    )
+                })
+            });
+            let mut handed_over = Vec::new();
+            while let Ok(sent) = receiver.try_recv() {
+                if let Command::Annotate {
+                    pane,
+                    op: AnnotationOp::MarkSent(entries),
+                    ..
+                } = sent.kind()
+                {
+                    handed_over.push((pane.clone(), entries.clone()));
+                }
+            }
+            assert_eq!(handed_over, [("v1".to_owned(), vec![entry.clone()])]);
         });
     }
 }

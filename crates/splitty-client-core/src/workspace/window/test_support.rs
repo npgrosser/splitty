@@ -381,4 +381,32 @@ impl WindowWorkspace {
         };
         Ok((key, terminal))
     }
+
+    /// The remote terminal fixture with a viewer pane `v1` of `/srv/plan.md`
+    /// beside its terminal pane, opened from it.
+    #[doc(hidden)]
+    pub fn ui_test_remote_viewer_fixture(
+        &mut self,
+        target: &str,
+    ) -> io::Result<(ScreenKey, TerminalToken)> {
+        let (key, terminal) = self.ui_test_remote_terminal_fixture(target)?;
+        let id = terminal.source_token().source_id();
+        let connection = terminal.source_token().connection_id();
+        let event = json!({"type":"mux.screen_snapshot","screen":{
+            "id":"work","revision":2,
+            "root":{"type":"slot","id":"slot","paneIds":["p0","v1"],"activePaneId":"p0"},
+            "panes":{
+                "p0":{"id":"p0","sessionId":"s-p0"},
+                "v1":{"id":"v1","role":"viewer","viewer":{
+                    "source":{"kind":"file","path":"/srv/plan.md"},
+                    "originPaneId":"p0","revision":1
+                }}
+            },
+            "sessions":{"s-p0":{"id":"s-p0","status":"running"}}
+        }});
+        self.source_mut(id)
+            .ok_or_else(|| invalid("remote fixture source missing"))?
+            .apply_snapshot(connection, &event)?;
+        Ok((key, terminal))
+    }
 }

@@ -1507,6 +1507,13 @@ impl Terminal {
         }
     }
 
+    /// Whether the program enabled bracketed paste; without an engine, no.
+    pub(crate) fn bracketed_paste(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| engine.bracketed_paste().unwrap_or(false))
+    }
+
     pub(crate) fn paste_text(&mut self, text: &str) {
         let result = self.engine.as_mut().map(|engine| engine.paste(text));
         if let Some(reply) = result.and_then(|result| self.output(result)) {

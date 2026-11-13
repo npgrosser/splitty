@@ -408,6 +408,49 @@ pub struct Review {
     pub count: usize,
 }
 
+/// How the user sends a review to a terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReviewForm {
+    Paste,
+    File,
+    Scratchpad,
+}
+
+/// What sending a review in a form does (`viewer-annotations`, Handing A
+/// Review To A Terminal). The entries the review holds are marked as handed
+/// over only once it went out: after the paste, after the file was stored
+/// and its path inserted, after the scratchpad took it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReviewDelivery {
+    /// Paste this text: the review without its final line breaks, so that
+    /// nothing reads as Enter.
+    Paste(String),
+    /// Store the review as a file on the terminal's server and insert its
+    /// quoted path. `instead_of_paste`: the user asked for a paste, but the
+    /// program has not enabled bracketed paste and would run each line of
+    /// the review as a command, which the window says.
+    File {
+        instead_of_paste: bool,
+    },
+    Scratchpad,
+}
+
+/// How `text`, a review, reaches a terminal whose program has or has not
+/// enabled bracketed paste, sent in `form`.
+pub fn review_delivery(text: &str, form: ReviewForm, bracketed_paste: bool) -> ReviewDelivery {
+    let pasted = text.trim_end_matches('\n');
+    match form {
+        ReviewForm::Scratchpad => ReviewDelivery::Scratchpad,
+        ReviewForm::File => ReviewDelivery::File {
+            instead_of_paste: false,
+        },
+        ReviewForm::Paste if !bracketed_paste && pasted.contains('\n') => ReviewDelivery::File {
+            instead_of_paste: true,
+        },
+        ReviewForm::Paste => ReviewDelivery::Paste(pasted.to_owned()),
+    }
+}
+
 /// Text as a review may carry it: no control character but tab and line
 /// feed, nothing that changes the direction of text, nothing invisible.
 pub fn safe_text(text: &str) -> String {
@@ -698,6 +741,39 @@ pub fn review(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// As the web client does: a paste ends without Enter, and a review of
+    /// several lines goes to a program without bracketed paste as a file.
+    #[test]
+    fn a_review_reaches_a_terminal_without_running_its_lines() {
+        let review = "# Review of plan.md\n\n## #1 Line 3\nSplit it.\n\n";
+        assert_eq!(
+            review_delivery(review, ReviewForm::Paste, true),
+            ReviewDelivery::Paste("# Review of plan.md\n\n## #1 Line 3\nSplit it.".into())
+        );
+        assert_eq!(
+            review_delivery(review, ReviewForm::Paste, false),
+            ReviewDelivery::File {
+                instead_of_paste: true
+            }
+        );
+        assert_eq!(
+            review_delivery("One line.\n", ReviewForm::Paste, false),
+            ReviewDelivery::Paste("One line.".into())
+        );
+        for bracketed in [false, true] {
+            assert_eq!(
+                review_delivery(review, ReviewForm::File, bracketed),
+                ReviewDelivery::File {
+                    instead_of_paste: false
+                }
+            );
+            assert_eq!(
+                review_delivery(review, ReviewForm::Scratchpad, bracketed),
+                ReviewDelivery::Scratchpad
+            );
+        }
+    }
 
     fn comment(number: u32, body: &str, target: Option<AnnotationTarget>) -> ViewerAnnotation {
         serde_json::from_value(serde_json::json!({

@@ -399,10 +399,17 @@ impl Engine {
 
     /// Whether synchronized output (DEC private mode 2026) is set.
     fn synchronized_output(&self) -> Result<bool> {
-        let mut mode = ffi::ModeConfig {
-            mode: ffi::MODE_SYNCHRONIZED_OUTPUT,
-            value: false,
-        };
+        self.mode(ffi::MODE_SYNCHRONIZED_OUTPUT)
+    }
+
+    /// Whether the program enabled bracketed paste (DEC private mode 2004).
+    pub fn bracketed_paste(&self) -> Result<bool> {
+        self.mode(ffi::MODE_BRACKETED_PASTE)
+    }
+
+    /// Whether the DEC private `mode` is set.
+    fn mode(&self, mode: u16) -> Result<bool> {
+        let mut mode = ffi::ModeConfig { mode, value: false };
         // SAFETY: terminal.h documents an initialized GhosttyTerminalModeConfig
         // as the in/out value of this data key.
         check(unsafe {

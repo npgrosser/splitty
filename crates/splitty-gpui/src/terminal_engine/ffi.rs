@@ -265,6 +265,8 @@ pub const DATA_MODE: c_int = 37;
 /// `GHOSTTY_MODE_SYNCHRONIZED_OUTPUT` (modes.h): DEC private mode 2026 as a
 /// packed `GhosttyMode`, whose bit 15 is clear for a private mode.
 pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
+/// `GHOSTTY_MODE_BRACKETED_PASTE` (modes.h): DEC private mode 2004.
+pub const MODE_BRACKETED_PASTE: u16 = 2004;
 pub const RENDER_DIRTY: c_int = 3;
 pub const RENDER_ROWS: c_int = 4;
 pub const RENDER_CURSOR: c_int = 18;

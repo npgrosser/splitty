@@ -140,8 +140,10 @@ fn active_screen_tracks_vt_switch_and_arrow_encoding_mode() -> Result<()> {
 #[test]
 fn paste_preserves_policy_and_submits_complete_brackets() -> Result<()> {
     let mut engine = Engine::new(20, 3)?;
+    assert!(!engine.bracketed_paste()?);
     assert_eq!(engine.paste("a\r\nb\nc")?, b"a\rb\rc");
     engine.feed(b"\x1b[?2004h", false)?;
+    assert!(engine.bracketed_paste()?);
     assert_eq!(
         engine.paste("a\x1b[201~\nb")?,
         b"\x1b[200~a[201~\rb\x1b[201~"

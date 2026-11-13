@@ -6,7 +6,7 @@ use super::*;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use splitty_client_core::annotations::{
     self, Anchor, AnnotationKind, AnnotationReply, AnnotationStatus, ReplyAuthor, Review,
-    ReviewDocument, SentEntry, Verdict, ViewerAnnotation,
+    ReviewDelivery, ReviewDocument, ReviewForm, SentEntry, Verdict, ViewerAnnotation,
 };
 use splitty_client_core::native_workspace::{AnnotationOp, ReviewAnswered};
 use splitty_client_core::workspace::ViewerState;
@@ -693,7 +693,10 @@ impl Workspace {
 
     /// Hand the review to a terminal of the Screen, by default the one the
     /// viewer came from: pasted, stored as a file whose path is inserted, or
-    /// appended to the terminal's scratchpad. Its entries are then handed over.
+    /// appended to the terminal's scratchpad. A paste of several lines into
+    /// a program without bracketed paste goes as a file. The review's
+    /// entries are handed over once it went out; a file only once it is
+    /// stored and its path inserted.
     fn viewer_send_review(
         &mut self,
         key: &PaneKey,
@@ -721,12 +724,29 @@ impl Workspace {
             cx.notify();
             return;
         };
+        if let Some(entry) = self.viewers.get_mut(key) {
+            entry.sending = false;
+        }
         let terminal = self.panes[&target].terminal.clone();
-        match how {
-            Handover::Paste => {
-                terminal.update(cx, |terminal, _| terminal.paste_text(&review.text));
+        let form = match how {
+            Handover::Paste => ReviewForm::Paste,
+            Handover::File => ReviewForm::File,
+            Handover::Scratchpad => ReviewForm::Scratchpad,
+        };
+        let bracketed = terminal.read(cx).bracketed_paste();
+        match annotations::review_delivery(&review.text, form, bracketed) {
+            ReviewDelivery::Paste(text) => {
+                terminal.update(cx, |terminal, _| terminal.paste_text(&text));
+                self.viewer_review_sent(
+                    key.clone(),
+                    target,
+                    review.entries,
+                    "The review is at the prompt",
+                    window,
+                    cx,
+                );
             }
-            Handover::File => {
+            ReviewDelivery::File { instead_of_paste } => {
                 let route = self.selected_model().and_then(|model| {
                     Some((
                         model.source_token(),
@@ -742,32 +762,50 @@ impl Workspace {
                     source,
                     vec![crate::terminal::PastedFile::Image {
                         extension: "md",
-                        bytes: review.text.clone().into_bytes(),
+                        bytes: review.text.into_bytes(),
                     }],
-                    super::file_transfer::StoreTarget::Terminal {
+                    super::file_transfer::StoreTarget::Review {
                         route,
                         terminal: terminal.downgrade(),
+                        viewer: key.clone(),
+                        target,
+                        entries: review.entries,
+                        instead_of_paste,
                     },
                     cx,
                 );
+                cx.notify();
             }
-            Handover::Scratchpad => {
+            ReviewDelivery::Scratchpad => {
                 if let Err(reason) =
                     self.append_scratchpad(target.pane_id(), &review.text, window, cx)
                 {
-                    self.status = reason.into();
+                    self.status = format!("The review was not sent: {reason}");
                     cx.notify();
                     return;
                 }
+                self.viewer_annotate(key, AnnotationOp::MarkSent(review.entries), cx);
+                self.status = "The review is in the terminal's scratchpad".into();
+                cx.notify();
             }
         }
-        if let Some(entry) = self.viewers.get_mut(key) {
-            entry.sending = false;
-        }
-        self.viewer_annotate(key, AnnotationOp::MarkSent(review.entries), cx);
-        if how != Handover::Scratchpad {
-            self.select(target.pane_id(), window, cx);
-        }
+    }
+
+    /// The review went to `target` as a paste or as a stored file's path:
+    /// its entries are handed over and the terminal takes the keyboard.
+    pub(in crate::workspace) fn viewer_review_sent(
+        &mut self,
+        viewer: PaneKey,
+        target: PaneKey,
+        entries: Vec<SentEntry>,
+        status: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.viewer_annotate(&viewer, AnnotationOp::MarkSent(entries), cx);
+        self.select(target.pane_id(), window, cx);
+        self.status = status.into();
+        cx.notify();
     }
 
     /// Answer the process that waits for this pane's review.
