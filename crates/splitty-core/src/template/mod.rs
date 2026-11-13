@@ -16,10 +16,6 @@ pub use model::{
 };
 pub use store::{Saved, TemplateStore};
 
-/// The server derives saved templates' file names (`templates`, Saved
-/// Template Names) and takes a save by name with an overwrite flag.
-pub const NAMES_CAPABILITY: &str = "template-names-v1";
-
 /// The longest file name derived from a template's name, in bytes.
 pub const MAX_FILE_NAME: usize = 128;
 

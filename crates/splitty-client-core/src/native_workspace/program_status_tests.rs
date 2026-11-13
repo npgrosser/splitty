@@ -71,7 +71,7 @@ async fn program_status_events_route_to_their_own_welcomed_source_only() {
         .all(|update| !matches!(update, Update::Status(_))));
     assert_eq!(record(&window, id, "shared"), None);
 
-    let current = welcome(&[crate::workspace::PROGRAM_STATUS_CAPABILITY]);
+    let current = welcome(&[splitty_core::protocol::capability::PROGRAM_STATUS]);
     deliver(&mut local, &mut window, local_connection, current).await;
     assert!(window.local_source().program_status_supported());
     // The same session id on the host's connection still marks nothing there.

@@ -95,33 +95,12 @@ impl MuxHandler {
     pub async fn send_welcome(&self) {
         let screens = self.store.list_screen_infos();
 
-        let mut event = ServerEvent::mux_welcome(
+        let event = ServerEvent::mux_welcome(
             self.client_id.clone(),
             screens,
             Some(self.server_mode.clone()),
+            self.hub_decisions,
         );
-
-        if let ServerEvent::MuxWelcome { capabilities, .. } = &mut event {
-            if self.hub_decisions {
-                capabilities.push("hub-host-decisions-v1".into());
-                capabilities.push(splitty_core::protocol::SSH_PROMPTS_CAPABILITY.into());
-                capabilities.push(crate::hub::AUTO_FORWARD_CAPABILITY.into());
-                capabilities.push(crate::hub::HOST_STATE_CAPABILITY.into());
-            }
-            capabilities.push("serverDerivedPaneState".into());
-            capabilities.push(super::editor::CAPABILITY.into());
-            capabilities.push(super::files::CAPABILITY.into());
-            capabilities.push(splitty_core::protocol::sizing::CAPABILITY.into());
-            capabilities.push(splitty_core::protocol::INPUT_BYTES_CAPABILITY.into());
-            capabilities.push(splitty_core::protocol::upload::CAPABILITY.into());
-            capabilities.push(splitty_core::protocol::PROGRAM_STATUS_CAPABILITY.into());
-            capabilities.push(splitty_core::mux::CLOSE_ASSESSMENT_CAPABILITY.into());
-            capabilities.push(splitty_core::protocol::notice::CAPABILITY.into());
-            capabilities.push(splitty_core::mux::SCREEN_NAMES_CAPABILITY.into());
-            capabilities.push(splitty_core::mux::TEMPLATE_NAMES_CAPABILITY.into());
-            capabilities.push(splitty_core::mux::SCRATCHPAD_VERSIONS_CAPABILITY.into());
-            capabilities.push(splitty_core::mux::VIEWER_REVIEWS_CAPABILITY.into());
-        }
         self.send_event(&event).await;
     }
 
@@ -658,6 +637,58 @@ impl MuxHandler {
 mod tests {
     use super::*;
     use crate::client_session::Message;
+
+    /// The welcome's capabilities, in the order servers have sent them.
+    #[tokio::test]
+    async fn the_welcome_lists_its_capabilities_in_a_fixed_order() {
+        let base = [
+            "managed-jobs-v1",
+            "scratchpad-v1",
+            "layout-arrange-v1",
+            "tab-select-v1",
+            "tab-placement-v1",
+            "viewer-v1",
+            "viewer-annotations-v1",
+            "server-templates-v1",
+            "workspace-catalog-v1",
+            "screen-placement-v1",
+        ];
+        let hub = [
+            "hub-host-decisions-v1",
+            "ssh-prompts-v1",
+            "hub-auto-forward-v1",
+            "hub-host-state-v1",
+        ];
+        let rest = [
+            "serverDerivedPaneState",
+            "editor-open-v1",
+            "file-offer-v1",
+            "pty-size-v1",
+            "terminal-input-bytes-v1",
+            "upload-control-v1",
+            "program-status-v1",
+            "close-assessment-v1",
+            "notification-notices-v1",
+            "screen-names-v1",
+            "template-names-v1",
+            "scratchpad-versions-v1",
+            "viewer-reviews-v1",
+        ];
+        let store = layout_store();
+        let others = Default::default();
+        for local_hub in [false, true] {
+            let (handler, mut sent) = window(&store, "welcome", &others);
+            let handler = handler.with_hub_decisions(local_hub);
+            handler.send_welcome().await;
+            let welcome = next_text(&mut sent);
+            let mut expected: Vec<&str> = base.to_vec();
+            if local_hub {
+                expected.extend(hub);
+            }
+            expected.extend(rest);
+            assert_eq!(welcome["capabilities"], serde_json::json!(expected));
+        }
+    }
 
     #[tokio::test]
     async fn ordered_workspace_catalog_reflects_rename_and_final_close() {
@@ -1808,6 +1839,7 @@ mod tests {
             "client".to_string(),
             Vec::new(),
             None,
+            false,
         ))
         .unwrap();
         assert!(

@@ -2,8 +2,8 @@
 
 ## 1. Capability constants
 
-- [ ] 1.1 Unit (splitty-core, splitty-server mux_handler): pin the current `mux.welcome` capability list, in order, for a local main connection and for any other connection.
-- [ ] 1.2 Define every capability string once in `splitty_core::protocol::capability`, assemble the welcome list there, and use the constants in splitty-server and splitty-client-core instead of literals and local copies.
+- [x] 1.1 Unit (splitty-core, splitty-server mux_handler): pin the current `mux.welcome` capability list, in order, for a local main connection and for any other connection.
+- [x] 1.2 Define every capability string once in `splitty_core::protocol::capability`, assemble the welcome list there, and use the constants in splitty-server and splitty-client-core instead of literals and local copies.
 
 ## 2. Hub reply types
 

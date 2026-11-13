@@ -16,12 +16,6 @@ pub const MAX_API_BODY: usize = 1024 * 1024;
 pub const MAX_JOB_BODY: usize = 128 * 1024;
 pub const MAX_SESSION_FRAME: usize = 16 * 1024 * 1024;
 
-/// Announced in `mux.welcome` on local main connections by a local service
-/// whose hub writes remembered remote Screens per host
-/// (`remoteScreens.updateHost`) and takes directory observations without
-/// pane counts.
-pub const HOST_STATE_CAPABILITY: &str = "hub-host-state-v1";
-
 /// Assigned by the service connector/broker, not deserialized from the wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {

@@ -11,7 +11,6 @@ use tokio::time::Instant;
 
 use super::sender::ClientSender;
 
-pub const CAPABILITY: &str = "editor-open-v1";
 const LIFETIME: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]

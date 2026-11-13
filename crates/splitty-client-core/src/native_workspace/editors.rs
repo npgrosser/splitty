@@ -11,7 +11,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-const CAPABILITY: &str = "editor-open-v1";
 /// A request is shown for at most this long, whatever its service says.
 const MAX_SHOWN: Duration = Duration::from_secs(25);
 /// Between two requests of one connection that are shown.
@@ -158,9 +157,7 @@ impl EditorRequests {
     pub(super) fn welcome(&mut self, client: &Client, json: &Value) {
         // A request of the previous connection cannot be answered any more.
         self.pending = None;
-        self.registered = json["capabilities"]
-            .as_array()
-            .is_some_and(|capabilities| capabilities.iter().any(|name| name == CAPABILITY))
+        self.registered = capability::offered(json, capability::EDITOR_OPEN)
             && send(client, &json!({"type":"editor.register"})).is_ok();
     }
 

@@ -293,10 +293,10 @@ async fn execute_at(
     }
     if !command.is_admin() {
         let capabilities=request(&server,"GET","/api/jobs",None).await.map_err(|mut e|{if e.value["status"]==404{e.value=json!({"code":"unsupported","error":"server does not support managed jobs; update Splitty"});}e})?;
-        if !capabilities["capabilities"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|c| c == "managed-jobs-v1"))
-        {
+        if !capabilities["capabilities"].as_array().is_some_and(|a| {
+            a.iter()
+                .any(|c| c == splitty_core::protocol::capability::MANAGED_JOBS)
+        }) {
             return Err(Failure {
                 value: json!({"code":"unsupported","error":"server does not support managed jobs"}),
                 exit: 1,

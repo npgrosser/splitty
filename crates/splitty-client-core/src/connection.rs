@@ -2,7 +2,7 @@
 use base64::Engine as _;
 use serde_json::{json, Value};
 use splitty_core::mux::ScreenOp;
-use splitty_core::protocol::{INPUT_BYTES_CAPABILITY, MAX_INPUT_BYTES};
+use splitty_core::protocol::{capability, MAX_INPUT_BYTES};
 use splitty_transport::{
     budget::{Charged, Lease},
     codec,
@@ -228,13 +228,7 @@ impl Client {
                     let value = decode_event_json(&raw, &self.sender().context().budget)?;
                     if value["type"] == "mux.welcome" {
                         self.byte_input =
-                            value["capabilities"]
-                                .as_array()
-                                .is_some_and(|capabilities| {
-                                    capabilities
-                                        .iter()
-                                        .any(|capability| capability == INPUT_BYTES_CAPABILITY)
-                                });
+                            capability::offered(&value, capability::TERMINAL_INPUT_BYTES);
                     }
                     if let Some(session) = value["sessionId"].as_str() {
                         observe_attachment(&mut self.attachments, session, value["type"].as_str());

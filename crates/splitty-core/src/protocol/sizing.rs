@@ -14,9 +14,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tracing::debug;
 
-/// Announced in `mux.welcome.capabilities` by servers that arbitrate sizes.
-pub const CAPABILITY: &str = "pty-size-v1";
-
 /// How often the arbiter looks for connections that have become idle.
 pub const TICK: Duration = Duration::from_secs(1);
 

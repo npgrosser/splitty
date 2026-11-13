@@ -12,6 +12,7 @@ use crate::{
     },
     Client,
 };
+use splitty_core::protocol::capability;
 use splitty_remote::ssh::SshTarget;
 use splitty_transport::{
     budget::{Charged, ConnectionBudget},
@@ -241,10 +242,7 @@ impl<'a> Host<'a> {
                 Ok(false)
             }
             Some("mux.welcome") if self.remote_ready => {
-                if !json["capabilities"]
-                    .as_array()
-                    .is_some_and(|caps| caps.iter().any(|cap| cap == "workspace-catalog-v1"))
-                {
+                if !capability::offered(json, capability::WORKSPACE_CATALOG) {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
                         "Host does not support workspace-catalog-v1",

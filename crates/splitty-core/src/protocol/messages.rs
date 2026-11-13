@@ -20,12 +20,6 @@ pub const MSG_DETACH: &str = "detach";
 pub const MSG_INPUT: &str = "input";
 /// Standard base64 carrying terminal bytes that need not be UTF-8.
 pub const MSG_INPUT_BYTES: &str = "input_bytes";
-pub const INPUT_BYTES_CAPABILITY: &str = "terminal-input-bytes-v1";
-/// The server reads program status and sends `program_status.changed`.
-pub const PROGRAM_STATUS_CAPABILITY: &str = "program-status-v1";
-/// A local main connection is told of the service's SSH questions with
-/// [`SSH_PROMPTS_CHANGED`] and reads them with `ssh.prompts.get`.
-pub const SSH_PROMPTS_CAPABILITY: &str = "ssh-prompts-v1";
 /// The service's pending SSH questions changed; carries none of them.
 pub const SSH_PROMPTS_CHANGED: &str = "ssh.prompts.changed";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -49,8 +43,6 @@ pub const MSG_HIDE: &str = "hide";
 pub const MSG_MUX_OP: &str = "mux.op";
 pub const MSG_MUX_RESYNC: &str = "mux.resync";
 pub const MSG_MUX_WORKSPACE_RESYNC: &str = "mux.workspace_resync";
-pub const WORKSPACE_CATALOG_CAPABILITY: &str = "workspace-catalog-v1";
-pub const SCREEN_PLACEMENT_CAPABILITY: &str = "screen-placement-v1";
 
 /// One chunk of a viewer pane's document (`viewer-panes`, Reading A Document).
 pub const MSG_VIEWER_READ: &str = "viewer.read";
@@ -666,33 +658,20 @@ impl ServerEvent {
         }
     }
 
+    /// `local_hub`: a local main connection to a service with a hub, which
+    /// is told the hub's capabilities as well ([`super::capability::welcome`]).
     pub fn mux_welcome(
         client_id: String,
         screens: Vec<ScreenInfo>,
         server_mode: Option<String>,
+        local_hub: bool,
     ) -> Self {
         Self::MuxWelcome {
             id: generate_event_id(),
             timestamp: now_millis(),
             client_id,
             screens,
-            capabilities: vec![
-                "managed-jobs-v1".into(),
-                "scratchpad-v1".into(),
-                // mux-protocol, Window Layout Changes Reach the Server.
-                "layout-arrange-v1".into(),
-                // mux-protocol, Selected Tabs Reach the Server.
-                "tab-select-v1".into(),
-                // mux-protocol, Exact Tab Placement Capability.
-                "tab-placement-v1".into(),
-                // viewer-panes, Viewer Capability.
-                "viewer-v1".into(),
-                // viewer-annotations, Annotations Capability.
-                "viewer-annotations-v1".into(),
-                crate::mux::TEMPLATE_CAPABILITY.into(),
-                WORKSPACE_CATALOG_CAPABILITY.into(),
-                SCREEN_PLACEMENT_CAPABILITY.into(),
-            ],
+            capabilities: super::capability::welcome(local_hub),
             server_mode,
         }
     }
@@ -860,22 +839,13 @@ mod tests {
             "client".into(),
             vec![],
             Some("embedded".into()),
+            false,
         ))
         .expect("welcome");
+        assert_eq!(wire["capabilities"][0], "managed-jobs-v1");
         assert_eq!(
             wire["capabilities"],
-            serde_json::json!([
-                "managed-jobs-v1",
-                "scratchpad-v1",
-                "layout-arrange-v1",
-                "tab-select-v1",
-                "tab-placement-v1",
-                "viewer-v1",
-                "viewer-annotations-v1",
-                "server-templates-v1",
-                "workspace-catalog-v1",
-                "screen-placement-v1"
-            ])
+            serde_json::json!(super::super::capability::welcome(false))
         );
         assert_eq!(wire["type"], "mux.welcome");
         assert_eq!(wire["clientId"], "client");

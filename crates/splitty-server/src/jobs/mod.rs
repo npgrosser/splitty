@@ -22,8 +22,6 @@ use tokio::sync::{
     watch, Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock, Semaphore,
 };
 
-pub const CAPABILITY: &str = "managed-jobs-v1";
-
 #[derive(Clone, Debug)]
 pub enum Actor {
     User,
@@ -308,7 +306,7 @@ impl Jobs {
             .collect();
         jobs.sort_by_key(|j| (j.created_at, j.job_id.to_string()));
         Ok(Access {
-            value: json!({"capabilities":[CAPABILITY],"jobs":jobs.iter().map(view).collect::<Vec<_>>()}),
+            value: json!({"capabilities":[splitty_core::protocol::capability::MANAGED_JOBS],"jobs":jobs.iter().map(view).collect::<Vec<_>>()}),
             _actor: guard,
             _job: None,
         })

@@ -7,10 +7,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::pty::status::{BlockKind, ProgramStatus, StatusState};
 
-/// Listed in `mux.welcome` by a server whose notification events carry a
-/// [`Notice`].
-pub const CAPABILITY: &str = "notification-notices-v1";
-
 /// The longest title in characters; longer ones are cut.
 pub const MAX_TITLE_CHARS: usize = 500;
 /// The longest record text a program status title shows, in characters.

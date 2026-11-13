@@ -11,8 +11,6 @@ use std::{
     sync::Arc,
 };
 
-/// Listed in `mux.welcome.capabilities` by a server that reports program status.
-pub const PROGRAM_STATUS_CAPABILITY: &str = "program-status-v1";
 /// Sessions per source whose root record a window keeps.
 pub const MAX_STATUS_SESSIONS: usize = 4096;
 const MAX_ID_BYTES: usize = 256;

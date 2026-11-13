@@ -1,5 +1,8 @@
 //! WebSocket protocol layer: message types, request dispatching, and notifications.
 //!
+//! The capabilities a server announces in `mux.welcome` are named in
+//! `capability`.
+//!
 //! Defines the transport-agnostic `Request`/`Response` types, message type constants
 //! for both plain terminal and mux protocols, the `Dispatcher` that routes requests
 //! to the PTY backend, the `NotificationEngine` for tracking session lifecycle events and the
@@ -8,6 +11,7 @@
 //! one (`upload`), and the arbiter of the PTY size of sessions that several
 //! connections show (`sizing`).
 
+pub mod capability;
 pub mod dispatcher;
 mod messages;
 pub mod notice;

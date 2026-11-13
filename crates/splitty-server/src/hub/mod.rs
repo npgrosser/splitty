@@ -77,14 +77,6 @@ pub use reverse::{ReverseInfo, ReversePreferences, SavedReverse};
 /// `update=1` brings a host's daemon to.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Announced in `mux.welcome` on local main connections: the hub forwards
-/// the ports that appear on hosts with `remote.autoForwardPorts` itself, so
-/// a client keeps no automatic forwarding of its own.
-pub const AUTO_FORWARD_CAPABILITY: &str = "hub-auto-forward-v1";
-/// Remembered Screens written per host and observations without pane counts
-/// (`remoteScreens.updateHost`, `hub.catalog.observe`).
-pub use splitty_core::native_api::HOST_STATE_CAPABILITY;
-
 /// How long the bridge may take to deliver the daemon's first message.
 const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 

@@ -42,6 +42,7 @@ pub use presence::{
     PtySize, SizePolicy, WindowPresence, WindowPresenceCell, ACTIVITY_INTERVAL, MAX_PTY_COLS,
     MAX_PTY_ROWS,
 };
+use splitty_core::protocol::capability;
 pub use ssh_prompts::SshPrompt;
 use std::{
     collections::{HashMap, HashSet},
@@ -727,35 +728,17 @@ fn profile_fallback_status(
 }
 
 fn supports_ssh_prompts(welcome: &serde_json::Value) -> bool {
-    welcome["capabilities"]
-        .as_array()
-        .is_some_and(|capabilities| {
-            capabilities.iter().any(|capability| {
-                capability.as_str() == Some(splitty_core::protocol::SSH_PROMPTS_CAPABILITY)
-            })
-        })
+    capability::offered(welcome, capability::SSH_PROMPTS)
 }
 
 /// The local hub writes remembered Screens per host and takes observations
 /// without pane counts.
 fn supports_host_state(welcome: &serde_json::Value) -> bool {
-    welcome["capabilities"]
-        .as_array()
-        .is_some_and(|capabilities| {
-            capabilities.iter().any(|capability| {
-                capability.as_str() == Some(splitty_core::native_api::HOST_STATE_CAPABILITY)
-            })
-        })
+    capability::offered(welcome, capability::HUB_HOST_STATE)
 }
 
 fn supports_host_directory(welcome: &serde_json::Value) -> bool {
-    welcome["capabilities"]
-        .as_array()
-        .is_some_and(|capabilities| {
-            capabilities
-                .iter()
-                .any(|capability| capability.as_str() == Some("hub-host-decisions-v1"))
-        })
+    capability::offered(welcome, capability::HUB_HOST_DECISIONS)
 }
 // Setup and reads stay owned across cancelled select branches. Both streams
 // share the embedded service's admission domain, but never consume each other's events.

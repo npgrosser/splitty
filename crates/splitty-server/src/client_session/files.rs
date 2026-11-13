@@ -20,7 +20,6 @@ use tokio::time::Instant;
 use super::editor::Failure;
 use super::sender::ClientSender;
 
-pub const CAPABILITY: &str = "file-offer-v1";
 /// The largest file that can be offered, as for uploads.
 pub const MAX_FILE_BYTES: u64 = splitty_core::protocol::upload::MAX_FILE_BYTES;
 /// The most bytes of the file one `file.chunk` carries, decoded.

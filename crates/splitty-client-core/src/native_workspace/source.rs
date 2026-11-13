@@ -1070,80 +1070,26 @@ impl SourceRuntime {
             match json["type"].as_str() {
                 Some("mux.welcome") if !self.welcomed => {
                     let workspace = model.as_mut().expect("owned local source");
-                    let supports_tab_selection =
-                        json["capabilities"].as_array().is_some_and(|capabilities| {
-                            capabilities
-                                .iter()
-                                .any(|capability| capability.as_str() == Some("tab-select-v1"))
-                        });
-                    workspace.set_templates_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter().any(|cap| cap == "server-templates-v1")
-                        }),
-                    );
-                    workspace.set_viewers_supported(
-                        json["capabilities"]
-                            .as_array()
-                            .is_some_and(|caps| caps.iter().any(|cap| cap == "viewer-v1")),
-                    );
+                    let offered = |name: &str| capability::offered(json, name);
+                    workspace.set_templates_supported(offered(capability::SERVER_TEMPLATES));
+                    workspace.set_viewers_supported(offered(capability::VIEWER));
                     workspace.set_reviews_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter().any(|cap| cap == mux::VIEWER_REVIEWS_CAPABILITY)
-                        }) && json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter().any(|cap| cap == "viewer-annotations-v1")
-                        }),
+                        offered(capability::VIEWER_REVIEWS)
+                            && offered(capability::VIEWER_ANNOTATIONS),
                     );
-                    workspace.set_close_assessments_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter()
-                                .any(|cap| cap == mux::CLOSE_ASSESSMENT_CAPABILITY)
-                        }),
-                    );
-                    workspace.set_screen_names_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter().any(|cap| cap == mux::SCREEN_NAMES_CAPABILITY)
-                        }),
-                    );
-                    workspace.set_template_names_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter()
-                                .any(|cap| cap == splitty_core::template::NAMES_CAPABILITY)
-                        }),
-                    );
-                    workspace.set_scratchpad_versions_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter()
-                                .any(|cap| cap == mux::SCRATCHPAD_VERSIONS_CAPABILITY)
-                        }),
-                    );
-                    workspace.set_tab_selection_supported(supports_tab_selection);
-                    workspace.set_program_status_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter()
-                                .any(|cap| cap == crate::workspace::PROGRAM_STATUS_CAPABILITY)
-                        }),
-                    );
-                    workspace.set_tab_placement_supported(
-                        json["capabilities"].as_array().is_some_and(|capabilities| {
-                            capabilities
-                                .iter()
-                                .any(|capability| capability.as_str() == Some("tab-placement-v1"))
-                        }),
-                    );
-                    let supports_catalog =
-                        json["capabilities"].as_array().is_some_and(|capabilities| {
-                            capabilities.iter().any(|capability| {
-                                capability.as_str() == Some("workspace-catalog-v1")
-                            })
-                        });
+                    workspace
+                        .set_close_assessments_supported(offered(capability::CLOSE_ASSESSMENT));
+                    workspace.set_screen_names_supported(offered(capability::SCREEN_NAMES));
+                    workspace.set_template_names_supported(offered(capability::TEMPLATE_NAMES));
+                    workspace.set_scratchpad_versions_supported(offered(
+                        capability::SCRATCHPAD_VERSIONS,
+                    ));
+                    workspace.set_tab_selection_supported(offered(capability::TAB_SELECT));
+                    workspace.set_program_status_supported(offered(capability::PROGRAM_STATUS));
+                    workspace.set_tab_placement_supported(offered(capability::TAB_PLACEMENT));
+                    let supports_catalog = offered(capability::WORKSPACE_CATALOG);
                     workspace.set_catalog_supported(supports_catalog);
-                    workspace.set_screen_placement_supported(
-                        json["capabilities"].as_array().is_some_and(|caps| {
-                            caps.iter().any(|cap| {
-                                cap == splitty_core::protocol::SCREEN_PLACEMENT_CAPABILITY
-                            })
-                        }),
-                    );
+                    workspace.set_screen_placement_supported(offered(capability::SCREEN_PLACEMENT));
                     if supports_catalog {
                         workspace.mark_catalog_dirty();
                     } else {

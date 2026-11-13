@@ -15,8 +15,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-const OFFER_CAPABILITY: &str = "file-offer-v1";
-const UPLOAD_CONTROL_CAPABILITY: &str = "upload-control-v1";
 /// The largest file either direction carries.
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// The largest image `save_image` takes; a larger one is uploaded as a file.
@@ -462,14 +460,9 @@ fn send<T: serde::Serialize>(client: &Client, message: &T) -> io::Result<()> {
 
 impl FileTransfers {
     pub fn welcome(&mut self, client: &Client, json: &Value) {
-        let has = |name: &str| {
-            json["capabilities"].as_array().is_some_and(|capabilities| {
-                capabilities.iter().any(|capability| capability == name)
-            })
-        };
-        self.upload_control = has(UPLOAD_CONTROL_CAPABILITY);
-        self.offers_supported =
-            has(OFFER_CAPABILITY) && send(client, &json!({"type":"file.register"})).is_ok();
+        self.upload_control = capability::offered(json, capability::UPLOAD_CONTROL);
+        self.offers_supported = capability::offered(json, capability::FILE_OFFER)
+            && send(client, &json!({"type":"file.register"})).is_ok();
     }
 
     fn remember(&mut self, id: &str) -> bool {

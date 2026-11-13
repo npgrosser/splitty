@@ -8,9 +8,10 @@
 //! `mux.welcome` of a server that decides sizes gets the window's state before
 //! anything is attached, so a window nobody touched (opened, reconnected)
 //! never takes the size from a client in use. Servers without
-//! [`CAPABILITY`] get none of these messages.
+//! [`capability::PTY_SIZE`] get none of these messages.
 use serde_json::Value;
-pub use splitty_core::protocol::sizing::{SizePolicy, CAPABILITY};
+use splitty_core::protocol::capability;
+pub use splitty_core::protocol::sizing::SizePolicy;
 use std::{
     io,
     sync::{
@@ -123,9 +124,7 @@ impl PtySize {
 
 /// Whether a `mux.welcome` announces a server that decides PTY sizes.
 pub fn decides_sizes(welcome: &Value) -> bool {
-    welcome["capabilities"]
-        .as_array()
-        .is_some_and(|capabilities| capabilities.iter().any(|cap| cap == CAPABILITY))
+    capability::offered(welcome, capability::PTY_SIZE)
 }
 
 /// One message for a connection's activity state.
@@ -149,7 +148,7 @@ pub(super) struct ConnectionPresence {
 }
 
 impl ConnectionPresence {
-    /// The server announced [`CAPABILITY`] in its latest welcome.
+    /// The server announced [`capability::PTY_SIZE`] in its latest welcome.
     pub fn supported(&self) -> bool {
         self.supported
     }
@@ -410,7 +409,7 @@ mod tests {
     #[test]
     fn only_a_welcome_with_the_capability_decides_sizes() {
         assert!(decides_sizes(
-            &json!({"type":"mux.welcome","capabilities":["x", CAPABILITY]})
+            &json!({"type":"mux.welcome","capabilities":["x", capability::PTY_SIZE]})
         ));
         assert!(!decides_sizes(
             &json!({"type":"mux.welcome","capabilities":["x"]})

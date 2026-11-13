@@ -32,9 +32,6 @@ pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 /// How many uploads one connection may have under way at once.
 pub const MAX_IN_FLIGHT: usize = 4;
 
-/// Destination selection and cancellation, announced in the welcome.
-pub const CAPABILITY: &str = "upload-control-v1";
-
 /// The start of every upload directory's name, and of only those.
 const PREFIX: &str = "upload-";
 

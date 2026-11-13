@@ -26,9 +26,6 @@ use super::state::{
     ViewerSource, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
 };
 
-/// The server anchors annotations and builds reviews on request.
-pub const VIEWER_REVIEWS_CAPABILITY: &str = "viewer-reviews-v1";
-
 /// Where an annotation stands, as `viewer.anchored` and the review name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

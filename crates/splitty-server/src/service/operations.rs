@@ -1155,7 +1155,7 @@ pub(crate) async fn get_mux_status(state: &ServiceState) -> Payload<Value> {
     let total_sessions: usize = ws.screens.values().map(|s| s.sessions.len()).sum();
     Payload(json!({
         "serverMode": state.server_mode,
-        "capabilities": [crate::jobs::CAPABILITY],
+        "capabilities": [splitty_core::protocol::capability::MANAGED_JOBS],
         "version": state.version,
         "screens": ws.screens.len(),
         "sessions": total_sessions,

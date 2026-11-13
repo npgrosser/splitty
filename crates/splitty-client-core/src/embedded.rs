@@ -316,6 +316,7 @@ mod tests {
     use super::*;
     use crate::{AnnotationDraft, Event, ScreenIds};
     use serde_json::json;
+    use splitty_core::protocol::capability;
     use splitty_core::pty::Backend as _;
     use std::time::Duration;
 
@@ -453,20 +454,22 @@ mod tests {
         );
         // A welcome without the extension must revoke it, including after
         // this connection has previously used binary input successfully.
+        let mut legacy = splitty_core::protocol::ServerEvent::mux_welcome(
+            "legacy-peer".into(),
+            vec![],
+            None,
+            false,
+        );
+        if let splitty_core::protocol::ServerEvent::MuxWelcome { capabilities, .. } = &mut legacy {
+            capabilities.retain(|offered| offered != capability::TERMINAL_INPUT_BYTES);
+        }
         service
             .runtime
             .as_ref()
             .unwrap()
             .state
             .client_state
-            .broadcast_events(
-                &[splitty_core::protocol::ServerEvent::mux_welcome(
-                    "legacy-peer".into(),
-                    vec![],
-                    None,
-                )],
-                None,
-            );
+            .broadcast_events(&[legacy], None);
         kind(&mut client, "mux.welcome").await;
         assert_eq!(
             client.input_bytes(&session, b"\x80").unwrap_err().kind(),
@@ -613,7 +616,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|capability| capability == "workspace-catalog-v1"));
+            .any(|offered| offered == capability::WORKSPACE_CATALOG));
 
         client.request_workspace().unwrap();
         let empty = kind(&mut client, "mux.workspace_snapshot").await;

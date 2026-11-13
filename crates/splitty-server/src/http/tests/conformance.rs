@@ -153,7 +153,7 @@ async fn ssh_prompts_notify_local_connections_and_are_answered_over_the_native_a
     let service = Arc::get_mut(&mut state.service).unwrap();
     service.hub = Arc::new(hub(&host, dir.path()));
     Arc::get_mut(&mut service.client_state).unwrap().hub = Some(service.hub.clone());
-    let capability = json!(splitty_core::protocol::SSH_PROMPTS_CAPABILITY);
+    let capability = json!(splitty_core::protocol::capability::SSH_PROMPTS);
     let (mut local, local_task) = framed(&state, Role::Main).await;
     let welcome = next_text(&mut local, "mux.welcome").await;
     assert!(welcome["capabilities"]
@@ -271,11 +271,11 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
     assert!(welcome["capabilities"]
         .as_array()
         .unwrap()
-        .contains(&json!(crate::hub::AUTO_FORWARD_CAPABILITY)));
+        .contains(&json!(splitty_core::protocol::capability::HUB_AUTO_FORWARD)));
     assert!(welcome["capabilities"]
         .as_array()
         .unwrap()
-        .contains(&json!(splitty_core::native_api::HOST_STATE_CAPABILITY)));
+        .contains(&json!(splitty_core::protocol::capability::HUB_HOST_STATE)));
     // An observation without pane counts keeps the stored ones.
     for (index, (screens, stored)) in [
         (
@@ -349,11 +349,11 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
     assert!(!remote_welcome["capabilities"]
         .as_array()
         .unwrap()
-        .contains(&json!(crate::hub::AUTO_FORWARD_CAPABILITY)));
+        .contains(&json!(splitty_core::protocol::capability::HUB_AUTO_FORWARD)));
     assert!(!remote_welcome["capabilities"]
         .as_array()
         .unwrap()
-        .contains(&json!(splitty_core::native_api::HOST_STATE_CAPABILITY)));
+        .contains(&json!(splitty_core::protocol::capability::HUB_HOST_STATE)));
     state.hub.set_host_order(json!({"order":["vm1"]})).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(50), async {

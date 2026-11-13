@@ -7,7 +7,7 @@
 pub use splitty_core::mux::{
     is_pending, viewer_source_text, AnchorState, AnnotationAnchor, AnnotationKind, AnnotationReply,
     AnnotationStatus, AnnotationTarget, AnnotationView, ReplyAuthor, Review, SentEntry, Verdict,
-    ViewerAnnotation, VIEWER_REVIEWS_CAPABILITY,
+    ViewerAnnotation,
 };
 use std::{io, ops::Range};
 use uuid::Uuid;

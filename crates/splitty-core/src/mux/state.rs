@@ -583,10 +583,6 @@ fn is_zero_version(version: &u64) -> bool {
     *version == 0
 }
 
-/// The server keeps a version per scratchpad and takes `ifVersion` on
-/// `set_scratchpad` (`session-scratchpad`, Concurrent Edits).
-pub const SCRATCHPAD_VERSIONS_CAPABILITY: &str = "scratchpad-versions-v1";
-
 /// The longest scratchpad, in bytes of UTF-8.
 pub const SCRATCHPAD_LIMIT: usize = 64 * 1024;
 

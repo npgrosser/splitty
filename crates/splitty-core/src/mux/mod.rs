@@ -29,13 +29,11 @@ mod templates;
 mod validate;
 pub use templates::{
     extract_template, project_template, template_directory, ApplyTemplate, TemplateProjection,
-    TEMPLATE_CAPABILITY, TEMPLATE_NAMES_CAPABILITY,
 };
 
 pub use anchoring::{anchor_annotations, viewer_source_text, Anchorer, Passage};
 pub use close_assessment::{
-    assess_close, CloseAssessment, CloseLoss, CloseScope, CLOSE_ASSESSMENT_CAPABILITY,
-    CLOSE_SCOPE_LIMIT,
+    assess_close, CloseAssessment, CloseLoss, CloseScope, CLOSE_SCOPE_LIMIT,
 };
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
@@ -43,7 +41,6 @@ pub use ops::{Arrangement, Direction, Op, ScreenOp, ViewerPlacement};
 pub use review::{
     anchors_in_list_order, build_review, is_pending, review_safe_text, AnchorState,
     AnnotationAnchor, RenderedPassage, Review, ReviewRequest, Verdict, RENDERED_PASSAGE_LIMIT,
-    VIEWER_REVIEWS_CAPABILITY,
 };
 pub use state::{
     equal_sizes, replace_node, AnnotationKind, AnnotationReply, AnnotationStatus, AnnotationTarget,
@@ -52,8 +49,7 @@ pub use state::{
     SessionStatus, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState, WorkspaceState,
     ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
     ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, MARK_SENT_LIMIT, REPLY_COUNT_LIMIT,
-    REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, SCRATCHPAD_VERSIONS_CAPABILITY, VIEWER_PATH_LIMIT,
-    VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
+    REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
 pub use store::Store;
 
@@ -66,11 +62,6 @@ pub use validate::{
 use thiserror::Error;
 
 use crate::ids::*;
-
-/// Announced in `mux.welcome`: the server names Screens created without a
-/// name and takes `onlyIfEmpty` on `create_screen` (`mux-protocol`,
-/// Server-Chosen Screen Names).
-pub const SCREEN_NAMES_CAPABILITY: &str = "screen-names-v1";
 
 /// Errors from mux operations.
 #[derive(Debug, Error)]

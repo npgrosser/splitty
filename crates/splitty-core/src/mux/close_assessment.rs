@@ -9,8 +9,6 @@ use serde::{Deserialize, Serialize};
 use super::*;
 use crate::ids::*;
 
-pub const CLOSE_ASSESSMENT_CAPABILITY: &str = "close-assessment-v1";
-
 /// The most panes or screens one scope may name.
 pub const CLOSE_SCOPE_LIMIT: usize = 512;
 
