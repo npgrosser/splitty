@@ -227,6 +227,8 @@ impl<'a> Host<'a> {
     /// this attempt's exact target and advertise the coherent catalog protocol.
     fn observe_prelude(&mut self, json: &serde_json::Value) -> io::Result<bool> {
         match json["type"].as_str() {
+            // Progress arrives as transport reports during preparation. A hub
+            // of the previous release repeats it here as text; ignore it.
             Some("remote.progress") => Ok(false),
             Some("remote.ready")
                 if !self.remote_ready && json["target"].as_str() == Some(self.action.target()) =>

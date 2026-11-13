@@ -17,29 +17,27 @@ export class NativeHubSocket implements HubWebSocket {
   private readonly socket: NativeSocket;
 
   constructor(target: string, update: boolean, document: string, open: NativeHostOpener) {
-    // The bounded native preparation reports are replayed in the service's
-    // prelude. Suppress only matching occurrences already delivered live.
-    const reported: NativeProgress[] = [];
+    // Preparation progress arrives once, as native transport reports before
+    // the stream is accepted. A hub of the previous release repeats it as
+    // text before remote.ready; drop that text.
+    let reported = 0;
     let prelude = true;
     const deliver = (data: unknown) => {
       if (this.ended) return;
       if (prelude && typeof data === "string") {
         try {
           const message = JSON.parse(data);
-          if (message.type === "remote.ready") { prelude = false; reported.length = 0; }
-          else if (message.type === "remote.progress") {
-            const index = reported.findIndex(value => value.phase === message.step && value.message === message.message);
-            if (index !== -1) { reported.splice(index, 1); return; }
-          }
+          if (message.type === "remote.ready") prelude = false;
+          else if (message.type === "remote.progress") return;
         } catch { /* The normal connection parser owns malformed messages. */ }
       }
       this.onmessage?.({ data });
     };
     const progress = (value: NativeProgress) => {
-      if (this.ended || reported.length >= 8 || typeof value?.phase !== "string" || value.phase.length > 64
+      if (this.ended || reported >= 8 || typeof value?.phase !== "string" || value.phase.length > 64
         || typeof value.message !== "string" || value.message.length > 4096) return;
       const report = { phase: value.phase, message: value.message };
-      reported.push(report);
+      reported += 1;
       // A synchronous opener may report before the caller installs handlers.
       queueMicrotask(() => { if (!this.ended) this.onmessage?.({ data: JSON.stringify({ type: "remote.progress", step: report.phase, message: report.message }) }); });
     };

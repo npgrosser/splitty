@@ -177,9 +177,10 @@ pub trait Forwarding: Send {
     fn stop(&mut self) -> BoxFuture<'_, ()>;
 }
 
-/// The steps of `remote.progress`, in the order they can occur.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+/// The steps of host preparation, in the order they can occur. A native host
+/// stream reports them as the `phase` of transport progress reports; the
+/// browser gateway translates those into `remote.progress`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Step {
     /// The server is being installed on the host.
     Install,
@@ -194,7 +195,34 @@ pub enum Step {
     Bridge,
 }
 
-/// One `remote.progress`.
+impl Step {
+    const ALL: [Step; 5] = [
+        Step::Install,
+        Step::Daemon,
+        Step::Update,
+        Step::Started,
+        Step::Bridge,
+    ];
+
+    /// The step's name on the wire, the one place it is spelled.
+    pub fn name(self) -> &'static str {
+        match self {
+            Step::Install => "install",
+            Step::Daemon => "daemon",
+            Step::Update => "update",
+            Step::Started => "started",
+            Step::Bridge => "bridge",
+        }
+    }
+
+    /// The step a progress report's phase names; `None` for a phase that is
+    /// no step, such as the transport's own `connecting`.
+    pub fn from_name(name: &str) -> Option<Step> {
+        Step::ALL.into_iter().find(|step| step.name() == name)
+    }
+}
+
+/// One preparation step reached, with its message for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Progress {
     step: Step,
@@ -205,8 +233,6 @@ struct Progress {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type")]
 enum HubMessage<'a> {
-    #[serde(rename = "remote.progress")]
-    Progress { step: Step, message: &'a str },
     #[serde(rename = "remote.ready")]
     Ready {
         target: &'a str,
@@ -971,13 +997,6 @@ mod tests {
     /// The shapes `docs/protocol.ts` names.
     #[test]
     fn the_hubs_messages_encode_as_the_protocol_names_them() {
-        assert_eq!(
-            json(&HubMessage::Progress {
-                step: Step::Install,
-                message: "Installing"
-            }),
-            serde_json::json!({"type": "remote.progress", "step": "install", "message": "Installing"})
-        );
         for (step, name) in [
             (Step::Install, "install"),
             (Step::Daemon, "daemon"),
@@ -985,11 +1004,11 @@ mod tests {
             (Step::Started, "started"),
             (Step::Bridge, "bridge"),
         ] {
-            assert_eq!(
-                serde_json::to_value(step).expect("step"),
-                serde_json::json!(name)
-            );
+            assert_eq!(step.name(), name);
+            assert_eq!(Step::from_name(name), Some(step));
         }
+        assert!(Step::ALL.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(Step::from_name("connecting"), None);
 
         let screens = [
             Screen {

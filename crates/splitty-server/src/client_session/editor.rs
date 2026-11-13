@@ -267,27 +267,6 @@ impl EditorRequests {
         );
         Ok((id, rx))
     }
-
-    /// Called by the connection heartbeat, and by a request's independent timer.
-    pub async fn expire(&self) {
-        let mut registry = self.registry.lock().expect("registration registry");
-        let expired: Vec<_> = registry
-            .pending
-            .iter()
-            .filter(|(_, p)| Instant::now() >= p.deadline)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in expired {
-            if let Some(p) = registry.pending.remove(&id) {
-                if let Some(c) = registry.clients.get(&p.client) {
-                    let _ = c
-                        .sender
-                        .try_send_json(&json!({"type":"editor.cancelled","requestId":id}));
-                }
-                let _ = p.answer.send(Outcome::Expired);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -487,12 +466,11 @@ mod tests {
             .reply("client-0", &json!({"requestId":id,"outcome":"dispatched"}))
             .await;
         assert_eq!(answer.await.expect("answer"), Outcome::Expired);
-        requests.expire().await;
-        assert!(requests
+        assert!(!requests
             .registry
             .lock()
             .expect("registration registry")
             .pending
-            .is_empty());
+            .contains_key(&id));
     }
 }

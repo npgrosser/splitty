@@ -371,10 +371,6 @@ async fn run(
                     match &message.value {
                         Message::Text(text) => sender.data(Kind::Text, text.as_bytes())?,
                         Message::Binary(bytes) => sender.data(Kind::Binary, bytes)?,
-                        // The native carrier owns ping/pong; wake the common
-                        // session heartbeat without forwarding browser controls.
-                        Message::Ping(_) => { session.input.send(Message::Pong(Vec::new()))?; }
-                        Message::Pong(_) => {},
                         Message::Close => break,
                     }
                 }
@@ -390,4 +386,132 @@ async fn run(
     }
     while tasks.join_next().await.is_some() {}
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A native client of `state` over an in-process pipe, after framing and
+    /// the service handshake: its raw ends, Ready and the service task.
+    async fn connected(
+        state: Arc<State>,
+    ) -> (
+        (
+            tokio::io::ReadHalf<tokio::io::DuplexStream>,
+            tokio::io::WriteHalf<tokio::io::DuplexStream>,
+        ),
+        wire::Ready,
+        tokio::task::JoinHandle<io::Result<()>>,
+    ) {
+        let (client, server) = tokio::io::duplex(1024 * 1024);
+        let (server_read, server_write) = tokio::io::split(server);
+        let instance = state.instance.clone();
+        let task = tokio::spawn(serve(
+            server_read,
+            server_write,
+            state,
+            Assignment::default(),
+        ));
+        let (mut read, mut write) = tokio::io::split(client);
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        negotiation::client(&mut read, &mut write, &budget)
+            .await
+            .unwrap();
+        let ready = negotiation::accept(
+            &mut read,
+            &mut write,
+            &budget,
+            negotiation::Expected {
+                instance: Some(&instance),
+                purpose: &wire::Purpose::Direct,
+                mux_protocol: splitty_core::protocol::PROTOCOL_VERSION,
+                preparation: wire::HANDSHAKE_TIMEOUT,
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+        ((read, write), (*ready).clone(), task)
+    }
+
+    fn registered(state: &State) -> usize {
+        state.client_state.clients.lock().unwrap().len()
+    }
+
+    async fn until_registered(state: &State, count: usize) {
+        time::timeout(Duration::from_secs(10), async {
+            while registered(state) != count {
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the session registers");
+    }
+
+    /// mux-protocol, Heartbeat and Liveness (Silent client, Responsive
+    /// client, Peer of the previous release): the session loop keeps no
+    /// heartbeat, so the native carrier's transport pings alone decide. A
+    /// peer that answers them stays registered however long it sends
+    /// nothing; a peer that stops is ended within 45 seconds and its session
+    /// released. In-process with paused time once the session runs.
+    #[tokio::test]
+    async fn the_native_carrier_alone_ends_a_silent_peer_and_keeps_a_responsive_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = service::runtime::build(
+            "embedded",
+            None,
+            Arc::new(splitty_core::pty::terminal::LocalTerminals),
+            &directory.path().join("control.sock"),
+        );
+        let state = runtime.state.clone();
+        let ((read, write), ready, responsive_task) = connected(state.clone()).await;
+        let mut responsive = peer::Peer::start(read, write, &ready, queue::Context::default());
+        let welcome = responsive.recv().await.expect("welcome");
+        assert_eq!(welcome.frame.kind, Kind::Text);
+        drop(welcome);
+        let drain = tokio::spawn(async move {
+            while let Some(message) = responsive.recv().await {
+                drop(message);
+            }
+            responsive
+        });
+        until_registered(&state, 1).await;
+        // Never read again, never answer a ping.
+        let (silent_io, _ready, silent_task) = connected(state.clone()).await;
+        until_registered(&state, 2).await;
+
+        time::pause();
+        let silent_since = Instant::now();
+        time::timeout(Duration::from_secs(46), async {
+            while registered(&state) != 1 {
+                time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the silent peer is ended within 45 seconds");
+        // Counted from acceptance, a moment before the clock was paused.
+        let silent_for = silent_since.elapsed();
+        assert!(
+            silent_for + Duration::from_secs(1) >= wire::LIVENESS_TIMEOUT,
+            "ended after {silent_for:?}"
+        );
+        let _ended = time::timeout(Duration::from_secs(1), silent_task)
+            .await
+            .expect("the silent peer's service task ends")
+            .expect("service task");
+        drop(silent_io);
+
+        for _ in 0..60 {
+            time::sleep(Duration::from_secs(5)).await;
+        }
+        assert_eq!(registered(&state), 1, "the idle responsive peer is kept");
+        assert!(!responsive_task.is_finished());
+
+        drain.abort();
+        let _ = drain.await;
+        let _ = time::timeout(Duration::from_secs(1), responsive_task).await;
+        runtime.close().await.unwrap();
+    }
 }

@@ -155,7 +155,7 @@ model {
 
     http -> embed 'FrontendAssets, themed_index_html'
     http -> client_session 'Native client connections, PortWatch and review limits in tests'
-    http -> hub 'Hub, a scripted host, its fixture ports, forwards, reverse forwards and VERSION in tests'
+    http -> hub 'The host preparation steps the gateway translates into remote.progress; Hub, a scripted host, its fixture ports, forwards, reverse forwards and VERSION in tests'
     control -> http 'build_control_router'
     control -> service 'Compose owner control without browser credentials'
 

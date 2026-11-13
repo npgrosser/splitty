@@ -57,7 +57,7 @@ it("aborts an unfinished SSH preparation when its host view closes", async () =>
   socket.close(); expect(signal?.aborted).toBe(true); await tick();
 });
 
-it("shows preparation progress before Ready and suppresses only its matching prelude", async () => {
+it("shows preparation progress before Ready and drops an older hub's repeated text", async () => {
   const f = fixture(); let finish!: (channel: NativeChannel) => void;
   let report!: (value: { phase: string; message: string }) => void;
   const socket = new NativeHubSocket("vm1", false, "document", (_target, _update, _signal, progress) => {
@@ -69,10 +69,11 @@ it("shows preparation progress before Ready and suppresses only its matching pre
   expect(seen).toHaveBeenCalledWith({ data: JSON.stringify({ type: "remote.progress", step: "install", message: "Installing" }) });
   finish(f.channel); await tick();
   f.json({ type: "remote.progress", step: "install", message: "Installing" });
-  expect(seen).toHaveBeenCalledTimes(1);
   f.json({ type: "remote.progress", step: "bridge", message: "Ready" });
-  expect(seen).toHaveBeenCalledTimes(2);
-  f.json(ready); expect(seen).toHaveBeenCalledTimes(3);
+  expect(seen).toHaveBeenCalledTimes(1);
+  f.json(ready); expect(seen).toHaveBeenCalledTimes(2);
+  f.json({ type: "remote.progress", step: "bridge", message: "From the host" });
+  expect(seen).toHaveBeenCalledTimes(3);
   socket.close(); report({ phase: "daemon", message: "Stale" }); await tick();
   expect(seen).toHaveBeenCalledTimes(3);
 });

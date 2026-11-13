@@ -6,14 +6,16 @@
 //! `tokio::select!` loop reading both client frames and the notification
 //! broadcast channel. Text messages are dispatched first to the `MuxHandler`,
 //! falling back to the core protocol dispatcher. Cleans up on disconnect.
+//!
+//! The loop keeps no heartbeat: liveness belongs to the carrier, which closes
+//! the session's delivery context when its peer falls silent. Editor requests
+//! and file offers expire by the deadline each waiting request holds.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::Message;
 use rand::Rng;
 use splitty_transport::queue;
-use tokio::time::{self, Instant};
 
 use super::codec;
 use super::mux_handler::{self, MuxHandler};
@@ -113,12 +115,7 @@ pub(super) async fn run(
     super::ports::greet(&client_state, &sender).await;
     super::program_status::greet(&client_state, &sender).await;
 
-    // Heartbeat: ping every 15s, consider dead after 30s of silence
-    let mut ping_interval = time::interval(Duration::from_secs(15));
-    ping_interval.tick().await; // consume the immediate first tick
-    let mut last_activity = Instant::now();
-
-    // Read session input, its bounded notification queue, and heartbeat concurrently
+    // Read session input and its bounded notification queue concurrently
     loop {
         tokio::select! {
             _ = closing.changed() => break,
@@ -145,8 +142,6 @@ pub(super) async fn run(
                     Some(m) => m.into_parts(),
                     None => break,
                 };
-
-                last_activity = Instant::now();
 
                 match msg {
                     Message::Text(text) => {
@@ -249,9 +244,6 @@ pub(super) async fn run(
                     Message::Binary(_) => {
                         // Binary messages from client are unexpected, ignore
                     }
-                    Message::Ping(_) | Message::Pong(_) => {
-                        // Activity already recorded above
-                    }
                     Message::Close => {
                         break;
                     }
@@ -261,18 +253,6 @@ pub(super) async fn run(
                 match result {
                     Some(message) => { if sender.forward(message).is_err() { break; } }
                     None => break,
-                }
-            }
-            _ = ping_interval.tick() => {
-                client_state.editor_requests.expire().await;
-                client_state.file_offers.expire().await;
-                if last_activity.elapsed() > Duration::from_secs(30) {
-                    tracing::info!("ws heartbeat timeout: clientId={}", client_id);
-                    break;
-                }
-                if sender.send_ping().is_err() {
-                    tracing::debug!("ws ping send failed: clientId={}", client_id);
-                    break;
                 }
             }
         }

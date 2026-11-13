@@ -867,17 +867,15 @@ async fn native_host_open_pins_the_local_hub_before_any_ssh_and_keeps_remote_aut
         }
         .unwrap();
         assert_eq!(client.ready.purpose, expected);
-        loop {
-            let message = tokio::time::timeout(WAIT, client.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            let body: Value = message.frame.decode().unwrap();
-            if body["type"] == "remote.ready" {
-                break;
-            }
-            assert_eq!(body["type"], "remote.progress");
-        }
+        // remote-screens, Progress on a native host stream: progress went out
+        // as transport reports; the first application message is ready.
+        let message = tokio::time::timeout(WAIT, client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let body: Value = message.frame.decode().unwrap();
+        assert_eq!(body["type"], "remote.ready");
+        drop(message);
         let welcome = tokio::time::timeout(WAIT, client.recv())
             .await
             .unwrap()
@@ -1057,6 +1055,124 @@ async fn gateway_host_upgrade_reports_progress_before_ready_and_admits_early_inp
             .count(),
         1
     );
+}
+
+/// remote-screens, Hub of the previous release: such a hub repeats its
+/// preparation progress as `remote.progress` text after accepting the host
+/// stream. The browser gets each step once, from the transport reports, and
+/// no text the gateway did not translate.
+#[tokio::test]
+async fn an_older_hubs_repeated_progress_text_is_not_forwarded_to_the_browser() {
+    use splitty_transport::{
+        codec::{self, Frame},
+        negotiation, queue,
+        wire::{self, Kind},
+    };
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let _serial = WS_TEST_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let (listener, info) = fake_api_listener(&state, &dir.path().join("hub.sock"));
+    let instance = state.instance.clone();
+    let hub = tokio::spawn(async move {
+        let (io, _) = listener.accept().await.unwrap();
+        let (mut read, mut write) = io.into_split();
+        let context = queue::Context::default();
+        let open = negotiation::server_main(&mut read, &mut write, &context.budget)
+            .await
+            .unwrap();
+        let target = open.as_ref().as_ref().unwrap().target.clone();
+        for phase in ["connecting", "install", "install", "daemon"] {
+            let report = wire::Progress {
+                phase: phase.into(),
+                message: format!("{phase}..."),
+            };
+            codec::write(&mut write, &Frame::json(Kind::Progress, &report).unwrap())
+                .await
+                .unwrap();
+        }
+        let ready = wire::Ready {
+            generation: 1,
+            instance,
+            mux_protocol: splitty_core::protocol::PROTOCOL_VERSION,
+            purpose: wire::Purpose::Host {
+                target: target.clone(),
+            },
+            limits: wire::Limits::default(),
+        };
+        negotiation::offer(&mut read, &mut write, &context.budget, &ready)
+            .await
+            .unwrap();
+        let mut peer = splitty_transport::peer::Peer::start(read, write, &ready, context);
+        for step in ["install", "daemon", "bridge"] {
+            peer.sender
+                .json(
+                    Kind::Text,
+                    &json!({"type":"remote.progress","step":step,"message":"again"}),
+                )
+                .unwrap();
+        }
+        let ready = json!({"type":"remote.ready","target":target,
+            "daemon":{"version":"0.0.1","protocol":1,"keepsSessions":true,"started":false},
+            "update":{"available":false,"keepsSessions":true},"screens":[]});
+        peer.sender.json(Kind::Text, &ready).unwrap();
+        peer.sender
+            .json(Kind::Text, &json!({"type":"mux.welcome","screens":[]}))
+            .unwrap();
+        while peer.recv().await.is_some() {}
+        peer.finish().await.ok();
+    });
+    let backend = gateway::Backend::daemon(info);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let browser = browser(&address.to_string());
+    let app = gateway::router(backend.clone(), browser.clone());
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(crate::http::server::serve(listener, app, async {
+        let _ = stopped.await;
+    }));
+    let mut request = format!(
+        "ws://{address}/ws/remote?target=vm1&ticket={}",
+        browser.sessions.issue_ticket()
+    )
+    .into_client_request()
+    .unwrap();
+    request
+        .headers_mut()
+        .insert("origin", format!("http://{address}").parse().unwrap());
+    let (mut socket, _) = tokio::time::timeout(WAIT, tokio_tungstenite::connect_async(request))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut seen = Vec::new();
+    loop {
+        let next = json_of(
+            tokio::time::timeout(WAIT, socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+        );
+        let kind = next["type"].as_str().unwrap().to_owned();
+        if kind == "remote.progress" {
+            assert_ne!(
+                next["message"], "again",
+                "no repeated text reaches the browser"
+            );
+            seen.push(next["step"].as_str().unwrap().to_owned());
+            continue;
+        }
+        seen.push(kind.clone());
+        if kind == "mux.welcome" {
+            break;
+        }
+    }
+    assert_eq!(seen, ["install", "daemon", "remote.ready", "mux.welcome"]);
+    socket.close(None).await.unwrap();
+    backend.close();
+    stop.send(()).unwrap();
+    server.await.unwrap().unwrap();
+    tokio::time::timeout(WAIT, hub).await.unwrap().unwrap();
 }
 
 #[tokio::test]

@@ -54,10 +54,6 @@ impl ClientSender {
     pub async fn send_binary_data(&self, data: Vec<u8>) -> io::Result<()> {
         self.data(data.len(), || Ok(Message::Binary(data)))
     }
-    pub fn send_ping(&self) -> io::Result<()> {
-        self.tx
-            .send(wire::HEADER_BYTES, true, || Message::Ping(Vec::new()))
-    }
     pub async fn send_event(&self, event: &ServerEvent) -> io::Result<()> {
         self.event(event)
     }

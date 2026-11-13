@@ -3,12 +3,12 @@ use super::{handler, sender::ClientSender, ClientState};
 use splitty_transport::{admission, queue, wire};
 use std::sync::Arc;
 
+/// A session message between a carrier and the session loop. Liveness is
+/// the carrier's own and has no message here.
 #[derive(Debug)]
 pub enum Message {
     Text(String),
     Binary(Vec<u8>),
-    Ping(Vec<u8>),
-    Pong(Vec<u8>),
     Close,
 }
 
@@ -87,7 +87,6 @@ impl Input {
         let (length, control) = match &message {
             Message::Text(text) => (text.len(), false),
             Message::Binary(bytes) => (bytes.len(), false),
-            Message::Ping(bytes) | Message::Pong(bytes) => (bytes.len(), true),
             Message::Close => (0, true),
         };
         let size = length.saturating_add(wire::HEADER_BYTES + wire::DELIVERY_BYTES);

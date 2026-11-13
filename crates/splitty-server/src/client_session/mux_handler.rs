@@ -1,4 +1,4 @@
-//! Handles the `mux.*` sub-protocol for a single WebSocket connection.
+//! Handles the `mux.*` sub-protocol for a single client session.
 //!
 //! Processes `mux.op` and `mux.resync` messages, and `viewer.review_answer`,
 //! a window's answer to a process waiting for a review. Sends a `mux.welcome`
@@ -24,7 +24,7 @@ use super::sender::ClientSender;
 /// it does not spawn per-event sends or allocate shared JSON copies.
 pub type BroadcastFn = Arc<dyn Fn(&[ServerEvent], Arc<ClientSender>) + Send + Sync>;
 
-/// Handles the mux.* protocol for a single WebSocket connection.
+/// Handles the mux.* protocol for a single client session.
 pub struct MuxHandler {
     hub_decisions: bool,
     store: Arc<Store>,

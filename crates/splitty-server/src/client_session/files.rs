@@ -517,8 +517,8 @@ impl FileOffers {
     }
 
     /// Close the offers whose deadline passed: not accepted (`expired`), or
-    /// accepted and not read (`disconnected`). Called by the connection
-    /// heartbeat, and by an offer's own timer.
+    /// accepted and not read (`disconnected`). Called by each offer's own
+    /// timer at its deadline.
     pub async fn expire(&self) {
         let mut registry = self.registry.lock().expect("registration registry");
         let now = Instant::now();

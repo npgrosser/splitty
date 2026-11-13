@@ -36,7 +36,7 @@ Out of scope: the transport's ping/pong frames and the gateway's browser heartbe
 
 ## Architecture impact
 
-None: no component or relationship of architecture/*.c4 changes; docs/architecture.md's native adapter and hub paragraphs state where liveness and progress live.
+Changes the description of `http -> hub` in architecture/server.c4 (the gateway now orders host steps by the hub's step names in production code); docs/architecture.md's native adapter, session and hub paragraphs state where liveness and progress live.
 
 ## Decisions
 

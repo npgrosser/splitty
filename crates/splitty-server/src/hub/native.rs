@@ -58,7 +58,6 @@ impl Hub {
             reached = Some(self.reach(target, update, reports, &context).await);
             Ok(())
         };
-        let mut prelude = Vec::new();
         tokio::pin!(shutdown);
         let result = crate::native::relay::prepare(
             &mut read,
@@ -71,13 +70,9 @@ impl Hub {
                     .budget
                     .display(&report.message, true)?
                     .map(|message| wire::Progress {
-                        phase: format!("{:?}", report.step).to_lowercase(),
+                        phase: report.step.name().into(),
                         message,
                     });
-                // At most install/daemon/update/started/bridge, all locally built.
-                if prelude.len() < 8 {
-                    prelude.push(report);
-                }
                 Ok(control)
             },
             &mut shutdown,
@@ -130,15 +125,7 @@ impl Hub {
             .transpose()
             .map_err(io::Error::other)?;
         let client = client.insert(Peer::start(read, write, &ready, context));
-        for progress in prelude {
-            client.sender.json(
-                Kind::Text,
-                &HubMessage::Progress {
-                    step: progress.step,
-                    message: &progress.message,
-                },
-            )?;
-        }
+        // Progress went out once, as transport reports during preparation.
         client.sender.json(
             Kind::Text,
             &HubMessage::Ready {
@@ -658,7 +645,12 @@ mod tests {
         assert!(frame.decode::<wire::Closed>().unwrap().retryable);
     }
 
-    async fn open(hub: Arc<Hub>, target: &str) -> (Peer, tokio::task::JoinHandle<io::Result<()>>) {
+    /// A native host stream for `target`, with the phases of the transport
+    /// progress reports its preparation sent.
+    async fn open(
+        hub: Arc<Hub>,
+        target: &str,
+    ) -> (Peer, Vec<String>, tokio::task::JoinHandle<io::Result<()>>) {
         let (client, server) = tokio::io::duplex(128 * 1024);
         let (read, write) = tokio::io::split(server);
         let target = SshTarget::parse(target).unwrap();
@@ -674,6 +666,7 @@ mod tests {
         negotiation::client(&mut read, &mut write, &context.budget)
             .await
             .unwrap();
+        let mut phases = Vec::new();
         let ready = negotiation::accept(
             &mut read,
             &mut write,
@@ -684,11 +677,11 @@ mod tests {
                 mux_protocol: PROTOCOL_VERSION,
                 preparation: Duration::from_secs(10),
             },
-            |_| {},
+            |report| phases.push(report.phase.clone()),
         )
         .await
         .unwrap();
-        (Peer::start(read, write, &ready, context), task)
+        (Peer::start(read, write, &ready, context), phases, task)
     }
 
     #[tokio::test]
@@ -807,21 +800,19 @@ mod tests {
         serde_json::from_slice(message.frame.application().unwrap().1).unwrap()
     }
 
-    async fn prelude(peer: &mut Peer, target: &str) {
-        let mut steps = Vec::new();
-        loop {
-            let message = json_message(peer).await;
-            match message["type"].as_str().unwrap() {
-                "remote.progress" => steps.push(message["step"].as_str().unwrap().to_owned()),
-                "remote.ready" => {
-                    assert_eq!(message["target"], target);
-                    break;
-                }
-                other => panic!("application event before host prelude: {other}"),
-            }
-        }
-        assert!(steps.iter().any(|step| step == "daemon"));
-        assert_eq!(steps.last().map(String::as_str), Some("bridge"));
+    /// remote-screens, Progress on a native host stream: the steps arrive as
+    /// transport progress reports during preparation, and after acceptance
+    /// `remote.ready` is the first application message, then the welcome.
+    async fn prelude(peer: &mut Peer, phases: &[String], target: &str) {
+        let steps: Vec<_> = phases.iter().filter_map(|p| Step::from_name(p)).collect();
+        assert!(steps.contains(&Step::Daemon), "{phases:?}");
+        assert_eq!(steps.last(), Some(&Step::Bridge), "{phases:?}");
+        let ready = json_message(peer).await;
+        assert_eq!(
+            ready["type"], "remote.ready",
+            "no progress repeated as text"
+        );
+        assert_eq!(ready["target"], target);
         assert_eq!(json_message(peer).await["type"], "mux.welcome");
     }
 
@@ -834,11 +825,11 @@ mod tests {
             dir.path().join("config"),
             None,
         ));
-        let (mut first, first_task) = open(hub.clone(), "vm1").await;
-        prelude(&mut first, "vm1").await;
+        let (mut first, phases, first_task) = open(hub.clone(), "vm1").await;
+        prelude(&mut first, &phases, "vm1").await;
         let first_pid = host.bridge_pid().unwrap();
-        let (mut second, second_task) = open(hub.clone(), "vm2").await;
-        prelude(&mut second, "vm2").await;
+        let (mut second, phases, second_task) = open(hub.clone(), "vm2").await;
+        prelude(&mut second, &phases, "vm2").await;
         assert_ne!(first_pid, host.bridge_pid().unwrap());
         first
             .sender
@@ -920,10 +911,10 @@ mod tests {
         hub.save_forward_with_restore("vm1", paused.into(), None, None, Some(false))
             .await
             .unwrap();
-        let (mut first, first_task) = open(hub.clone(), "vm1").await;
-        prelude(&mut first, "vm1").await;
-        let (mut second, second_task) = open(hub.clone(), "vm1").await;
-        prelude(&mut second, "vm1").await;
+        let (mut first, phases, first_task) = open(hub.clone(), "vm1").await;
+        prelude(&mut first, &phases, "vm1").await;
+        let (mut second, phases, second_task) = open(hub.clone(), "vm1").await;
+        prelude(&mut second, &phases, "vm1").await;
         let forwards = || {
             host.asked()
                 .into_iter()

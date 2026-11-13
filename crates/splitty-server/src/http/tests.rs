@@ -1212,8 +1212,9 @@ impl Socket {
                 let message = match message {
                     Message::Text(text) => Native::Text(text.to_string()),
                     Message::Binary(bytes) => Native::Binary(bytes.to_vec()),
-                    Message::Ping(bytes) => Native::Ping(bytes.to_vec()),
-                    Message::Pong(bytes) => Native::Pong(bytes.to_vec()),
+                    // Liveness belongs to a carrier; this in-process session
+                    // has none, and its pings and pongs have no receiver.
+                    Message::Ping(_) | Message::Pong(_) => return Ok(()),
                     Message::Close(_) => Native::Close,
                     Message::Frame(_) => {
                         return Err("raw WebSocket frame on native connection".into())
@@ -1238,8 +1239,6 @@ impl Socket {
                 Ok(match message.value {
                     Native::Text(text) => Message::Text(text.into()),
                     Native::Binary(bytes) => Message::Binary(bytes.into()),
-                    Native::Ping(bytes) => Message::Ping(bytes.into()),
-                    Native::Pong(bytes) => Message::Pong(bytes.into()),
                     Native::Close => Message::Close(None),
                 })
             }),

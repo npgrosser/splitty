@@ -1,10 +1,10 @@
-//! Wire-format codec for WebSocket messages.
+//! Wire-format codec for session messages.
 //!
 //! Provides a compact binary frame format for terminal output (avoiding JSON/base64
 //! overhead on the hot path) and JSON deserialization for incoming client messages.
 //! Server→client events use `ServerEvent` with serde serialization directly.
 
-// Re-export core protocol types used by other ws modules.
+// Re-export core protocol types used by the other session modules.
 pub use splitty_core::protocol::{
     Request, MSG_MUX_OP, MSG_MUX_RESYNC, MSG_MUX_WORKSPACE_RESYNC, MSG_VIEWER_ANCHOR,
     MSG_VIEWER_READ, MSG_VIEWER_REVIEW, MSG_VIEWER_REVIEW_ANSWER,

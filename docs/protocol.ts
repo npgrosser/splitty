@@ -2234,6 +2234,13 @@ type ClientCommand =
 // Before the relay, the hub sends only RemoteHubMessage text messages:
 // RemoteProgress per step, then exactly one RemoteReady, or a RemoteError
 // after which it closes the socket (code 1000, the error code as reason).
+// RemoteProgress exists only on this browser socket: the gateway translates
+// the native host stream's transport Progress reports (Native transport v1
+// below), each step once and in order, and forwards no RemoteProgress text of
+// the host stream. A native host stream carries the steps only as Progress
+// frames before acceptance; its first text is RemoteReady. A hub of the
+// previous release repeats them as RemoteProgress text before RemoteReady,
+// which every reader ignores.
 // After RemoteReady every message is the host daemon's own, relayed
 // unchanged in both directions (text as text, binary as binary): its
 // mux.welcome first, then the messages of sections 2 and 3 in the wire
@@ -2251,7 +2258,8 @@ type ClientCommand =
 /** Close code of a relaying `/ws/remote` socket whose host side ended. */
 const REMOTE_HOST_LOST = 4001;
 
-/** A step before the relay, in this order. `install` only when the server is
+/** A step before the relay, in this order; also the `phase` of a native
+ *  Progress report of a host stream. `install` only when the server is
  *  uploaded now; `update` only with `update=1` when the daemon of another
  *  version is stopped; `started` only when this socket's handshake started
  *  the daemon (after `update`, always). */
@@ -3268,8 +3276,13 @@ export interface StopDaemonInstance { instance: string; }
  * IPC chunk from releasing undelivered bytes. Charges cover reassembly, queues and in-flight data until consumption;
  * peers cannot increase limits. IPC chunks are at most 64 KiB. Application order
  * is preserved; bounded reserved control capacity carries credit/cancel/ping.
- * The first direct event remains mux.welcome. Host streams retain remote.progress
- * and remote.ready before mux.welcome. Golden bytes: native-transport-v1.json.
+ * The first direct event remains mux.welcome. Host streams report preparation
+ * steps as Progress frames before acceptance (`phase` a RemoteStep, or a
+ * transport phase such as `connecting`, repeated as a pulse), then send
+ * remote.ready before mux.welcome. Liveness is the carrier's: Ping every 15 s
+ * while none is unanswered, the connection ends at a check that finds no
+ * matching Pong for 30 s; session messages carry no heartbeat.
+ * Golden bytes: native-transport-v1.json.
  */
 export const NativeFrameKind = {
   Hello: 0, Text: 1, Binary: 2, Accept: 3, Ready: 4, Request: 5, Reply: 6,

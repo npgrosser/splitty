@@ -2,6 +2,7 @@
 //! assets terminate here; API/session connections have independent lifetimes.
 use super::{browser_wire, middleware, routes, session, BrowserState};
 use crate::{
+    hub::Step,
     native::client::{Client, Connector, Pending},
     service::catalog::{self, Cancellation, Operation, Role},
 };
@@ -765,20 +766,6 @@ impl Heartbeat {
     }
 }
 
-// Native preparation includes repeated liveness reports. Browser progress
-// keeps its existing ordered step vocabulary and does not replay the snapshot
-// again after Ready.
-fn progress_rank(phase: &str) -> Option<u8> {
-    match phase {
-        "install" => Some(1),
-        "daemon" => Some(2),
-        "update" => Some(3),
-        "started" => Some(4),
-        "bridge" => Some(5),
-        _ => None,
-    }
-}
-
 /// The HTTP handshake completes before slow SSH setup. Only counted, bounded
 /// input is retained; it is admitted once and never moved to another attempt.
 async fn host_session<I>(
@@ -809,7 +796,7 @@ async fn host_session<I>(
     } = Heartbeat::new();
     let mut progress_open = true;
     let mut browser_closed = false;
-    let mut last_progress = 0;
+    let mut last_step = None;
     let result: io::Result<Option<Connection>> = {
         let prepare = async {
             let target =
@@ -851,14 +838,14 @@ async fn host_session<I>(
                     awaiting_pong = Some(nonce);
                 },
                 next = progress.recv(), if progress_open => if let Some(report) = next {
-                    host_progress(&report, &mut last_progress, &mut writer, &mut revision,
+                    host_progress(&report, &mut last_step, &mut writer, &mut revision,
                         &context, last_pong + wire::LIVENESS_TIMEOUT).await?;
                 } else { progress_open = false; },
                 result = &mut prepare => {
                     completed = true;
                     let connection = result?;
                     while let Ok(report) = progress.try_recv() {
-                        if let Err(error) = host_progress(&report, &mut last_progress, &mut writer, &mut revision,
+                        if let Err(error) = host_progress(&report, &mut last_step, &mut writer, &mut revision,
                             &context, last_pong + wire::LIVENESS_TIMEOUT).await {
                             connection.finish().await;
                             return Err(error);
@@ -894,7 +881,7 @@ async fn host_session<I>(
                         last_pong,
                         awaiting_pong,
                     },
-                    Some(last_progress),
+                    true,
                 )
                 .await;
                 return;
@@ -929,21 +916,25 @@ async fn host_session<I>(
     let _ = tokio::time::timeout(wire::HANDSHAKE_TIMEOUT, writer.shutdown()).await;
 }
 
+/// Translate one transport progress report of a host stream into the
+/// browser's `remote.progress`. The native preparation repeats its latest
+/// report as a pulse and also reports phases that are no step: the browser
+/// gets each step once, in order.
 async fn host_progress<W: tokio::io::AsyncWrite + Unpin>(
     report: &wire::Progress,
-    last_progress: &mut u8,
+    last_step: &mut Option<Step>,
     writer: &mut browser_wire::Writer<W>,
     revision: &mut watch::Receiver<Option<Descriptor>>,
     context: &splitty_transport::queue::Context,
     deadline: tokio::time::Instant,
 ) -> io::Result<()> {
-    let Some(rank) = progress_rank(&report.phase) else {
+    let Some(step) = Step::from_name(&report.phase) else {
         return Ok(());
     };
-    if rank <= *last_progress {
+    if last_step.is_some_and(|last| step <= last) {
         return Ok(());
     }
-    *last_progress = rank;
+    *last_step = Some(step);
     #[derive(serde::Serialize)]
     struct Report<'a> {
         r#type: &'static str,
@@ -952,7 +943,7 @@ async fn host_progress<W: tokio::io::AsyncWrite + Unpin>(
     }
     let report = Report {
         r#type: "remote.progress",
-        step: &report.phase,
+        step: step.name(),
         message: &report.message,
     };
     let size = splitty_transport::codec::json_size(&report, wire::MAX_CONTROL_BYTES)?;
@@ -1058,7 +1049,7 @@ async fn session<I>(
         connection,
         revision,
         Heartbeat::new(),
-        None,
+        false,
     )
     .await;
 }
@@ -1069,7 +1060,7 @@ async fn session_parts<W: tokio::io::AsyncWrite + Unpin>(
     mut connection: Connection,
     mut revision: watch::Receiver<Option<Descriptor>>,
     heartbeat: Heartbeat,
-    mut host_progress: Option<u8>,
+    mut host_prelude: bool,
 ) {
     let sender = connection.sender();
     let context = sender.context();
@@ -1110,17 +1101,16 @@ async fn session_parts<W: tokio::io::AsyncWrite + Unpin>(
                 outgoing = connection.recv() => {
                     let Some(message) = outgoing else { break; };
                     let bytes = message.frame.application()?.1;
-                    if let Some(last) = &mut host_progress {
+                    if host_prelude {
                         #[derive(serde::Deserialize)]
-                        struct Prelude<'a> { r#type: &'a str, step: Option<&'a str> }
+                        struct Prelude<'a> { r#type: &'a str }
                         let prelude: Prelude<'_> = serde_json::from_slice(bytes)?;
                         match prelude.r#type {
-                            "remote.progress" => {
-                                let rank = prelude.step.and_then(progress_rank).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid host preparation step"))?;
-                                if rank <= *last { continue; }
-                                *last = rank;
-                            }
-                            "remote.ready" => host_progress = None,
+                            // A hub of the previous release repeats its
+                            // progress as text; the browser already got each
+                            // step from the transport reports.
+                            "remote.progress" => continue,
+                            "remote.ready" => host_prelude = false,
                             _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "host event before remote.ready")),
                         }
                     }
@@ -1233,7 +1223,7 @@ mod tests {
             Connection::Local(connection),
             revision,
             heartbeat,
-            None,
+            false,
         ));
         assert!(matches!(
             browser.next().await.unwrap().unwrap(),
