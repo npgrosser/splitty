@@ -52,6 +52,8 @@ describe("remoteScreenStatus", () => {
     expect(offersUpdate(remoteScreenStatus("vm1", incompatible, plain, []))).toBe(true);
     for (const state of [
       host("failed", { error: { code: "incompatible", message: "", update: {available:false, keepsSessions:true} } }),
+      // An update that would not keep the sessions is never offered.
+      host("failed", { error: { code: "incompatible", message: "", update: {available:true, keepsSessions:false} } }),
       host("failed", { error: { code: "unsupported_host", message: "" } }),
       host("failed", { error: { code: "migration_unavailable", message: "A keeper cannot be verified" } }),
       host("offline", { error: { code: "incompatible", message: "" } }),
@@ -143,8 +145,13 @@ describe("the screen list's host state", () => {
   });
 
   it("shows the hub update decision", () => {
-    const ready = host("ready", { ready: { target: "vm1", daemon: { version: "0.4.1", protocol: 1, keepsSessions: false, started: false }, update: {available: true, keepsSessions: false}, screens: [] } });
+    const ready = host("ready", { ready: { target: "vm1", daemon: { version: "0.4.1", protocol: 1, keepsSessions: true, started: false }, update: {available: true, keepsSessions: true}, screens: [] } });
     expect(hostTooltip("vm1", ready, "0.4.2")).toBe("vm1 · Splitty 0.4.1 · update to 0.4.2 available · connected");
+    // The hub names the version the host gets.
+    ready.ready!.update = {available: true, keepsSessions: true, toVersion: "0.4.3"};
+    expect(hostTooltip("vm1", ready, "0.4.2")).toBe("vm1 · Splitty 0.4.1 · update to 0.4.3 available · connected");
+    ready.ready!.update = {available: true, keepsSessions: false};
+    expect(hostTooltip("vm1", ready, "0.4.2")).toBe("vm1 · Splitty 0.4.1 · connected");
     ready.ready!.update = {available:false, keepsSessions:true};
     expect(hostTooltip("vm1", ready, "0.4.2")).toBe("vm1 · Splitty 0.4.1 · connected");
     // The local version is not known yet: nothing to compare.

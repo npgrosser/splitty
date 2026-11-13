@@ -1,6 +1,12 @@
 // The remote screens of the window, remembered across restarts by the local
-// server (`GET` and `PUT /api/remote/screens`; `remote-screens`, Remembered
-// Remote Screens).
+// server (`GET /api/remote/screens` and `PUT /api/remote/screens/host`;
+// `remote-screens`, Remembered Remote Screens).
+//
+// The list is the server's, shared with the other windows: this window
+// writes only the hosts it shows or showed, one host per request, and the
+// server replaces only that host's entries. A host whose last screen leaves
+// the window is forgotten. Entries marked `closed` (a host another window
+// closed) stay as they are and are not brought back.
 //
 // A screen's position is its index in the window's screen list, local screens
 // included, when the list was written. On start the remembered screens go
@@ -18,7 +24,8 @@
 //
 // The list is written after every change, debounced, and never before the
 // remembered one was read and restored: a write before that would replace it.
-// After a failed read the page leaves the list alone.
+// After a failed read the page leaves the list alone, and so it does with a
+// local server that does not announce `hub-host-state-v1`.
 
 import type { ScreenRef } from "../connection/routing.ts";
 import { hostKey, hostOf, type ConnKey } from "../connection/server_connection.ts";
@@ -35,6 +42,8 @@ export const MAX_SCREEN_ID = 256;
 export const WRITE_DELAY = 400;
 
 export const PATH = "/api/remote/screens";
+/** Where one host's screens are written. */
+export const HOST_PATH = "/api/remote/screens/host";
 
 export interface RememberedScreen {
   target: string;
@@ -44,11 +53,21 @@ export interface RememberedScreen {
   name?: string;
   /** Its index in the window's screen list, local screens included. */
   position?: number;
+  /** Its host was closed in a window: offered again, not brought back at start. */
+  closed?: true;
 }
 
-export interface RememberedList {
-  version: typeof FORMAT;
-  screens: RememberedScreen[];
+/** One host's screens as the window writes them. */
+export interface HostEntry {
+  screenId: string;
+  name?: string;
+  position?: number;
+}
+
+/** The body of `PUT /api/remote/screens/host`; an empty list forgets the host. */
+export interface HostWrite {
+  target: string;
+  screens: HostEntry[];
 }
 
 /** A screen of the window as the list sees it. */
@@ -78,7 +97,7 @@ export function parseRemembered(value: unknown): RememberedScreen[] {
   for (const entry of screens) {
     if (result.length >= MAX_REMEMBERED) break;
     if (typeof entry !== "object" || entry === null) continue;
-    const { target, screenId, name, position } = entry as Record<string, unknown>;
+    const { target, screenId, name, position, closed } = entry as Record<string, unknown>;
     if (typeof target !== "string" || validateTarget(target) !== target) continue;
     if (!validScreenId(screenId)) continue;
     const id = identity(target, screenId);
@@ -88,45 +107,74 @@ export function parseRemembered(value: unknown): RememberedScreen[] {
     const shown = plainText(name, MAX_NAME);
     if (shown) screen.name = shown;
     if (typeof position === "number" && Number.isInteger(position) && position >= 0) screen.position = position;
+    if (closed === true) screen.closed = true;
     result.push(screen);
   }
   return result;
 }
 
 /**
- * The list to write for the window's `screens`: every remote screen but the
- * ones `skip` names, with its index in the window as its position. A screen
- * the server would refuse (an id it does not take) is left out, so one odd
- * screen cannot cost the whole list.
+ * The screens to write per host for the window's `screens`: every remote
+ * screen but the ones `skip` names, with its index in the window as its
+ * position, hosts in the order of their first screen. A screen the server
+ * would refuse (an id it does not take) is left out, so one odd screen cannot
+ * cost its host's write.
  */
-export function rememberedList(screens: readonly WindowScreen[], skip: (key: string) => boolean): RememberedList {
-  const list: RememberedScreen[] = [];
+export function rememberedHosts(screens: readonly WindowScreen[], skip: (key: string) => boolean): Map<string, HostEntry[]> {
+  const hosts = new Map<string, HostEntry[]>();
   const seen = new Set<string>();
+  let count = 0;
   screens.forEach((screen, position) => {
     const target = hostOf(screen.conn);
-    if (!target || list.length >= MAX_REMEMBERED || skip(screen.id)) return;
+    if (!target || count >= MAX_REMEMBERED || skip(screen.id)) return;
     if (!validScreenId(screen.wireId)) return;
     const id = identity(target, screen.wireId);
     if (seen.has(id)) return;
     seen.add(id);
-    const entry: RememberedScreen = { target, screenId: screen.wireId };
+    const entry: HostEntry = { screenId: screen.wireId };
     const name = wellFormed(plainText(screen.name, MAX_NAME));
     if (name) entry.name = name;
     entry.position = position;
+    let list = hosts.get(target);
+    if (!list) hosts.set(target, list = []);
     list.push(entry);
+    count++;
   });
-  return { version: FORMAT, screens: list };
+  return hosts;
+}
+
+/**
+ * The open (not `closed`) entries of `remembered` per host, in the order of
+ * their positions, as `rememberedHosts` lists them once they are back.
+ */
+function storedHosts(remembered: readonly RememberedScreen[]): Map<string, HostEntry[]> {
+  const hosts = new Map<string, HostEntry[]>();
+  const ordered = remembered
+    .filter((screen) => !screen.closed)
+    .map((screen, order) => ({ screen, order }))
+    .sort((a, b) => (a.screen.position ?? Number.MAX_SAFE_INTEGER) - (b.screen.position ?? Number.MAX_SAFE_INTEGER)
+      || a.order - b.order);
+  for (const { screen } of ordered) {
+    // A screen without a name goes back under its id (`Workspace.svelte`).
+    const entry: HostEntry = { screenId: screen.screenId, name: screen.name ?? screen.screenId };
+    if (screen.position !== undefined) entry.position = screen.position;
+    let list = hosts.get(screen.target);
+    if (!list) hosts.set(screen.target, list = []);
+    list.push(entry);
+  }
+  return hosts;
 }
 
 /**
  * Where the remembered screens go back into the window's `shown` screens:
  * by position (screens without one last, in their order), each at its
  * position or at the end of the list as it is then. Screens the window shows
- * already are skipped.
+ * already, and the screens of a closed host, are skipped.
  */
 export function planRestore(shown: readonly ScreenRef[], remembered: readonly RememberedScreen[]): RestoreStep[] {
   const present = new Set(shown.map((s) => `${s.conn}\n${s.wireId}`));
   const ordered = remembered
+    .filter((screen) => !screen.closed)
     .map((screen, order) => ({ screen, order }))
     .sort((a, b) => (a.screen.position ?? Number.MAX_SAFE_INTEGER) - (b.screen.position ?? Number.MAX_SAFE_INTEGER)
       || a.order - b.order);
@@ -192,9 +240,13 @@ export class RememberedScreens {
   private phase: Phase = "idle";
   private read: RememberedScreen[] = [];
   private localReady = false;
+  /** The local server writes one host at a time (`hub-host-state-v1`). */
+  private hostWrites = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
-  /** The list last sent, as JSON, so an unchanged list is not sent again. */
-  private sent: string | undefined;
+  /** Per host this window shows or showed, its entries as the server holds them, as JSON. */
+  private readonly stored = new Map<string, string>();
+  /** Per host, the entries the server refused (400), not sent again unchanged. */
+  private readonly refused = new Map<string, string>();
   private inFlight = false;
   private again = false;
   private disposed = false;
@@ -226,9 +278,15 @@ export class RememberedScreens {
     this.restore();
   }
 
-  /** The window's screens changed: write the list soon, if it changed. */
+  /** Whether the local server takes writes per host; without them nothing is written. */
+  useHostWrites(enabled: boolean): void {
+    this.hostWrites = enabled;
+    if (enabled) this.changed();
+  }
+
+  /** The window's screens changed: write the hosts that changed, soon. */
   changed(): void {
-    if (this.phase !== "ready" || this.disposed) return;
+    if (this.phase !== "ready" || this.disposed || !this.hostWrites) return;
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = undefined;
@@ -237,22 +295,27 @@ export class RememberedScreens {
   }
 
   /**
-   * Write the list now, if it changed. With `keepalive` the request outlives
-   * the page (`pagehide`) and does not wait for one in flight.
+   * Write the hosts that changed, now. With `keepalive` the requests outlive
+   * the page (`pagehide`) and do not wait for one in flight.
    */
   flush(keepalive = false): void {
     clearTimeout(this.timer);
     this.timer = undefined;
-    if (this.phase !== "ready" || this.disposed) return;
-    const body = JSON.stringify(rememberedList(this.deps.screens(), (key) => this.deps.skip(key)));
-    if (body === this.sent) return;
-    if (this.inFlight && !keepalive) {
+    if (this.phase !== "ready" || this.disposed || !this.hostWrites) return;
+    const writes = this.pending();
+    if (writes.length === 0) return;
+    if (keepalive) {
+      for (const [target, body] of writes) void this.write(target, body, true);
+      return;
+    }
+    if (this.inFlight) {
       this.again = true;
       return;
     }
-    this.sent = body;
     this.inFlight = true;
-    void this.write(body, keepalive).finally(() => {
+    void (async () => {
+      for (const [target, body] of writes) await this.write(target, body, false);
+    })().finally(() => {
       this.inFlight = false;
       if (this.again) {
         this.again = false;
@@ -267,33 +330,49 @@ export class RememberedScreens {
     this.timer = undefined;
   }
 
+  /** The hosts whose entries differ from what the server holds, with their new entries as JSON. */
+  private pending(): [string, string][] {
+    const shown = rememberedHosts(this.deps.screens(), (key) => this.deps.skip(key));
+    const writes: [string, string][] = [];
+    for (const target of new Set([...shown.keys(), ...this.stored.keys()])) {
+      const body = JSON.stringify(shown.get(target) ?? []);
+      if (body !== (this.stored.get(target) ?? "[]") && body !== this.refused.get(target)) writes.push([target, body]);
+    }
+    return writes;
+  }
+
   private restore(): void {
     if (this.phase !== "waiting" || !this.localReady) return;
     const steps = planRestore(this.deps.screens(), this.read);
     // What the server holds counts as written; a restore that changes nothing
-    // writes nothing.
-    this.sent = JSON.stringify({ version: FORMAT, screens: this.read });
+    // writes nothing. Closed hosts are not this window's to write.
+    for (const [target, entries] of storedHosts(this.read)) this.stored.set(target, JSON.stringify(entries));
     if (steps.length > 0) this.deps.restore(steps);
     this.phase = "ready";
     this.changed();
   }
 
-  private async write(body: string, keepalive: boolean): Promise<void> {
+  private async write(target: string, body: string, keepalive: boolean): Promise<void> {
+    const write: HostWrite = { target, screens: JSON.parse(body) as HostEntry[] };
     try {
-      const res = await this.deps.fetch(PATH, {
+      const res = await this.deps.fetch(HOST_PATH, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body,
+        body: JSON.stringify(write),
         keepalive,
       });
-      if (res.ok) return;
-      // A list the server refuses is not sent again unchanged; any other
-      // failure is retried with the next change.
-      if (res.status !== 400 && this.sent === body) this.sent = undefined;
-      this.warn(`remembered remote screens: writing failed (HTTP ${res.status}) ${await errorOf(res)}`);
+      if (res.ok) {
+        this.refused.delete(target);
+        if (body === "[]") this.stored.delete(target);
+        else this.stored.set(target, body);
+        return;
+      }
+      // A host's entries the server refuses are not sent again unchanged; any
+      // other failure is retried with the next change.
+      if (res.status === 400) this.refused.set(target, body);
+      this.warn(`remembered remote screens: writing ${target} failed (HTTP ${res.status}) ${await errorOf(res)}`);
     } catch (err) {
-      if (this.sent === body) this.sent = undefined;
-      this.warn(`remembered remote screens: writing failed (${String(err)})`);
+      this.warn(`remembered remote screens: writing ${target} failed (${String(err)})`);
     }
   }
 

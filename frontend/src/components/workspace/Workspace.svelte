@@ -45,7 +45,7 @@
   import { hostNeeded } from "../../lib/remote/on_hosts.ts";
   import { arrangeHostGroups, orderedScreens } from "../../lib/remote/screen_groups.ts";
   import { HostOrderStore } from "../../lib/remote/host_order.ts";
-  import { updateImpact, updateWarning, type UpdateWarning } from "../../lib/remote/update.ts";
+  import { updateOffered, updateWarning, type UpdateWarning } from "../../lib/remote/update.ts";
   import { apiFetch } from "../../lib/protocol/http.ts";
   import type { HostScreen } from "../../lib/remote/remote_socket.ts";
   import {
@@ -442,19 +442,17 @@
 
   /**
    * Updating a host's Splitty, from an incompatible host's "Update now" or a
-   * host of another version in the Hosts panel: ask first, saying whether its
-   * sessions keep running or naming what ends there.
+   * host of another version in the Hosts panel: ask first. The hub's plan
+   * says whether one is offered and which version the host gets; an offered
+   * update keeps the host's sessions.
    */
   function askUpdate(conn: ConnKey) {
     const target = hostOf(conn);
     const socket = remoteSocketFor(conn);
     if (!target || !socket) return;
-    // The window's own pane counts, where it has a layout with panes for the screen.
-    const shown = getScreens()
-      .filter((s) => s.conn === conn)
-      .map((s) => ({ wireId: s.wireId, panes: views.api(s.id)?.panels.length || undefined }));
     const { error, ready } = socket.state;
-    if (error?.migration?.available !== true && (error?.update ?? ready?.update)?.available !== true) {
+    const plan = error?.update ?? ready?.update;
+    if (error?.migration?.available !== true && !updateOffered(plan)) {
       toast.info("This host cannot be updated automatically. Update Splitty on the host and reconnect.");
       return;
     }
@@ -462,9 +460,9 @@
       migration: error?.migration,
       hostVersion: error?.version ?? ready?.daemon.version,
       hostProtocol: error?.protocol ?? ready?.daemon.protocol,
-      keepsSessions: error?.keepsSessions ?? ready?.daemon.keepsSessions,
+      toVersion: plan?.toVersion,
       localVersion: getLocalVersion(),
-    }, updateImpact(error?.screens ?? ready?.screens, shown));
+    });
     updateHost = { conn, warning };
   }
 
@@ -820,6 +818,7 @@
         cleanups.push(conn.socket.onMessage((message) => {
           if (message.type === "mux.welcome") {
             const enabled = message.capabilities?.includes("hub-host-decisions-v1") === true;
+            remembered.useHostWrites(message.capabilities?.includes("hub-host-state-v1") === true);
             directory.useServerDirectory(enabled);
             ports.useChangeFeed(enabled);
             reverseForwarding()?.useChangeFeed(enabled);
@@ -971,7 +970,7 @@
     // Another window of this computer may have arranged the hosts meanwhile.
     window.addEventListener("focus", loadHostOrder);
     // A list changed right before the page goes is still written.
-    const flushRemembered = () => { remembered.flush(true); directory.flush(true); };
+    const flushRemembered = () => { remembered.flush(true); };
     window.addEventListener("pagehide", flushRemembered);
 
     // The local server's version, which an updated host gets.
@@ -987,7 +986,6 @@
       window.removeEventListener("pagehide", flushRemembered);
       remembered.flush(true);
       remembered.dispose();
-      directory.flush(true);
       directory.dispose();
       hostPreferences.dispose();
       browsingHosts.clear();

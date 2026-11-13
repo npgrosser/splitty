@@ -13,7 +13,7 @@
   import type { ShareRow } from "../../lib/remote/reverse_forwards.ts";
   import type { ConnKey } from "../../lib/connection/server_connection.ts";
   import { describeFailure, hostIndicator, hostTooltip } from "../../lib/remote/screen_status.ts";
-  import { updateNote } from "../../lib/remote/update.ts";
+  import { updateNote, updateOffered } from "../../lib/remote/update.ts";
   import { getLocalVersion } from "../../stores/connections.svelte.ts";
   import { showContextMenu } from "../../stores/ui.svelte.ts";
   import { MAX_HOST_ALIAS } from "../../lib/remote/host_preferences.ts";
@@ -218,13 +218,13 @@
             {/if}
             {#if group.state.error.hint}<p class="note">{group.state.error.hint}</p>{/if}
             <button class="button" onclick={() => onConnectHost(group.key)}>Retry</button>
-            {#if group.state.phase === "failed" && group.state.error.code === "incompatible" && (group.state.error.migration?.available === true || group.state.error.update?.available === true)}
+            {#if group.state.phase === "failed" && group.state.error.code === "incompatible" && (group.state.error.migration?.available === true || updateOffered(group.state.error.update))}
               <button class="button" onclick={() => onUpdateHost(group.key)}>Update server and connect…</button>
             {/if}
           {/if}
           {#if olderVersion(group)}
             <div class="update">
-              <p class="note">Runs Splitty {olderVersion(group)}; this app is {getLocalVersion()}. {group.state?.ready?.update?.keepsSessions ? "Updating preserves its sessions." : "Updating requires restarting the server on the host."}</p>
+              <p class="note">Runs Splitty {olderVersion(group)}; {group.state?.ready?.update?.toVersion ? `it can be updated to ${group.state.ready.update.toVersion}` : `this app is ${getLocalVersion()}`}. Updating preserves its sessions.</p>
               <button class="button" onclick={() => onUpdateHost(group.key)}>Update…</button>
             </div>
           {/if}

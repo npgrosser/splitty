@@ -121,7 +121,7 @@
   function askMigration() {
     if (picker.phase !== "failed" || !picker.error?.migration) return;
     migration = { target: picker.target, warning: updateWarning(picker.target,
-      { migration: picker.error.migration }, { known: false, shown: 0 }) };
+      { migration: picker.error.migration }) };
   }
 
   function confirmMigration() {

@@ -1,15 +1,12 @@
 // Updating a host's Splitty from the window (`remote-screens`, Host Update).
 //
 // The hub replaces a daemon of another version only for a socket opened with
-// `update=1`, which stops the daemon. A daemon that keeps its sessions
-// (`keepsSessions`) leaves them running for the new one; any other ends every
-// session on the host. The window asks for that only after the user confirmed
-// a warning saying which. What ends is known from the screens of the host's
-// `incompatible` error or its last `remote.ready`, and the screens the window
-// shows. A hub that sends neither leaves the count unknown, and the warning
-// says so.
-
-import type { HostScreen } from "./remote_socket.ts";
+// `update=1`. Its `update` metadata is the plan: whether an update is
+// available, whether the daemon keeps its sessions, and the version it gets
+// (`toVersion`). An available update keeps every session, so the window
+// offers one only when `available` and `keepsSessions` are both true, and its
+// warning names nothing that ends. A legacy daemon is migrated instead
+// (`MigrationOffer`), keeping the keeper-backed sessions the hub checked.
 
 /** An offer from native discovery, never a process selector or authority token. */
 export interface MigrationOffer {
@@ -28,51 +25,35 @@ export function migrationOffer(value: unknown): MigrationOffer | undefined {
   return { available: true, fromVersion: offer.fromVersion, toVersion: offer.toVersion, sessions: offer.sessions! };
 }
 
-/** A decision from the local hub; version strings in the window carry no authority. */
-export interface UpdateAvailability { available: boolean; keepsSessions: boolean }
+/** The local hub's update plan; version strings in the window carry no authority. */
+export interface UpdateAvailability {
+  available: boolean;
+  keepsSessions: boolean;
+  /** The version the host's daemon gets; older hubs do not send it. */
+  toVersion?: string;
+}
 export function updateAvailability(value: unknown): UpdateAvailability | undefined {
   if (!value || typeof value !== "object") return undefined;
   const item = value as Record<string, unknown>;
-  return typeof item.available === "boolean" && typeof item.keepsSessions === "boolean"
-    ? { available: item.available, keepsSessions: item.keepsSessions } : undefined;
+  if (typeof item.available !== "boolean" || typeof item.keepsSessions !== "boolean") return undefined;
+  const plan: UpdateAvailability = { available: item.available, keepsSessions: item.keepsSessions };
+  // eslint-disable-next-line no-control-regex
+  if (typeof item.toVersion === "string" && item.toVersion && item.toVersion.length <= 64 && !/[\u0000-\u001f\u007f]/.test(item.toVersion)) {
+    plan.toVersion = item.toVersion;
+  }
+  return plan;
 }
 
-/** What an update ends on the host. */
-export type UpdateImpact =
-  | { known: true; screens: number; panes: number }
-  /** No `remote.ready` came from this host; the window shows `shown` of its screens. */
-  | { known: false; shown: number };
-
-/**
- * A screen of the host that the window shows, with its panes as the window
- * has them now; none when the window has no layout for it yet.
- */
-export interface ShownHostScreen {
-  wireId: string;
-  panes?: number;
-}
-
-/**
- * The host's screens and panes: those of its last `remote.ready`, with the
- * window's own pane count for the screens it has a layout of, plus shown
- * screens created since. Unknown without a `remote.ready`.
- */
-export function updateImpact(lastReady: readonly HostScreen[] | undefined, shown: readonly ShownHostScreen[]): UpdateImpact {
-  if (!lastReady) return { known: false, shown: shown.length };
-  const panes = new Map<string, number>();
-  for (const screen of lastReady) panes.set(screen.id, screen.panes);
-  // A shown screen without a layout that the host did not list is missing there.
-  for (const screen of shown) if (screen.panes !== undefined) panes.set(screen.wireId, screen.panes);
-  let total = 0;
-  for (const count of panes.values()) total += count;
-  return { known: true, screens: panes.size, panes: total };
+/** Whether the plan offers an ordinary update: available, and every session kept. */
+export function updateOffered(update: UpdateAvailability | undefined): boolean {
+  return update?.available === true && update.keepsSessions;
 }
 
 export interface UpdateWarning {
   title: string;
   /** Which versions: the host's now and the one it gets. */
   versions: string;
-  /** What ends on the host. */
+  /** What happens to the host's sessions. */
   ends: string;
   action?: string;
 }
@@ -82,14 +63,14 @@ export interface UpdateVersions {
   /** The host daemon's version and protocol, from its `remote.error` or `remote.ready`. */
   hostVersion?: string;
   hostProtocol?: number;
-  /** The host daemon's sessions outlive it, so the update ends none. */
-  keepsSessions?: boolean;
-  /** The local server's version, which the host gets. */
+  /** The version the host gets, from the hub's plan. */
+  toVersion?: string;
+  /** The local server's version, named when the hub's plan has none. */
   localVersion?: string;
 }
 
 /** The warning the user confirms before the window opens the host's hub socket with `update=1`. */
-export function updateWarning(target: string, versions: UpdateVersions, impact: UpdateImpact): UpdateWarning {
+export function updateWarning(target: string, versions: UpdateVersions): UpdateWarning {
   if (versions.migration) {
     const offer = versions.migration;
     return {
@@ -102,24 +83,14 @@ export function updateWarning(target: string, versions: UpdateVersions, impact: 
   const running = versions.hostVersion
     ? `Splitty ${versions.hostVersion}${versions.hostProtocol !== undefined ? ` (protocol ${versions.hostProtocol})` : ""}`
     : "another Splitty";
-  const next = versions.localVersion ? `Splitty ${versions.localVersion}, the version of this app` : "the version of this app";
-  let ends: string;
-  if (versions.keepsSessions) {
-    ends = `The sessions on ${target} keep running, with every process in them: `
-      + `updating restarts its Splitty, and the connection drops for a moment.`;
-  } else if (impact.known) {
-    ends = impact.screens === 0
-      ? `No screens run on ${target} now; updating ends nothing there.`
-      : `Updating ends ${count(impact.screens, "screen")} with ${count(impact.panes, "pane")} on ${target}, and every process running in them.`;
-  } else {
-    ends = `Updating ends every screen on ${target} and every process running in them. `
-      + `How many there are is not known: this Splitty on ${target} cannot report them to this app.`;
-    if (impact.shown > 0) ends += ` This window shows ${impact.shown} of them.`;
-  }
+  const next = versions.toVersion
+    ? `Splitty ${versions.toVersion}`
+    : versions.localVersion ? `Splitty ${versions.localVersion}, the version of this app` : "the version of this app";
   return {
     title: `Update Splitty on ${target}?`,
     versions: `${target} runs ${running}. Updating stops it and starts ${next}.`,
-    ends,
+    ends: `The sessions on ${target} keep running, with every process in them: `
+      + `updating restarts its Splitty, and the connection drops for a moment.`,
   };
 }
 
@@ -128,8 +99,9 @@ export function updateWarning(target: string, versions: UpdateVersions, impact: 
  * local server: an update to the local version is available.
  */
 export function updateNote(hostVersion: string | undefined, localVersion: string | undefined, update?: UpdateAvailability): string | undefined {
-  if (!hostVersion || !localVersion || update?.available !== true) return undefined;
-  return `update to ${localVersion} available`;
+  const next = update?.toVersion ?? localVersion;
+  if (!hostVersion || !next || !updateOffered(update)) return undefined;
+  return `update to ${next} available`;
 }
 
 function count(n: number, noun: string): string {

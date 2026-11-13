@@ -3,7 +3,7 @@
 // it can be tested without rendering.
 
 import type { HostScreen, RemoteFailure, RemoteProgressStep, RemoteState } from "./remote_socket.ts";
-import { updateNote } from "./update.ts";
+import { updateNote, updateOffered } from "./update.ts";
 
 export type RemoteScreenStatus =
   | { kind: "none" }
@@ -75,11 +75,11 @@ export function blocksInput(status: RemoteScreenStatus): boolean {
 
 /**
  * Whether the status offers "Update now": the host's daemon is incompatible,
- * and only an update (which ends its sessions) lets the window use it.
+ * and the hub offers a migration or an update that keeps its sessions.
  */
 export function offersUpdate(status: RemoteScreenStatus): boolean {
   return status.kind === "failed" && status.error.code === "incompatible"
-    && (status.error.migration?.available === true || status.error.update?.available === true);
+    && (status.error.migration?.available === true || updateOffered(status.error.update));
 }
 
 // ── Errors ──

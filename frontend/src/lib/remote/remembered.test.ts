@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  MAX_REMEMBERED, PATH, RememberedScreens, WRITE_DELAY, hostToConnect, hostsToReconnect, parseRemembered, planRestore,
-  rememberedList, type RememberedList, type RememberedScreen,
+  HOST_PATH, MAX_REMEMBERED, PATH, RememberedScreens, WRITE_DELAY, hostToConnect, hostsToReconnect, parseRemembered,
+  planRestore, rememberedHosts, type HostEntry, type HostWrite, type RememberedScreen,
 } from "./remembered.ts";
 import { detachRemoteScreen, removeRemoteScreen, terminateRemoteScreen, type CloseEffects } from "./close_screen.ts";
 import { connectionFor, ensureRemote, removeConnection } from "../connection/registry.ts";
@@ -40,6 +40,8 @@ describe("parseRemembered", () => {
         { target: "me@vm1", screenId: "s1", name: "again" },
         { target: "vm2", screenId: "s3", name: "a‮b", position: -1 },
         { target: "vm2", screenId: "s4", position: 1.5 },
+        { target: "vm3", screenId: "s5", closed: true },
+        { target: "vm3", screenId: "s6", closed: "yes" },
         "junk",
       ],
     })).toEqual([
@@ -47,6 +49,8 @@ describe("parseRemembered", () => {
       { target: "vm2", screenId: "s9" },
       { target: "vm2", screenId: "s3", name: "ab" },
       { target: "vm2", screenId: "s4" },
+      { target: "vm3", screenId: "s5", closed: true },
+      { target: "vm3", screenId: "s6" },
     ]);
   });
 
@@ -57,16 +61,21 @@ describe("parseRemembered", () => {
   });
 });
 
-describe("rememberedList", () => {
-  it("lists the remote screens with their places among the local screens", () => {
-    const screens = [local("L1"), remote("rs-a", "vm1", "s1", "api"), local("L2"), remote("rs-b", "me@vm2:2222", "s7", "web")];
-    expect(rememberedList(screens, () => false)).toEqual({
-      version: 1,
-      screens: [
-        { target: "vm1", screenId: "s1", name: "api", position: 1 },
-        { target: "me@vm2:2222", screenId: "s7", name: "web", position: 3 },
-      ],
-    });
+/** The per-host lists as one list, the way the server holds them for a window that writes them all. */
+function flat(hosts: Map<string, HostEntry[]>): RememberedScreen[] {
+  return [...hosts].flatMap(([target, screens]) => screens.map((screen) => ({ target, ...screen })));
+}
+
+describe("rememberedHosts", () => {
+  it("lists the remote screens per host with their places among the local screens", () => {
+    const screens = [
+      local("L1"), remote("rs-a", "vm1", "s1", "api"), local("L2"), remote("rs-b", "me@vm2:2222", "s7", "web"),
+      remote("rs-c", "vm1", "s2", "logs"),
+    ];
+    expect(rememberedHosts(screens, () => false)).toEqual(new Map([
+      ["vm1", [{ screenId: "s1", name: "api", position: 1 }, { screenId: "s2", name: "logs", position: 4 }]],
+      ["me@vm2:2222", [{ screenId: "s7", name: "web", position: 3 }]],
+    ]));
   });
 
   it("leaves out new screens the host does not have yet and screens the server would refuse", () => {
@@ -76,14 +85,14 @@ describe("rememberedList", () => {
       remote("rs-long", "vm1", "x".repeat(257)),
       remote("rs-a", "vm1", "s1", `${"n".repeat(199)}\u{1F600}`),
     ];
-    const list = rememberedList(screens, (key) => key === "rs-new");
+    const hosts = rememberedHosts(screens, (key) => key === "rs-new");
     // The name is cut to 200 UTF-16 units, which split the emoji: its lone half goes.
-    expect(list.screens).toEqual([{ target: "vm1", screenId: "s1", name: "n".repeat(199), position: 3 }]);
+    expect(hosts.get("vm1")).toEqual([{ screenId: "s1", name: "n".repeat(199), position: 3 }]);
   });
 
   it("keeps at most as many screens as the server takes", () => {
     const screens = Array.from({ length: MAX_REMEMBERED + 5 }, (_, i) => remote(`rs-${i}`, "vm1", `s${i}`));
-    expect(rememberedList(screens, () => false).screens).toHaveLength(MAX_REMEMBERED);
+    expect(rememberedHosts(screens, () => false).get("vm1")).toHaveLength(MAX_REMEMBERED);
   });
 });
 
@@ -99,16 +108,27 @@ describe("planRestore", () => {
     expect(order(screens)).toEqual(["a@vm1", "L1", "b@vm2", "L2", "c@vm1", "d@vm1"]);
   });
 
+  it("does not bring back the screens of a closed host", () => {
+    const screens = [local("L1")];
+    const plan = planRestore(screens, [
+      { target: "vm1", screenId: "a", position: 0 },
+      { target: "vm2", screenId: "b", position: 1, closed: true },
+    ]);
+    applyPlan(screens, plan);
+    expect(order(screens)).toEqual(["a@vm1", "L1"]);
+    expect(hostsToReconnect(plan, ["vm1", "vm2"])).toEqual(["vm1"]);
+  });
+
   it("gives back the order it was written in when the local screens are the same", () => {
     const before = [
       remote("rs-1", "vm1", "s1"), local("L1"), remote("rs-2", "vm2", "s2"), remote("rs-3", "vm1", "s3"), local("L2"),
       remote("rs-4", "vm1", "s4"),
     ];
-    const written = rememberedList(before, () => false).screens;
+    const written = flat(rememberedHosts(before, () => false));
     const after = [local("L1"), local("L2")];
     applyPlan(after, planRestore(after, written));
     expect(order(after)).toEqual(order(before));
-    expect(rememberedList(after, () => false).screens).toEqual(written);
+    expect(flat(rememberedHosts(after, () => false))).toEqual(written);
   });
 
   it("puts what no longer fits at the end, and skips screens the window shows already", () => {
@@ -190,7 +210,7 @@ describe("lazy connect", () => {
 
 interface Request {
   method: string;
-  body?: RememberedList;
+  body?: HostWrite;
   keepalive?: boolean;
 }
 
@@ -199,7 +219,7 @@ interface Win {
   pending: Set<string>;
   requests: Request[];
   /** The list the server has. */
-  stored: unknown;
+  stored: { version: 1; screens: RememberedScreen[] };
   /** Statuses of the next writes; 200 when empty. */
   statuses: number[];
   /** The read fails. */
@@ -212,27 +232,37 @@ interface Win {
   change(fn: (screens: Screen[]) => void): void;
 }
 
-function win(screens: Screen[], stored: RememberedScreen[] = []): Win {
+/** What the hub does with a host write: that host's entries replaced in their place, an empty list forgets it. */
+function replaceHost(list: RememberedScreen[], write: HostWrite): RememberedScreen[] {
+  const at = list.findIndex((screen) => screen.target === write.target);
+  const others = list.filter((screen) => screen.target !== write.target);
+  const place = at < 0 ? others.length : Math.min(at, others.length);
+  others.splice(place, 0, ...write.screens.map((screen) => ({ target: write.target, ...screen })));
+  return others;
+}
+
+function win(screens: Screen[], stored: RememberedScreen[] = [], hostWrites = true): Win {
   const w = {
     screens, pending: new Set<string>(), requests: [] as Request[], stored: { version: 1, screens: stored },
     statuses: [] as number[], readFails: false, warnings: [] as string[],
   } as Win;
   w.remembered = new RememberedScreens({
     fetch: async (path, init) => {
-      expect(path).toBe(PATH);
       const method = init?.method ?? "GET";
       if (method === "GET") {
+        expect(path).toBe(PATH);
         w.requests.push({ method });
         if (w.readFails) return new Response("", { status: 500 });
         return new Response(JSON.stringify(w.stored));
       }
-      const body = JSON.parse(String(init?.body)) as RememberedList;
+      expect(path).toBe(HOST_PATH);
+      const body = JSON.parse(String(init?.body)) as HostWrite;
       w.requests.push({ method, body, keepalive: init?.keepalive });
       if (w.gate) await w.gate;
       const status = w.statuses.shift() ?? 200;
       if (status !== 200) return new Response(JSON.stringify({ error: "nope" }), { status });
-      w.stored = body;
-      return new Response(JSON.stringify(body));
+      w.stored = { version: 1, screens: replaceHost(w.stored.screens, body) };
+      return new Response(JSON.stringify(w.stored));
     },
     screens: () => w.screens,
     skip: (key) => w.pending.has(key),
@@ -245,6 +275,7 @@ function win(screens: Screen[], stored: RememberedScreen[] = []): Win {
     fn(w.screens);
     w.remembered.changed();
   };
+  w.remembered.useHostWrites(hostWrites);
   return w;
 }
 
@@ -308,7 +339,9 @@ describe("RememberedScreens", () => {
     w.remembered.localScreensReady();
     await afterDelay();
     expect(order(w.screens)).toEqual(["s1@vm1", "L1", "s9@vm2"]);
-    expect(writes(w).map((r) => r.body?.screens.map((s) => `${s.screenId}:${s.position}`))).toEqual([["s1:0", "s9:2"]]);
+    // Only the host that changed is written.
+    expect(writes(w).map((r) => [r.body?.target, r.body?.screens.map((s) => `${s.screenId}:${s.position}`)]))
+      .toEqual([["vm2", ["s9:2"]]]);
   });
 
   it("writes nothing when the restore left the list as it was", async () => {
@@ -339,7 +372,8 @@ describe("RememberedScreens", () => {
     return w;
   }
 
-  const lastWrite = (w: Win) => writes(w).at(-1)?.body?.screens.map((s) => `${s.screenId}@${s.target}:${s.position}`);
+  /** The list the server holds after the writes. */
+  const lastWrite = (w: Win) => w.stored.screens.map((s) => `${s.screenId}@${s.target}:${s.position}`);
 
   it("writes the list after a collapse, once the changes settled", async () => {
     const w = await restored();
@@ -371,7 +405,7 @@ describe("RememberedScreens", () => {
     // Renamed by the host's snapshot, and moved.
     w.change((s) => { s[1] = { ...s[1], name: "logs (prod)" }; s.reverse(); });
     await afterDelay();
-    expect(writes(w).at(-1)?.body?.screens).toEqual([{ target: "vm1", screenId: "s5", name: "logs (prod)", position: 0 }]);
+    expect(writes(w).at(-1)?.body).toEqual({ target: "vm1", screens: [{ screenId: "s5", name: "logs (prod)", position: 0 }] });
     expect(writes(w)).toHaveLength(4);
   });
 
@@ -399,6 +433,52 @@ describe("RememberedScreens", () => {
     w.remembered.changed();
     await afterDelay();
     expect(lastWrite(w)).toEqual(["s1@vm1:1", "s2@vm1:2", "screen-new@vm1:3"]);
+  });
+
+  it("writes only its own hosts and leaves the others' entries and closed marks", async () => {
+    const w = win([local("L1")], [
+      { target: "vm1", screenId: "s1", position: 1 },
+      { target: "vm3", screenId: "x", closed: true },
+    ]);
+    w.remembered.localScreensReady();
+    await w.remembered.load();
+    await afterDelay();
+    expect(order(w.screens)).toEqual(["L1", "s1@vm1"]);
+    // Another window remembered a screen of vm2 meanwhile.
+    w.stored = { version: 1, screens: [...w.stored.screens, { target: "vm2", screenId: "y" }] };
+
+    w.change((s) => s.push(remote("rs-o", "vm4", "s4")));
+    await afterDelay();
+    // The last screen of vm1 leaves the window: vm1 is forgotten.
+    w.change((s) => s.splice(1, 1));
+    await afterDelay();
+    expect(writes(w).map((r) => r.body)).toEqual([
+      { target: "vm4", screens: [{ screenId: "s4", name: "s4", position: 2 }] },
+      // vm4's screen moved up a place.
+      { target: "vm4", screens: [{ screenId: "s4", name: "s4", position: 1 }] },
+      { target: "vm1", screens: [] },
+    ]);
+    expect(w.stored.screens).toEqual([
+      { target: "vm3", screenId: "x", closed: true },
+      { target: "vm2", screenId: "y" },
+      { target: "vm4", screenId: "s4", name: "s4", position: 1 },
+    ]);
+  });
+
+  it("writes nothing to a local server without hub-host-state-v1", async () => {
+    const w = win([local("L1")], [{ target: "vm1", screenId: "s1", position: 0 }], false);
+    w.remembered.localScreensReady();
+    await w.remembered.load();
+    expect(order(w.screens)).toEqual(["s1@vm1", "L1"]);
+    w.change((s) => s.splice(0, 1));
+    w.remembered.flush(true);
+    await afterDelay();
+    expect(writes(w)).toEqual([]);
+
+    // A welcome that announces it: the change is written.
+    w.remembered.useHostWrites(true);
+    await afterDelay();
+    expect(writes(w).map((r) => r.body)).toEqual([{ target: "vm1", screens: [] }]);
   });
 
   it("never writes after a failed read", async () => {
