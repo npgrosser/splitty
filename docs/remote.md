@@ -9,16 +9,17 @@ installs a matching Splitty server through SSH.
 The [connection diagrams](networking.md) show the local/remote process boundaries,
 where listeners exist and which sessions survive a disconnect.
 
-There are three ways to look at a host:
+There are two ways to look at a host:
 
 | Way | Where | Needs locally |
 |---|---|---|
-| [Remote screens](#remote-screens) | Screens of the host next to your local screens, in the same window | The local Splitty server (desktop app on macOS/Linux, the WSL backend on Windows, or `splitty serve`) |
-| [Remote windows](#remote-windows) | A window of its own per host, like VS Code's remote windows | The desktop app and SSH; the remote window connects directly to the host, without WSL on Windows |
+| [Remote screens](#remote-screens) | Screens of the host next to your local screens, in the same window | The app, or `splitty serve` for the [browser UI](cli.md#browser-ui) |
 | [`splitty connect`](#splitty-connect) | Your browser | The `splitty` command |
 
-Host keys are checked strictly in all three: connect to a new host once with
-plain `ssh` and verify its fingerprint.
+Host keys are checked strictly in both: connect to a new host once with plain
+`ssh` and verify its fingerprint. The Tauri shell built from source can also
+open a host in a window of its own
+([development](development.md#the-tauri-shell)).
 
 ## Host requirements
 
@@ -31,44 +32,56 @@ plain `ssh` and verify its fingerprint.
 
 The client installs its server to `~/.local/share/splitty/remote/<version>/`
 on the host (checksum verified there; the host downloads nothing). The released
-desktop apps and the static `splitty` from the release carry the servers for
-x86_64 and aarch64 Linux hosts and for Macs. A build of your own needs a payload,
+app and the static `splitty` from the release carry the servers for x86_64 and
+aarch64 Linux hosts and for Macs. A build of your own needs a payload,
 see [Installing Splitty on hosts](#installing-splitty-on-hosts).
 
 ## Remote screens
 
-A window can show screens of other hosts next to its local ones: the arrow next to **New screen** in the drawer, the **+** on a host's line there, or **New screen on host…** in the command palette. The picker lists your recent hosts and the hosts of `~/.ssh/config` (DevPod's workspaces, for example) and accepts any `[user@]host[:port]`. The screen appears at once and shows inside it how far the connection got: the local server installs its server on the host when it lacks it, starts the host's daemon and relays it over SSH, as `splitty connect` does, but without a tunnel or a browser tab. Errors show in the same place, with what to do about them and a retry.
+A window can show screens of other hosts next to its local ones. **Hosts** at
+the bottom of the drawer, or **Connect to Host…** in the command palette, lists
+your recent hosts and the hosts of `~/.ssh/config` (DevPod's workspaces, for
+example); type to filter, or type any `[user@]host[:port]` and choose
+**Connect to …**. A host's panel then shows its
+state and its running screens, with **New Screen**. For a host that already has
+screens in the window, the **+** on its line in the drawer creates another one.
+The local server installs its server on the host when it lacks it, starts the
+host's daemon and relays it over SSH, as `splitty connect` does, but without a
+tunnel or a browser tab. The host's panel shows how far the connection got, and
+errors with a retry. When SSH asks for a password or a key's passphrase, the app
+asks in a dialog of its own.
 
 - A remote screen's tabs, splits, shells and working directories are the host's: `splitty split` in one of its panes splits it there. Your theme, font and keybindings apply; your local shell profiles do not, so a new tab there is a plain terminal of the host.
-- In the drawer a remote screen looks like a local one. Local screens come first; each host with open screens follows under one quiet line with its name and connection dot (connected, reconnecting, offline), its forwarded ports and a **+** for another screen there. Hosts without open screens are not in the list but in **Hosts**. Screen shortcuts and the mouse wheel over the drawer (or the title bar) switch screens in that order; drag to reorder screens within a group. A dropped connection shows "reconnecting…" inside the host's screens and comes back with what was printed meanwhile; a host that stays unreachable for two minutes is shown offline, with a retry.
-- **Detaching** a remote screen (the unplug button in the screen list) removes it from the window without asking, and everything keeps running on the host. Local screens use × to close. A notice after detaching offers **Reopen**. The trash button next to it **ends** the screen on the host, with its panes and their processes, and asks in the row the first time. Quitting, closing the window or reloading only detaches, and running processes on a host never hold up quitting.
-- **Remembered:** the local server remembers the window's remote screens. After a reload or a restart of the app they are back in the screen list in their host groups, with a hollow dot until you connect: a remote screen connects only when you open it, or when its host is connected for another screen anyway, so an unreachable host does not slow the start. A remembered screen the host no longer has says so, with **Remove**.
-- **Getting back:** **Hosts** at the bottom of the drawer (or a click on a host's line) lists every host you used, connected or not. Unfold one to connect and see its running screens; **Open** attaches to an existing screen, and **New screen** creates another on that host. Disconnected hosts show the last seen names and pane counts, saved by the local server across restarts. Reading this list never connects hosts at startup. Browsing a host keeps its connection until you fold it or close the panel; open screens also keep it connected. A screen that no longer exists is reported as missing, never recreated silently.
-- **Updates:** the host menu offers an update for another server version. Eligible older native daemons update through their verified service identity. For a compatible legacy Linux daemon, the app offers **Update server and connect** after checking its process identity and session keepers. Confirming applies to one attempt; ordinary Retry never migrates a legacy daemon. The dialog names both versions and explains that keeper-managed sessions continue while clients reconnect. If migration cannot be verified, including for legacy macOS daemons, the app explains the reason and leaves the daemon running. Newer daemons and daemons without session keepers are not replaced by this flow.
+- In the drawer, local screens come first, under **This computer**. Each host with open screens follows under a line of its own with its name and connection dot (connected, reconnecting, offline), a ports button with the number of its ports, a **+** for another screen there and, on hover, an unplug button that closes the host. Hosts without open screens are not in the list but under **Hosts**. Screen shortcuts and the mouse wheel over the drawer switch screens in that order; drag to reorder screens within a group, and host groups among each other. A dropped connection shows reconnecting and comes back with what was printed meanwhile; a host that stays unreachable for two minutes is shown offline, with a retry.
+- **Detaching** a remote screen (the unplug button on its row, or **Detach from This Window** in its menu) removes it from the window without asking, and everything keeps running on the host. Local screens use × to close. **Terminate Screen…** in a remote screen's menu **ends** the screen on the host, with its panes and their processes. Quitting or closing the window only detaches remote screens; their processes never hold up quitting.
+- **Closing a host** (the unplug button on its line, or **Close host** in its panel) takes all of its screens out of the window; they keep running. The local server remembers which screens were open: the host's panel then offers to reopen them (**Reopen 1 Screen**, **Reopen 2 Screens**, …), and **Open all … Screens** for the host's screens that are not open here. With **Reconnect at start** on in a host's panel, the app connects that host once at startup and brings back its screens; otherwise a host connects only when you ask, so an unreachable host does not slow the start. A screen the host no longer has is reported as missing, never recreated silently.
+- **The Hosts page** (Alt+H, Cmd+Shift+H on macOS, **Hosts and Ports** in the command palette, or **Manage hosts…** at the end of the host list) lists every host you used, connected or not, with its state, the version of a connected host's daemon, its screens and its ports. Disconnected hosts show the last seen names and pane counts, saved by the local server across restarts. Reading this list never connects hosts at startup.
+- **Updates:** for a host that runs another server version, its entry on the Hosts page offers **Update…**. The dialog names the current and the replacement version, and **Update host** confirms. Eligible older native daemons update through their verified service identity. For a compatible legacy Linux daemon, the dialog says how many sessions were observed; the backend checks its process identity and session keepers again before changing anything. Confirming applies to one attempt; an ordinary retry never migrates a legacy daemon. If migration cannot be verified, including for legacy macOS daemons, the daemon keeps running. Newer daemons and daemons without session keepers are not replaced this way.
 - On Windows the local server runs in WSL, so remote screens use WSL's `ssh`, keys and SSH configuration.
+- The app passes its own environment to `ssh` and does not read `PATH` from your login shell. Started from the Dock, the Finder or a desktop launcher, a `ProxyCommand` in `~/.ssh/config` that runs a program outside the system's default `PATH` (say, `gcloud` from Homebrew) needs its full path.
 
 ## Ports
 
-Dev servers on the host are one click away, as in VS Code:
+Dev servers on the host are one click away:
 
-- A host's line in the screen list shows how many of its ports are forwarded; a click lists them with **Open**, and the ports its Splitty sessions listen on with **Forward and open**. A new listener brings no notice. Each host in **Hosts** lists its forwarded and saved ports, then the detected ones; every row has one action (Open, Forward, Resume or Retry) and a **⋯** menu with Stop, Remember or labels, and Forget. Inspecting ports does not connect the host. **Open** uses `http://localhost:<local port>` in your browser. A running forward survives detached screens and reconnects on the same port, showing “Reconnecting…” while being rebuilt.
-- **Add port** inside a host fixes that host for the form; **Forward a port on another host…** at the end of **Hosts** works for any host, including when nothing was detected. Choose a known host or type an SSH target there, enter the remote port and optionally an exact local port. This also works for services started outside Splitty. **Forward** starts it; an empty local port uses the remote number when free or another free port for a new, unsaved mapping.
-- **Remember** is opt-in. Give saved mappings optional labels such as Frontend and API. **Forward** with Remember checked saves the actual local port after opening; if saving fails, the forward stays running and the error says it was not remembered. **Save without starting** saves metadata only and never connects the host. Without a specified local port it saves the existing forward's port, or the remote number. Saved mappings remain visible after restart and restore only when you successfully connect their host; reading or editing them never starts SSH.
-- **Stop** ends a running forward and keeps a saved rule **Paused**, across restarts and reconnects. **Resume**, **Retry**, or an explicit remote link click can start it again. **Forget** removes the saved rule and leaves a running forward running; use Stop to end it. Label edits never resume a paused rule.
-- **Stable local ports:** a saved or explicitly selected port must be available on both supported loopback families. A conflict leaves the saved port unchanged and offers **Retry** or **Use another local port…**. The latter starts on the numeric port you choose and updates the saved mapping only after success. Stop a running mapping before changing its port. No conflicting listener is terminated.
+- The ports button on a host's line in the drawer lists the ports its Splitty sessions listen on, under **Open in the browser**: choosing one forwards it when needed and opens `http://localhost:<local port>` in your browser. Type a number to open a port that was not detected; a running forward also offers **Copy localhost:…**. A new listener brings no notice. **Manage ports…** at the end of the list goes to the host on the Hosts page.
+- On the Hosts page, each host lists its forwarded, saved and detected ports under **Forward to this computer**. A row offers **Forward**, or **Copy address** while it is forwarded, and **Local port settings…**. **Add port…** forwards a port by number, also when nothing was detected, for example for a service started outside Splitty. Inspecting ports does not connect the host. A running forward survives detached screens and reconnects on the same port, showing “Reconnecting…” while being rebuilt.
+- In a port's settings, the local port is optional: empty, it uses the remote number when free or another free port for a new, unsaved mapping. A personal label (Frontend, API) names the port in the lists. **Restore when I connect** is opt-in and remembers the mapping: **Forward** saves the actual local port after opening; if saving fails, the forward stays running and the error says it was not remembered. **Save without starting** saves the settings only and never connects the host; without a local port it saves the existing forward's port, or the remote number. Saved mappings remain visible after restart and restore only when you successfully connect their host; reading or editing them never starts SSH.
+- **Stop forwarding** ends a running forward and keeps a saved mapping paused, across restarts and reconnects; forwarding it again, or an explicit click on a link in a remote pane, starts it again. **Forget settings** removes the saved mapping and leaves a running forward running; stop it to end it. Label edits never resume a paused mapping.
+- **Stable local ports:** a saved or explicitly selected port must be available on both supported loopback families. A conflict leaves the saved port unchanged and reports it; choose another local port in the port's settings, which updates the saved mapping only after the forward succeeds. Stop a running forward before changing its port. No conflicting listener is terminated.
 - **Links in a host's panes:** a link to `localhost`, `127.0.0.1`, `0.0.0.0` or `[::1]` printed in a remote pane verifies or opens that host's forward before opening its local address, preserving the scheme, path, query and fragment. A saved-port conflict opens no browser URL. Other links, and every link in a local pane, open as they are. Forwarding carries HTTP, HTTPS and WebSockets unchanged and adds no Splitty credentials; listeners bind only to local `127.0.0.1`.
-- **Forward new ports** (Settings → Remote, `remote.autoForwardPorts`) forwards new detected ports without a notice. It is off by default, since every program on your machine can reach a forwarded port. It never remembers a mapping, resumes a paused rule or silently changes a saved local port. Port lists refresh across windows while a host, mapping or the drawer is in use, and on window focus.
+- **Forward new ports** (Settings → Remote, `remote.autoForwardPorts`) forwards new detected ports without a notice. It is off by default, since every program on your machine can reach a forwarded port. It never remembers a mapping, resumes a paused mapping or silently changes a saved local port.
 - A Mac host detects no listening ports yet; forward its ports by number.
 
 ### Sharing a local port with a host
 
 The other direction: a service on this machine (a local API, a database, a model server) reachable from programs on the host, for example a dev VM.
 
-- Each host in **Hosts** has **Shared with this host** and **Share a local port**. Enter the local port and, optionally, the port it gets on the host (empty: the same number). Nothing is shared without that click; detected ports, links and reconnects never start a share.
-- On the host, the port listens on `127.0.0.1` and `::1` only, and Splitty accepts a connection only from a program running as the user you log in as. Other users on the host, and other machines, cannot reach it, whatever the server's `GatewayPorts` says. Programs running as you on the host can, and most local services ask for no password: share only what you would let those programs use. The form says so, and warns more strongly for ports usually used by SSH, Docker, Kubernetes, Remote Desktop or VNC.
+- **Share a local port…** in the ports list of a host's line opens the host's shared local ports. Type the local port and, optionally, the port it gets on the host (`11434`, or `11434:8080`; without a host port it gets the same number), then choose **Share local port …**. Nothing is shared without that choice; detected ports, links and reconnects never start a share.
+- On the host, the port listens on `127.0.0.1` and `::1` only, and Splitty accepts a connection only from a program running as the user you log in as. Other users on the host, and other machines, cannot reach it, whatever the server's `GatewayPorts` says. Programs running as you on the host can, and most local services ask for no password: share only what you would let those programs use. The list says so before you share, and warns more strongly for ports usually used by SSH, Docker, Kubernetes, Remote Desktop or VNC.
 - Only `localhost` of this machine is shared, one port per share, never another machine of your network. Every active Splitty browser gateway in the supported local reservation domain is refused, including gateways from another configuration directory. A gateway also refuses a port already reserved for sharing.
-- Linux hosts only for now: the owner check reads `/proc` on the host. A Mac host answers “Not supported on this host”. A port already in use on the host fails with “Port in use on the host”; nothing on the host is stopped.
-- **Stop**, **Remember**, **Resume** and **Forget** work as for forwarded ports. A remembered share starts again only when its host connects; **Start** on a remembered share that is not running starts it now. A lost connection frees the host's port within about a minute, and a running share is rebuilt on the same port.
+- Linux hosts only for now: the owner check reads `/proc` on the host, and a Mac host refuses the share. A port already in use on the host fails the share; nothing on the host is stopped.
+- A share's row stops or resumes it. On a running share, **Share again when this host connects** remembers it: a remembered share starts again only when its host connects, and **Stop and forget** ends it and removes it. A lost connection frees the host's port within about a minute, and a running share is rebuilt on the same port.
 - Reverse sharing is unavailable on Windows and WSL: their reachable localhost services have no shared Splitty reservation authority. It fails before starting SSH, including with mirrored networking. Forwarding a host service to this machine remains available.
 - On Linux, reservation coordination requires the initial PID and user namespaces and a verifiable common root mount view. Unsupported or ambiguous namespace environments fail with an explicit error. The reservation registry coordinates Splitty processes of the same OS account across configuration directories; it does not restrict other forwarding tools or processes running as that user.
 
@@ -97,17 +110,6 @@ directories and peer checks.
 Windows and WSL instead refuse reverse sharing entirely; their explicit browser
 gateways and forward-to-local application ports remain available. Their policy
 is not a fallback for an unsupported or unreadable native Linux registry.
-
-## Remote windows
-
-The legacy Tauri app (built from source; releases publish the native app) opens a host in a window of its own, without using the app's local terminal backend: **New window** in the host's entry under **Hosts** in the drawer, **New window on a host…** under the arrow next to **New screen**, **Open host in new window…** in the command palette (Cmd+Shift+P, Alt+Shift+P on Linux and Windows), or **Connect to host…** on the Windows app's setup page. The picker lists your recent hosts and the hosts of `~/.ssh/config` (DevPod's workspaces, for example) and accepts any `[user@]host[:port]`. The app then does what `splitty connect` does: it installs its server on the host when it lacks it, starts the daemon there and holds a native SSH data connection. The window uses the packaged UI and appears once the host connection is ready; until then the picker shows the progress, or the error with what to do about it. Started from the Dock, the Finder or a desktop launcher, the Tauri app on macOS and Linux first takes `PATH` from your login shell (at most 5 seconds), so a `ProxyCommand` in `~/.ssh/config` that runs, say, `gcloud` from Homebrew works as it does in a terminal.
-
-- One window per host: opening the host again focuses its window. The title names the host and says `(reconnecting…)` while the connection is rebuilt. After a restart of the host's daemon, the same document reconnects and reattaches its sessions.
-- After 10 minutes without a connection, the title says `(disconnected)`; opening the host again reconnects the same window.
-- Closing the window ends its SSH connection, never the host's daemon or its sessions.
-- The window loads packaged UI and can connect only to its assigned host. It has private ephemeral storage, no local-backend or editor/reveal access, and no pop-out windows. Web links open in your browser; its title bar is the system's. Host data never supplies executable UI.
-
-**Windows without WSL.** Remote windows need no WSL: they use Windows OpenSSH (`ssh.exe`, `%USERPROFILE%\.ssh` and the Windows ssh-agent), so the Windows keys and SSH configuration apply, including the entries DevPod Desktop writes. On a machine without WSL, the setup page offers **Connect to host…** next to setting up WSL, and stays open as a launcher; the app quits when its last window closes. WSL remains the way to work locally. The Windows app keeps its recent hosts in its own configuration directory.
 
 ## `splitty connect`
 
