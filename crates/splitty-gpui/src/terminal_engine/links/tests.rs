@@ -240,3 +240,66 @@ fn bounded_complete_lines_reject_prefixes_and_preserve_selection() -> Result<()>
     );
     Ok(())
 }
+
+#[test]
+fn spans_cover_a_links_visible_cells_and_nothing_beside_it() -> Result<()> {
+    let run = |row, cols: Range<u16>| LinkRun { row, cols };
+    let span = |engine: &mut Engine, col, row| -> Result<Option<Vec<LinkRun>>> {
+        Ok(engine.link_span_at(col, row)?.map(|span| span.runs))
+    };
+    // A detected link wraps; its wide character covers both its cells.
+    let mut engine = Engine::new(12, 3)?;
+    engine.feed("ab https://e.test/界x c".as_bytes(), false)?;
+    let wrapped = vec![run(0, 3..12), run(1, 0..9)];
+    for (col, row) in [(4, 0), (6, 1), (7, 1), (8, 1)] {
+        assert_eq!(span(&mut engine, col, row)?, Some(wrapped.clone()));
+    }
+    assert_eq!(
+        engine.link_at(4, 0)?,
+        hit("https://e.test/界x", LinkKind::Detected),
+        "the span's link is the one activation resolves"
+    );
+    assert_eq!(span(&mut engine, 1, 0)?, None);
+
+    // Only the rows in the viewport are covered: the link takes four rows,
+    // two of them in view, at the bottom and scrolled to the top.
+    let mut scrolled = Engine::new(9, 2)?;
+    scrolled.feed(b"https://example.test/long/path", false)?;
+    assert_eq!(
+        span(&mut scrolled, 1, 1)?,
+        Some(vec![run(0, 0..9), run(1, 0..3)])
+    );
+    scrolled.scroll(100)?;
+    assert_eq!(
+        span(&mut scrolled, 3, 1)?,
+        Some(vec![run(0, 0..9), run(1, 0..9)])
+    );
+
+    // An explicit target covers its label, not the text around it.
+    let mut explicit_engine = Engine::new(20, 3)?;
+    explicit_engine.feed(b"ab ", false)?;
+    explicit(&mut explicit_engine, b"https://x.test/", "label")?;
+    explicit_engine.feed(b" z", false)?;
+    explicit(&mut explicit_engine, b"https://y.test/", "next")?;
+    assert_eq!(span(&mut explicit_engine, 5, 0)?, Some(vec![run(0, 3..8)]));
+    assert_eq!(
+        span(&mut explicit_engine, 11, 0)?,
+        Some(vec![run(0, 10..14)]),
+        "a different target next to it is its own link"
+    );
+
+    // A wide character that wraps keeps the label in one span.
+    let mut wide_engine = Engine::new(16, 3)?;
+    explicit(
+        &mut wide_engine,
+        b"https://wide.test/",
+        &format!("{}界", "x".repeat(15)),
+    )?;
+    for (col, row) in [(2, 0), (0, 1), (1, 1)] {
+        assert_eq!(
+            span(&mut wide_engine, col, row)?,
+            Some(vec![run(0, 0..16), run(1, 0..2)])
+        );
+    }
+    Ok(())
+}

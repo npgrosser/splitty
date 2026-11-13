@@ -36,6 +36,18 @@ pub struct LinkHit {
     pub uri: String,
     pub kind: LinkKind,
 }
+/// One viewport row's part of a link, as a half-open column range.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkRun {
+    pub row: u16,
+    pub cols: std::ops::Range<u16>,
+}
+/// A link and the viewport cells it covers, for hover feedback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub hit: LinkHit,
+    pub runs: Vec<LinkRun>,
+}
 
 /// Concrete RGB colors only. The service and settings resolver stay outside
 /// Ghostty; indices 16–255 retain the standard xterm palette.

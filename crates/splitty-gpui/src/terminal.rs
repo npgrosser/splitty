@@ -110,9 +110,9 @@ pub(crate) enum LocalAction {
 
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{
-    Cursor, CursorShape, Engine, ImagePlacement, MouseAction, MouseButton as EngineMouseButton,
-    MouseInput, MouseModifiers, MousePolicy, MouseTracking, Row, Scrollback, SearchHighlight,
-    MAX_INPUT,
+    Cursor, CursorShape, Engine, ImagePlacement, LinkRun, MouseAction,
+    MouseButton as EngineMouseButton, MouseInput, MouseModifiers, MousePolicy, MouseTracking, Row,
+    Scrollback, SearchHighlight, MAX_INPUT,
 };
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
@@ -143,6 +143,9 @@ const BASE_LINE_HEIGHT: f32 = 18.;
 const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
+/// How long a plain click on a link waits for a second click before it opens
+/// the link: the common platform default for a double click.
+const LINK_CLICK_DELAY: Duration = Duration::from_millis(500);
 
 /// The terminal face: the web client's bundled font, or Kit's monospace
 /// family when that font cannot be registered.
@@ -490,6 +493,34 @@ fn link_modifier(modifiers: Modifiers, mac: bool) -> bool {
         }
 }
 
+/// How a left click may open the link under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkGesture {
+    /// Ctrl/Cmd without Shift: the press stays local and its release opens,
+    /// also over a program that takes the mouse.
+    Modifier,
+    /// No modifier while the program does not take the mouse: the press
+    /// selects as usual, and a single click opens once no second click follows.
+    Plain,
+}
+
+fn link_gesture(modifiers: Modifiers, mac: bool, reports_buttons: bool) -> Option<LinkGesture> {
+    if link_modifier(modifiers, mac) {
+        Some(LinkGesture::Modifier)
+    } else if !reports_buttons && !modifiers.modified() {
+        Some(LinkGesture::Plain)
+    } else {
+        None
+    }
+}
+
+/// What a completed left release asks of the link opener.
+enum LinkRelease {
+    Open(WebUrl),
+    /// A plain click that opens once the double-click window passes.
+    AfterClickWindow,
+}
+
 fn append_wheel_reports(
     engine: &mut Engine,
     mut input: MouseInput,
@@ -609,6 +640,8 @@ pub struct Terminal {
     pointer: PointerGestures,
     links: links::State,
     link_origin: LinkOrigin,
+    /// Opens a held plain click once the double-click window passes.
+    link_open: Option<Task<()>>,
     scroll_remainder: f32,
     scroll_remainder_x: f32,
     scroll_route: Option<WheelRoute>,
@@ -685,6 +718,7 @@ impl Terminal {
             pointer: PointerGestures::default(),
             links: links::State::default(),
             link_origin,
+            link_open: None,
             scroll_remainder: 0.,
             scroll_remainder_x: 0.,
             scroll_route: None,
@@ -1408,8 +1442,20 @@ impl Terminal {
         }
     }
 
+    /// Whether a left click with `modifiers` may open a link now.
+    fn current_link_gesture(&mut self, modifiers: Modifiers, mac: bool) -> Option<LinkGesture> {
+        if link_modifier(modifiers, mac) {
+            return Some(LinkGesture::Modifier);
+        }
+        if modifiers.modified() {
+            return None;
+        }
+        let reports_buttons = self.pointer_policy()?.reports_buttons();
+        link_gesture(modifiers, mac, reports_buttons)
+    }
+
     fn hover_link(&mut self, position: Point<Pixels>, modifiers: Modifiers, mac: bool) -> bool {
-        if !link_modifier(modifiers, mac) {
+        if self.current_link_gesture(modifiers, mac).is_none() {
             return self.links.cancel_hover();
         }
         let Some(cell) = self.link_cell_at(position) else {
@@ -1418,8 +1464,22 @@ impl Terminal {
         if self.links.cached_hover(cell).is_some() {
             return false;
         }
-        let target = self.link_at(cell);
-        self.links.set_hover(cell, target)
+        let span = match self
+            .engine
+            .as_mut()
+            .map(|engine| engine.link_span_at(cell.col, cell.row))
+        {
+            Some(Ok(span)) => span,
+            Some(Err(error)) => {
+                self.status = format!("Terminal link: {error:#}");
+                None
+            }
+            None => None,
+        };
+        let (target, runs) = span
+            .and_then(|span| links::Target::allowed(span.hit).map(|target| (target, span.runs)))
+            .unzip();
+        self.links.set_hover(cell, target, runs.unwrap_or_default())
     }
 
     fn pointer_position(&self, position: Point<Pixels>, window: &Window) -> (f32, f32) {
@@ -1467,6 +1527,9 @@ impl Terminal {
         }
         let position = self.pointer_position(event.position, window);
         self.pointer.last_position = Some(position);
+        // Any press revokes a plain click still waiting for a second one.
+        self.links.cancel_pending();
+        self.link_open = None;
         if event.button == MouseButton::Left
             && link_modifier(event.modifiers, mac)
             && !self.pointer.any_application_pressed()
@@ -1496,6 +1559,19 @@ impl Terminal {
                     .map(|engine| engine.select_start(col, row, event.click_count >= 2));
                 self.operation(result);
                 self.row_cache.clear();
+                // A single plain press on a link may become a click that opens
+                // it; a second press of a double click never does.
+                if event.button == MouseButton::Left
+                    && event.click_count == 1
+                    && link_gesture(event.modifiers, mac, policy.reports_buttons())
+                        == Some(LinkGesture::Plain)
+                {
+                    if let Some(cell) = self.link_cell_at(event.position) {
+                        if let Some(target) = self.link_at(cell) {
+                            self.links.press(cell, target, position, self.generation);
+                        }
+                    }
+                }
             }
             PointerRoute::Application => {
                 if !self.mouse_report(
@@ -1530,8 +1606,13 @@ impl Terminal {
         if self.pointer.unadmitted_button_pressed(event.pressed_button) {
             return self.links.cancel_hover();
         }
-        let hover_changed = self.hover_link(event.position, event.modifiers, mac);
-        if self.pointer.route(MouseButton::Left) == Some(PointerRoute::Selection) {
+        let selecting = self.pointer.route(MouseButton::Left) == Some(PointerRoute::Selection);
+        let hover_changed = if selecting && event.dragging() {
+            self.links.cancel_hover()
+        } else {
+            self.hover_link(event.position, event.modifiers, mac)
+        };
+        if selecting {
             if event.dragging() {
                 let (col, row) = self.cell_at(event.position);
                 let result = self
@@ -1568,7 +1649,7 @@ impl Terminal {
         event: &MouseUpEvent,
         window: &Window,
         outside: bool,
-    ) -> Option<splitty_client_core::external_links::WebUrl> {
+    ) -> Option<LinkRelease> {
         if !self.geometry_ready {
             return None;
         }
@@ -1577,6 +1658,28 @@ impl Terminal {
             PointerRoute::Selection => {
                 let result = self.engine.as_mut().map(Engine::select_end);
                 self.operation(result);
+                if event.button != MouseButton::Left || !self.links.pressed() {
+                    return None;
+                }
+                // A press that selected text is a selection, not a click.
+                let selected = self
+                    .engine
+                    .as_mut()
+                    .map(Engine::selection_text)
+                    .is_some_and(|text| text.ok().flatten().is_some_and(|text| !text.is_empty()));
+                let cell = (!outside && !selected)
+                    .then(|| self.link_cell_at(event.position))
+                    .flatten();
+                let target = cell.and_then(|cell| self.link_at(cell));
+                return self
+                    .links
+                    .finish_deferred(
+                        cell,
+                        self.pointer_position(event.position, window),
+                        self.generation,
+                        target,
+                    )
+                    .then_some(LinkRelease::AfterClickWindow);
             }
             PointerRoute::Application => {
                 let position = if outside {
@@ -1596,12 +1699,15 @@ impl Terminal {
                     .then(|| self.link_cell_at(event.position))
                     .flatten();
                 let target = cell.and_then(|cell| self.link_at(cell));
-                return self.links.finish(
-                    cell,
-                    self.pointer_position(event.position, window),
-                    self.generation,
-                    target,
-                );
+                return self
+                    .links
+                    .finish(
+                        cell,
+                        self.pointer_position(event.position, window),
+                        self.generation,
+                        target,
+                    )
+                    .map(LinkRelease::Open);
             }
             PointerRoute::Local => {}
         }
@@ -1674,15 +1780,38 @@ impl Terminal {
     }
 
     fn on_pointer_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(url) = self.pointer_up(event, window, false) {
-            if self.link_origin == LinkOrigin::Remote && url.is_loopback_or_unspecified() {
-                cx.emit(LinkEvent::RemoteLoopback(url));
-            } else if let Err(reason) = self.link_origin.activate(&url, |url| cx.open_url(url)) {
-                // The workspace paints command_error; status alone is only shown by the probe.
-                self.reject_command(reason.into());
+        match self.pointer_up(event, window, false) {
+            Some(LinkRelease::Open(url)) => self.open_link(url, cx),
+            Some(LinkRelease::AfterClickWindow) => {
+                self.link_open = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(LINK_CLICK_DELAY).await;
+                    let _ = this.update(cx, |this, cx| this.open_held_link(cx));
+                }));
             }
+            None => {}
         }
         cx.notify();
+    }
+
+    /// Open a held plain click unless something revoked it meanwhile.
+    fn open_held_link(&mut self, cx: &mut Context<Self>) {
+        self.link_open = None;
+        let Some(pending) = self.links.take_pending() else {
+            return;
+        };
+        if let Some(url) = links::State::complete_pending(pending, self.generation) {
+            self.open_link(url, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_link(&mut self, url: WebUrl, cx: &mut Context<Self>) {
+        if self.link_origin == LinkOrigin::Remote && url.is_loopback_or_unspecified() {
+            cx.emit(LinkEvent::RemoteLoopback(url));
+        } else if let Err(reason) = self.link_origin.activate(&url, |url| cx.open_url(url)) {
+            // The workspace paints command_error; status alone is only shown by the probe.
+            self.reject_command(reason.into());
+        }
     }
 
     fn on_pointer_up_out(
@@ -1700,7 +1829,11 @@ impl Terminal {
             self.scrollbar_shown = false;
             self.scrollbar_hide = None;
         }
+        // Leaving ends the gestures in progress; a click already completed
+        // still opens after the double-click window.
+        let held = self.links.take_pending();
         self.cancel_pointer();
+        self.links.restore_pending(held);
         cx.notify();
     }
 
@@ -1710,7 +1843,10 @@ impl Terminal {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !link_modifier(event.modifiers, cx.platform_info().is_mac()) && self.links.cancel_hover()
+        if self
+            .current_link_gesture(event.modifiers, cx.platform_info().is_mac())
+            .is_none()
+            && self.links.cancel_hover()
         {
             cx.notify();
         }
@@ -2098,6 +2234,14 @@ impl Terminal {
         frame.finish()?;
         self.row_cache
             .retain(|_, row| row.last_frame == current_frame);
+        if composition {
+            paint_link_underline(
+                self.links.underline(),
+                geometry,
+                self.colors.foreground,
+                window,
+            );
+        }
         paint_images(
             &placements,
             true,
@@ -2443,6 +2587,30 @@ fn paint_cached_row(
     Ok(())
 }
 
+/// The hovered link's underline, below the text like a cell underline.
+fn paint_link_underline(
+    runs: &[LinkRun],
+    geometry: PaintGeometry,
+    color: u32,
+    window: &mut Window,
+) {
+    let PaintGeometry { bounds, metrics } = geometry;
+    for run in runs {
+        let x = bounds.left() + metrics.cell_width * f32::from(run.cols.start);
+        let y = bounds.top() + metrics.line_height * f32::from(run.row);
+        window.paint_quad(fill(
+            Bounds::new(
+                point(x, y + metrics.line_height - px(2. * metrics.scale)),
+                size(
+                    metrics.cell_width * f32::from(run.cols.end - run.cols.start),
+                    px(metrics.scale),
+                ),
+            ),
+            rgb(color),
+        ));
+    }
+}
+
 fn each_unselected_segment(
     start: u16,
     end: u16,
@@ -2579,13 +2747,19 @@ impl Render for Terminal {
                 }));
         }
         let search_bar = self.search_bar(cx);
+        let plain_click = self.links.preview().is_some()
+            && self
+                .pointer_policy()
+                .is_some_and(|policy| !policy.reports_buttons());
         let link_preview = self.links.preview().map(|target| {
-            let modifier = if cx.platform_info().is_mac() {
-                "Cmd"
+            let gesture = if plain_click {
+                "Click"
+            } else if cx.platform_info().is_mac() {
+                "Cmd-click"
             } else {
-                "Ctrl"
+                "Ctrl-click"
             };
-            format!("{}  ·  {modifier}-click to open", target.url.as_str())
+            format!("{}  ·  {gesture} to open", target.url.as_str())
         });
         let scrollback = self.scrollback();
         let scrollbar = scrollback.and_then(|scrollback| self.scrollbar(scrollback, cx));
@@ -2628,6 +2802,7 @@ impl Render for Terminal {
                     cx.emit(FileDrop(paths.paths().to_vec()));
                 }
             }))
+            .when(link_preview.is_some(), |terminal| terminal.cursor_pointer())
             .on_modifiers_changed(cx.listener(Self::on_link_modifiers_changed))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_pointer_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_pointer_down))
@@ -2871,11 +3046,11 @@ mod paste_tests {
 #[cfg(all(test, feature = "ui-test-support"))]
 mod presentation_tests {
     use super::{links, Command, LinkOrigin, Terminal, TerminalPresentation};
-    use crate::terminal_engine::{Engine, LinkHit, LinkKind};
+    use crate::terminal_engine::{Engine, LinkHit, LinkKind, LinkRun};
     use gpui_kit::{
         div, point, prelude::*, px, size, AppContext, Context, Entity, IntoElement, Modifiers,
-        MouseButton, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
-        VisualTestContext, Window,
+        MouseButton, MouseDownEvent, MouseUpEvent, ScrollDelta, ScrollEvent, ScrollSource,
+        TestAppContext, TouchPhase, VisualTestContext, Window,
     };
     use std::{cell::RefCell, rc::Rc, time::Duration};
 
@@ -3265,6 +3440,183 @@ mod presentation_tests {
         });
     }
 
+    /// In-process (view): a plain click opens a link once the double-click
+    /// window passes; drags, double clicks and Shift select instead. Over a
+    /// program that takes the mouse the plain click is the program's, and
+    /// Ctrl/Cmd-click opens at once.
+    #[test]
+    fn a_plain_click_opens_a_link_and_selection_gestures_do_not() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.feed(
+                        b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[2J\x1b[H\
+                          https://example.com/a\r\nhttps://example.com/b\r\n\
+                          https://example.com/c\r\nhttps://example.com/d\r\n\
+                          https://example.com/e\r\nhttps://example.com/f",
+                        false,
+                        cx,
+                    )
+                })
+            });
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            let at = |window: &mut VisualTestContext, col: u16, row: u16| {
+                window.update(|_, cx| {
+                    let terminal = terminal.read(cx);
+                    terminal.bounds.origin
+                        + point(
+                            terminal.metrics.cell_width * (f32::from(col) + 0.5),
+                            terminal.metrics.line_height * (f32::from(row) + 0.5),
+                        )
+                })
+            };
+            let wait = |window: &mut VisualTestContext, time: Duration| {
+                window.executor().advance_clock(time);
+                window.run_until_parked();
+            };
+            let selected = |window: &mut VisualTestContext| {
+                window.update(|_, cx| {
+                    terminal.update(cx, |terminal, _| {
+                        terminal
+                            .engine
+                            .as_mut()
+                            .and_then(|engine| engine.selection_text().unwrap())
+                            .is_some_and(|text| !text.is_empty())
+                    })
+                })
+            };
+            let plain = Modifiers::default();
+
+            // Hover alone underlines the whole link and offers it, opening nothing.
+            let a = at(window, 3, 0);
+            window.simulate_mouse_move(a, None, plain);
+            window.update(|_, cx| {
+                let terminal = terminal.read(cx);
+                let target = terminal.links.preview().expect("hovered link");
+                assert_eq!(target.url.as_str(), "https://example.com/a");
+                assert_eq!(
+                    terminal.links.underline(),
+                    [LinkRun {
+                        row: 0,
+                        cols: 0..21
+                    }]
+                );
+            });
+            window.simulate_click(a, plain);
+            wait(window, super::LINK_CLICK_DELAY - Duration::from_millis(1));
+            assert!(window.opened_url().is_none(), "waits for a second click");
+            wait(window, Duration::from_millis(2));
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/a")
+            );
+
+            // A double click selects the word and opens nothing.
+            let b = at(window, 3, 1);
+            window.simulate_click(b, plain);
+            wait(window, Duration::from_millis(100));
+            window.simulate_event(MouseDownEvent {
+                position: b,
+                modifiers: plain,
+                button: MouseButton::Left,
+                click_count: 2,
+                first_mouse: false,
+            });
+            window.simulate_event(MouseUpEvent {
+                position: b,
+                modifiers: plain,
+                button: MouseButton::Left,
+                click_count: 2,
+            });
+            wait(window, super::LINK_CLICK_DELAY * 2);
+            assert!(selected(window));
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/a")
+            );
+
+            // A drag that starts and ends on the link selects text.
+            let start = at(window, 3, 2);
+            window.simulate_mouse_down(start, MouseButton::Left, plain);
+            let c = at(window, 15, 2);
+            window.simulate_mouse_move(c, MouseButton::Left, plain);
+            window.update(|_, cx| assert!(terminal.read(cx).links.preview().is_none()));
+            window.simulate_mouse_up(c, MouseButton::Left, plain);
+            wait(window, super::LINK_CLICK_DELAY * 2);
+            assert!(selected(window));
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/a")
+            );
+
+            // Shift selects and never opens; it offers no link either.
+            let shift = Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            };
+            let d = at(window, 3, 3);
+            window.simulate_mouse_move(d, None, shift);
+            window.update(|_, cx| assert!(terminal.read(cx).links.preview().is_none()));
+            window.simulate_click(d, shift);
+            wait(window, super::LINK_CLICK_DELAY * 2);
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/a")
+            );
+
+            // The click that focuses the terminal opens a link like any other.
+            window.update(|window, cx| window.blur(cx));
+            let f = at(window, 3, 5);
+            window.simulate_click(f, plain);
+            wait(window, super::LINK_CLICK_DELAY * 2);
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/f")
+            );
+            window.update(|window, cx| assert!(terminal.read(cx).focus.is_focused(window)));
+
+            // With mouse reporting on, the plain click is the program's.
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.feed(b"\x1b[?1000h\x1b[?1006h", false, cx)
+                })
+            });
+            let e = at(window, 3, 4);
+            window.simulate_mouse_move(e, None, plain);
+            window.update(|_, cx| assert!(terminal.read(cx).links.preview().is_none()));
+            let sent = commands.borrow().len();
+            window.simulate_click(e, plain);
+            wait(window, super::LINK_CLICK_DELAY * 2);
+            assert!(
+                commands.borrow()[sent..].iter().any(|command| matches!(
+                    command,
+                    Command::Input { bytes, .. } if bytes.starts_with(b"\x1b[<0;")
+                )),
+                "the program receives the click"
+            );
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/f")
+            );
+            // Ctrl/Cmd-click opens at once and sends the program nothing.
+            let deliberate = Modifiers {
+                control: true,
+                platform: true,
+                ..Modifiers::default()
+            };
+            window.simulate_mouse_move(e, None, deliberate);
+            window.update(|_, cx| assert!(terminal.read(cx).links.preview().is_some()));
+            let sent = commands.borrow().len();
+            window.simulate_click(e, deliberate);
+            assert_eq!(
+                window.opened_url().as_deref(),
+                Some("https://example.com/e")
+            );
+            assert_eq!(commands.borrow().len(), sent);
+        });
+    }
+
     #[test]
     fn a_burst_of_zoom_steps_shows_each_grid_and_reports_the_size_once() {
         with_view(|window, view, commands| {
@@ -3362,9 +3714,9 @@ mod presentation_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_wheel_input, each_unselected_segment, engine_mouse_button, link_modifier,
-        mouse_modifiers, needs_shape, wheel_button, wheel_lines, wheel_route, CachedRow,
-        PointerGestures, PointerRoute, TerminalMetrics, WheelRoute,
+        alternate_wheel_input, each_unselected_segment, engine_mouse_button, link_gesture,
+        link_modifier, mouse_modifiers, needs_shape, wheel_button, wheel_lines, wheel_route,
+        CachedRow, LinkGesture, PointerGestures, PointerRoute, TerminalMetrics, WheelRoute,
     };
     use crate::terminal_engine::{
         Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
@@ -3446,6 +3798,47 @@ mod tests {
             },
             false
         ));
+    }
+
+    #[test]
+    fn plain_clicks_open_links_only_while_the_program_leaves_the_mouse_alone() {
+        let plain = Modifiers::default();
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(link_gesture(plain, false, false), Some(LinkGesture::Plain));
+        assert_eq!(link_gesture(plain, false, true), None);
+        // The deliberate modifier opens also over a program's mouse reporting.
+        for reports in [false, true] {
+            assert_eq!(
+                link_gesture(ctrl, false, reports),
+                Some(LinkGesture::Modifier)
+            );
+        }
+        // Shift selection and other modified clicks never open.
+        for modifiers in [
+            shift,
+            alt,
+            Modifiers {
+                shift: true,
+                ..ctrl
+            },
+        ] {
+            for reports in [false, true] {
+                assert_eq!(link_gesture(modifiers, false, reports), None);
+            }
+        }
+        // Ctrl on macOS is not the link modifier and is no plain click either.
+        assert_eq!(link_gesture(ctrl, true, false), None);
     }
 
     #[test]

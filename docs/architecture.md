@@ -807,10 +807,16 @@ still contain detected URLs. The adapter does not duplicate the OSC parser. Plai
 grapheme cells, including wide tails; extraction stops without a target when
 16 KiB, 128 rows or 80,000 inspected cells cannot contain the complete line.
 `client-core::external_links` admits and normalizes bounded absolute HTTP(S)
-URLs without I/O. The view previews that actual target and owns the deliberate
-Ctrl/Cmd-click. Gesture completion resolves the target again; cached hover cannot
+URLs without I/O. The adapter also reports the viewport cells a link covers,
+which the view underlines on hover. The view previews that actual target and
+owns the click. Without application mouse reporting a plain single click opens
+it: the press starts an ordinary selection, and a release on the pressed cell
+without a drag or a selection is held for the double-click interval, so that a
+double click selects without opening; another press or any cancellation revokes
+it. Ctrl/Cmd-click opens at once and is the only link gesture while the program
+takes the mouse. Gesture completion resolves the target again; cached hover cannot
 authorize a launch. Selection and application mouse reporting retain their
-routes, while an admitted link gesture remains local through cancellation.
+routes, while an admitted Ctrl/Cmd link gesture remains local through cancellation.
 The view observes captured movement at window scope so leaving and returning
 to a terminal element cannot rearm a click that the element did not receive.
 There is no terminal-adapter dependency on client policy, no server-side browser

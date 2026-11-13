@@ -1,6 +1,6 @@
 //! Terminal-local link gesture state. Only the engine resolves cells; only the
 //! client policy decides whether an owned hit may reach the platform opener.
-use crate::terminal_engine::LinkHit;
+use crate::terminal_engine::{LinkHit, LinkRun};
 use splitty_client_core::external_links::WebUrl;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +57,7 @@ struct Hover {
     cell: Cell,
     revision: u64,
     target: Option<Target>,
+    runs: Vec<LinkRun>,
 }
 
 struct Press {
@@ -67,12 +68,21 @@ struct Press {
     dragged: bool,
 }
 
+/// A completed plain click that opens its target once no second click
+/// arrives in time. Its target was validated at release; a new press or any
+/// cancellation revokes it.
+pub(super) struct Pending {
+    url: WebUrl,
+    generation: u64,
+}
+
 #[derive(Default)]
 pub(super) struct State {
     revision: u64,
     geometry: Option<Geometry>,
     hover: Option<Hover>,
     press: Option<Press>,
+    pending: Option<Pending>,
 }
 
 impl State {
@@ -98,6 +108,7 @@ impl State {
         self.revision = self.revision.wrapping_add(1);
         let changed = self.hover.take().is_some();
         self.press = None;
+        self.pending = None;
         changed
     }
 
@@ -108,18 +119,35 @@ impl State {
             .map(|hover| hover.target.as_ref())
     }
 
-    pub fn set_hover(&mut self, cell: Cell, target: Option<Target>) -> bool {
-        let changed = self.hover.as_ref().is_none_or(|old| old.target != target);
+    pub fn set_hover(&mut self, cell: Cell, target: Option<Target>, runs: Vec<LinkRun>) -> bool {
+        let runs = if target.is_some() { runs } else { Vec::new() };
+        let changed = self
+            .hover
+            .as_ref()
+            .is_none_or(|old| old.target != target || old.runs != runs);
         self.hover = Some(Hover {
             cell,
             revision: self.revision,
             target,
+            runs,
         });
         changed
     }
 
     pub fn preview(&self) -> Option<&Target> {
         self.hover.as_ref().and_then(|hover| hover.target.as_ref())
+    }
+
+    /// The viewport cells of the hovered link, for its underline.
+    pub fn underline(&self) -> &[LinkRun] {
+        self.hover
+            .as_ref()
+            .map(|hover| hover.runs.as_slice())
+            .unwrap_or_default()
+    }
+
+    pub fn pressed(&self) -> bool {
+        self.press.is_some()
     }
 
     pub fn press(&mut self, cell: Cell, target: Target, position: (f32, f32), generation: u64) {
@@ -158,6 +186,39 @@ impl State {
                 .as_ref()
                 .is_some_and(|target| target.hit == press.target.hit))
         .then_some(press.target.url)
+    }
+
+    /// Like `finish`, but a completed click is held until `take_pending`
+    /// instead of opening at once. Reports whether one is held.
+    pub fn finish_deferred(
+        &mut self,
+        cell: Option<Cell>,
+        position: (f32, f32),
+        generation: u64,
+        current: Option<Target>,
+    ) -> bool {
+        self.pending = self
+            .finish(cell, position, generation, current)
+            .map(|url| Pending { url, generation });
+        self.pending.is_some()
+    }
+
+    /// Revoke a held click, as a new press does.
+    pub fn cancel_pending(&mut self) {
+        self.pending = None;
+    }
+
+    pub fn take_pending(&mut self) -> Option<Pending> {
+        self.pending.take()
+    }
+
+    pub fn restore_pending(&mut self, pending: Option<Pending>) {
+        self.pending = pending;
+    }
+
+    /// The held click's target while the terminal shows the same session.
+    pub fn complete_pending(pending: Pending, generation: u64) -> Option<WebUrl> {
+        (pending.generation == generation).then_some(pending.url)
     }
 }
 
@@ -266,7 +327,7 @@ mod tests {
         };
         let mut state = State::default();
         state.geometry(geometry);
-        state.set_hover(cell, Some(target.clone()));
+        state.set_hover(cell, Some(target.clone()), Vec::new());
         assert!(state.cached_hover(cell).is_some());
         state.output_changed();
         assert!(state.cached_hover(cell).is_none());
@@ -294,5 +355,74 @@ mod tests {
             })
             .is_none());
         }
+    }
+
+    #[test]
+    fn a_held_plain_click_opens_only_its_current_target_in_its_session() {
+        let cell = Cell { col: 4, row: 2 };
+        let original = target("https://example.com/a", LinkKind::Detected);
+        let mut state = State::default();
+        state.press(cell, original.clone(), (10., 10.), 7);
+        assert!(state.pressed());
+        assert!(state.finish_deferred(Some(cell), (11., 10.), 7, Some(original.clone())));
+        assert!(!state.pressed());
+        let pending = state.take_pending().expect("held click");
+        assert_eq!(
+            State::complete_pending(pending, 7),
+            Some(original.url.clone())
+        );
+        // Another session opens nothing.
+        state.press(cell, original.clone(), (10., 10.), 7);
+        assert!(state.finish_deferred(Some(cell), (10., 10.), 7, Some(original.clone())));
+        let pending = state.take_pending().unwrap();
+        assert_eq!(State::complete_pending(pending, 8), None);
+        // A changed target at release, a drag, a release elsewhere, a new
+        // press or a cancellation holds nothing.
+        state.press(cell, original.clone(), (10., 10.), 7);
+        assert!(!state.finish_deferred(
+            Some(cell),
+            (10., 10.),
+            7,
+            Some(target("https://example.com/b", LinkKind::Detected))
+        ));
+        state.press(cell, original.clone(), (10., 10.), 7);
+        state.moving((20., 10.));
+        assert!(!state.finish_deferred(Some(cell), (10., 10.), 7, Some(original.clone())));
+        state.press(cell, original.clone(), (10., 10.), 7);
+        assert!(!state.finish_deferred(None, (10., 10.), 7, Some(original.clone())));
+        assert!(state.take_pending().is_none());
+        state.press(cell, original.clone(), (10., 10.), 7);
+        assert!(state.finish_deferred(Some(cell), (10., 10.), 7, Some(original.clone())));
+        state.cancel_pending();
+        assert!(state.take_pending().is_none());
+        state.press(cell, original.clone(), (10., 10.), 7);
+        assert!(state.finish_deferred(Some(cell), (10., 10.), 7, Some(original)));
+        state.cancel();
+        assert!(state.take_pending().is_none());
+    }
+
+    #[test]
+    fn hover_keeps_the_runs_of_an_allowed_target_only() {
+        let cell = Cell { col: 0, row: 0 };
+        let runs = vec![LinkRun {
+            row: 0,
+            cols: 0..20,
+        }];
+        let mut state = State::default();
+        assert!(state.set_hover(
+            cell,
+            Some(target("https://example.com/", LinkKind::Detected)),
+            runs.clone()
+        ));
+        assert_eq!(state.underline(), runs.as_slice());
+        assert!(!state.set_hover(
+            cell,
+            Some(target("https://example.com/", LinkKind::Detected)),
+            runs.clone()
+        ));
+        assert!(state.set_hover(cell, None, runs));
+        assert!(state.underline().is_empty());
+        state.cancel_hover();
+        assert!(state.underline().is_empty());
     }
 }
