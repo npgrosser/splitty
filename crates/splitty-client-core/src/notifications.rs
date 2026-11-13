@@ -12,6 +12,7 @@ use crate::{
 use serde::Deserialize;
 use serde_json::Value;
 use splitty_core::config::NotificationSettings;
+use splitty_core::protocol::message_type::MessageType;
 use splitty_core::protocol::notice::Setting;
 use std::collections::VecDeque;
 
@@ -360,8 +361,11 @@ struct Notice {
 /// `notification`, which no server builds, carry none.
 fn notice(value: &Value) -> Option<Notice> {
     if !matches!(
-        value.get("type")?.as_str()?,
-        "process.finished" | "process.idle" | "session.exited" | "program_status.changed"
+        MessageType::of(value),
+        MessageType::ProcessFinished
+            | MessageType::ProcessIdle
+            | MessageType::SessionExited
+            | MessageType::ProgramStatusChanged
     ) {
         return None;
     }
@@ -392,8 +396,8 @@ fn notice(value: &Value) -> Option<Notice> {
 }
 
 fn generic(value: &Value) -> Option<Notice> {
-    match value.get("type")?.as_str()? {
-        "process.finished" | "process.idle" | "session.exited" => {}
+    match MessageType::of(value) {
+        MessageType::ProcessFinished | MessageType::ProcessIdle | MessageType::SessionExited => {}
         _ => return None,
     }
     let process = plain_text(

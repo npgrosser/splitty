@@ -217,7 +217,8 @@ fn an_older_server_gets_a_generic_notice() {
     for (id, value) in [
         (
             "finished",
-            json!({"type":"process.finished","id":"finished","sessionId":"s0","process":"cargo"}),
+            json!({"type":"process.finished","id":"finished","sessionId":"s0","process":"cargo",
+                "futureField":{"x":1}}),
         ),
         (
             "closed",
@@ -241,6 +242,12 @@ fn an_older_server_gets_a_generic_notice() {
         noticed(
             "notification",
             "generic-notice",
+            json!({"kind":"process.idle","severity":"error","title":"build"}),
+        ),
+        // A type this build does not know carries no notice either.
+        noticed(
+            "future.event",
+            "future",
             json!({"kind":"process.idle","severity":"error","title":"build"}),
         ),
     ] {
