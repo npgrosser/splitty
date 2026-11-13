@@ -143,9 +143,10 @@ PATH, including a version-specific Windows/WSL backend directory. Supported Bash
 integration preserves that entry after startup files reset PATH. `agent exec` also
 makes its invoked CLI available by name to the launched client. These are child-only
 environment changes: no `~/.local/bin` install or shell-config edits are made, and
-existing terminals need reopening under the updated backend. A native GUI package
-with no installed/bundled CLI still needs one installed; Splitty does not pretend
-its GUI executable is a CLI. Other shells retain control of their own startup PATH.
+existing terminals need reopening under the updated backend. The app's packages
+carry the `splitty` command beside the app executable, which is not a CLI itself;
+a build without it beside the executable needs the command installed separately.
+Other shells retain control of their own startup PATH.
 
 There are at most 16 active/draining jobs per grant, 64 globally, 4096 retained job
 records/tombstones per server incarnation, 64 live grants, and 8 pending readers per
@@ -155,6 +156,6 @@ occupy one stdout object; diagnostics go to stderr. Exit codes: 0 for successful
 control, 1 for failed operations, 2 for usage errors. `inspect` itself exits 0 even
 when the inspected program failed.
 
-Linux and macOS use their local Unix server. Windows local processes run inside WSL;
-native remote-only windows still need no WSL. An embedded Windows backend ends with
-the app; the CLI does not change that hosting policy.
+Linux and macOS use their local Unix server. Windows local processes run inside WSL.
+An embedded Windows backend ends with the app; the CLI does not change that hosting
+policy.

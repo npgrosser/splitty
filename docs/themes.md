@@ -1,13 +1,14 @@
 # Themes
 
-The desktop app has two kinds of themes, chosen separately in the settings:
+The app has two kinds of themes, chosen separately in the settings:
 
 - a **UI theme** for the app itself: drawer, tab bars, menus, dialogs;
 - a **terminal palette** for what terminals show: the 16 ANSI colors,
   background, foreground, cursor and selection.
 
-Both come with the app and can be added as files. The web client has its own
-theme files (`*.toml`), which the desktop app does not read.
+Both come with the app and can be added as files. The
+[browser UI](cli.md#browser-ui) has its own theme files (`*.toml`), which the
+app does not read.
 
 ## What ships
 
@@ -48,7 +49,7 @@ loaded is named there.
 | File | Read as |
 |---|---|
 | `*.json` | UI themes: a GPUI Kit theme set |
-| `*.toml` | ignored (web client themes) |
+| `*.toml` | ignored (browser UI themes) |
 | anything else | terminal palette: a Ghostty theme file, named by its file name |
 
 Settings store a theme by an identifier made from its name: lowercase, with
