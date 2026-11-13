@@ -510,16 +510,6 @@ impl Hub {
         self.forwards.open(target, port, None, false).await
     }
 
-    pub async fn open_forward_with(
-        &self,
-        target: &str,
-        port: i64,
-        local: Option<i64>,
-        automatic: bool,
-    ) -> Result<ForwardInfo, ForwardError> {
-        self.forwards.open(target, port, local, automatic).await
-    }
-
     pub async fn open_forward_preserving_restore(
         &self,
         target: &str,

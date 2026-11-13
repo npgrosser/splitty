@@ -3113,11 +3113,18 @@ export interface NativeDocumentAssignment {
   target?: string; // required for role=remote; absent for a direct main stream
 }
 
-// Native service operations. The checked method/path, role, size and deadline
-// mapping lives in native-operations.json. Unknown operations/arguments and
-// authority fields (URL, socket, method, headers, role, backend) are rejected.
+// Native service operations. The checked method/path, role, size, deadline and
+// error-style mapping lives in native-operations.json. Unknown operations/arguments
+// and authority fields (URL, socket, method, headers, role, backend) are rejected.
 // Argument strings are data for the named operation, never routing authority.
-// body has the same domain schema/validation as the mapped browser endpoint.
+// Every argument but body is a string; countArguments are decimal strings of a
+// non-negative integer (job.logs: tail, limit, waitMs). body has the same domain
+// schema/validation as the mapped browser endpoint; over HTTP it needs a JSON
+// Content-Type (application/json or application/*+json), else 415. An argument
+// or body that does not decode is answered in the operation's errors style:
+// plain 422 {error}, job 400 {code: "invalid_request", error}, viewer
+// 400 {code: "invalid", error}. Scope "control" marks backend operations the
+// owner control socket serves too.
 /** Data returned by theme.get and GET /api/home/theme.
  * id identifies the actual resolved source, including a fallback source;
  * name remains an authored display name. Older replies may omit id.

@@ -81,7 +81,7 @@ where
         &control_path,
     );
     #[cfg(unix)]
-    let control = crate::control::spawn_service(runtime.state.clone(), control_path);
+    let control = crate::control::spawn_at(runtime.state.clone(), control_path);
     let ready = wire::Ready {
         generation: 1,
         instance: runtime.state.instance.clone(),

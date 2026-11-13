@@ -328,7 +328,7 @@ fn comments(state: &State, params: &HashMap<String, String>) -> Result<Value, Fa
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ReplyRequest {
+pub(crate) struct ReplyRequest {
     screen_id: String,
     pane_id: String,
     document: String,
@@ -337,11 +337,8 @@ struct ReplyRequest {
 }
 
 /// `POST /api/viewer/comments/reply {screenId, paneId, document, number, body}`.
-pub(crate) async fn post_comment_reply(state: &State, body: Value) -> Reply {
-    answer(match serde_json::from_value::<ReplyRequest>(body) {
-        Ok(request) => reply(state, request),
-        Err(error) => Err(Failure::invalid(format!("invalid request: {error}"))),
-    })
+pub(crate) async fn post_comment_reply(state: &State, request: ReplyRequest) -> Reply {
+    answer(reply(state, request))
 }
 
 fn reply(state: &State, request: ReplyRequest) -> Result<Value, Failure> {
@@ -402,7 +399,7 @@ fn reply(state: &State, request: ReplyRequest) -> Result<Value, Failure> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct WaitRequest {
+pub(crate) struct WaitRequest {
     screen_id: String,
     pane_id: String,
     viewer_pane_id: String,
@@ -417,11 +414,7 @@ struct WaitRequest {
 /// viewerRevision?}`, held until the user answers or the viewer pane closes.
 /// Dropping the request, as a cancelled native call or a closed connection
 /// does, ends the wait without an outcome.
-pub(crate) async fn post_review_wait(state: &State, body: Value) -> Reply {
-    let request = match serde_json::from_value::<WaitRequest>(body) {
-        Ok(request) => request,
-        Err(error) => return invalid_body(error),
-    };
+pub(crate) async fn post_review_wait(state: &State, request: WaitRequest) -> Reply {
     answer(wait(state, request).await)
 }
 

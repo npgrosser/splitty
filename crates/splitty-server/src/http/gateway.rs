@@ -1,5 +1,6 @@
 //! Explicit browser access to one assigned native backend. Credentials and
 //! assets terminate here; API/session connections have independent lifetimes.
+use super::operation::{self, parse_query, rejected};
 use super::{browser_wire, middleware, routes, session, BrowserState};
 use crate::{
     hub::Step,
@@ -7,7 +8,7 @@ use crate::{
     service::catalog::{self, Cancellation, Operation, Role},
 };
 use axum::{
-    extract::{FromRef, FromRequestParts, Path, Query, Request, State},
+    extract::{FromRef, Request, State},
     http::{Method, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -26,7 +27,7 @@ use splitty_transport::{
     peer::{Incoming, Sender},
     wire::{self, Kind},
 };
-use std::{collections::HashMap, io, sync::Arc};
+use std::{io, sync::Arc};
 use tokio::sync::watch;
 
 mod api_client;
@@ -389,75 +390,11 @@ async fn exact_host(State(browser): State<BrowserState>, request: Request, next:
     next.run(request).await
 }
 
-fn rejected(status: StatusCode, message: impl std::fmt::Display, uncertain: bool) -> Response {
-    (
-        status,
-        Json(json!({"error":message.to_string(),"uncertain":uncertain})),
-    )
-        .into_response()
-}
-
-/// Admit URI decoding before Axum/serde can allocate maps and decoded strings.
-/// Route argument counts are fixed by the catalog, never by query field names.
-fn parse_query(
-    uri: &axum::http::Uri,
-    allowed: &[&str],
-    budget: &ConnectionBudget,
-) -> Result<Charged<HashMap<String, String>>, Box<Response>> {
-    let query = uri.query().unwrap_or_default();
-    let count = query.split('&').filter(|field| !field.is_empty()).count();
-    if count > allowed.len() {
-        return Err(Box::new(rejected(
-            StatusCode::BAD_REQUEST,
-            "too many query arguments",
-            false,
-        )));
-    }
-    // The real HTTP listener already has a 64 KiB header limit. Keep that bound
-    // here too for in-process adapters before any URI-dependent allocation.
-    let length = uri.path().len().saturating_add(query.len());
-    if length > 64 * 1024 {
-        return Err(Box::new(rejected(
-            StatusCode::URI_TOO_LONG,
-            "URI exceeds parser limit",
-            false,
-        )));
-    }
-    // Covers percent-decoder scratch, owned path/query strings, Vec/HashMap
-    // growth and the later JSON object nodes while the original maps move out.
-    let bytes = 4 * length + 4096 * (allowed.len() + 1);
-    let lease = budget.reserve(bytes, false).map_err(|_| {
-        Box::new(rejected(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "parameter capacity exhausted",
-            false,
-        ))
-    })?;
-    let Query(fields) = Query::<Vec<(String, String)>>::try_from_uri(uri).map_err(|_| {
-        Box::new(rejected(
-            StatusCode::BAD_REQUEST,
-            "invalid query arguments",
-            false,
-        ))
-    })?;
-    let mut params = HashMap::with_capacity(fields.len());
-    for (key, value) in fields {
-        if key == "body"
-            || !allowed.iter().any(|name| name.trim_end_matches('?') == key)
-            || params.insert(key, value).is_some()
-        {
-            return Err(Box::new(rejected(
-                StatusCode::BAD_REQUEST,
-                "unknown or duplicate query argument",
-                false,
-            )));
-        }
-    }
-    Ok(lease.charge(params))
-}
-
 async fn api(state: Gateway, operation: Operation, request: Request) -> Response {
     let description = operation.description();
+    if let Some(refused) = operation::refuse_content_type(description, request.headers()) {
+        return refused;
+    }
     let mut ticket = match state.backend.ticket() {
         Ok(ticket) => ticket,
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
@@ -469,77 +406,40 @@ async fn api(state: Gateway, operation: Operation, request: Request) -> Response
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
     };
     let budget = ConnectionBudget::default();
-    let (query, _parameter_bytes) = match parse_query(request.uri(), description.arguments, &budget)
-    {
-        Ok(query) => query.into_parts(),
-        Err(response) => return *response,
-    };
+    let (query, _parameter_bytes) =
+        match operation::query_arguments(description, request.uri(), &budget) {
+            Ok(query) => query.into_parts(),
+            Err(response) => return *response,
+        };
     // Decode path parameters only after reserving their storage too. The same
     // lease follows both maps and the resulting API arguments through execution.
     let (mut parts, body) = request.into_parts();
-    let Path(path) =
-        match Path::<HashMap<String, String>>::from_request_parts(&mut parts, &()).await {
-            Ok(path) => path,
-            Err(_) => return rejected(StatusCode::BAD_REQUEST, "invalid path arguments", false),
-        };
-    let request = Request::from_parts(parts, body);
-    // Bodyless catalog operations need no maximum-sized JSON allocation.
-    let body_limit = if description.arguments.contains(&"body") {
-        description.body_limit
-    } else {
-        0
+    let path = match operation::path_arguments(&mut parts).await {
+        Ok(path) => path,
+        Err(response) => return *response,
     };
+    let body_limit = operation::body_limit(description);
     let _body = match budget.reserve(2 * body_limit, false) {
         Ok(lease) => lease,
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
     };
     let read = tokio::select! { biased;
         _ = ticket.revision.changed() => return rejected(StatusCode::SERVICE_UNAVAILABLE, "backend changed before request admission", false),
-        result = tokio::time::timeout(wire::FRAME_TIMEOUT, axum::body::to_bytes(request.into_body(), body_limit)) => result,
+        result = operation::read_body(body, body_limit) => result,
     };
     let bytes = match read {
-        Err(_) => return rejected(StatusCode::REQUEST_TIMEOUT, "request body timed out", false),
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => {
-            return rejected(
-                if body_limit == 0 {
-                    StatusCode::BAD_REQUEST
-                } else {
-                    StatusCode::PAYLOAD_TOO_LARGE
-                },
-                error,
-                false,
-            )
-        }
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
     };
     let _decoded = match splitty_transport::codec::reserve_json(&bytes, &budget, false) {
         Ok(lease) => lease,
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
     };
-    let mut args = serde_json::Map::new();
-    for (name, value) in path.into_iter().chain(query) {
-        if args.insert(name, Value::String(value)).is_some() {
-            return rejected(StatusCode::BAD_REQUEST, "duplicate argument", false);
-        }
-    }
-    if description.arguments.contains(&"body") {
-        let body = match serde_json::from_slice(&bytes) {
-            Ok(body) => body,
-            Err(error) => return rejected(StatusCode::UNPROCESSABLE_ENTITY, error, false),
+    let request =
+        match operation::native_request(operation, path, query, &bytes, state.backend.role()) {
+            Ok(request) => request,
+            Err(response) => return *response,
         };
-        args.insert("body".into(), body);
-    } else if !bytes.is_empty() {
-        return rejected(StatusCode::BAD_REQUEST, "unexpected request body", false);
-    }
-    let request = catalog::Request { operation, args };
-    if let Err(error) = request.validate(state.backend.role()) {
-        let status = match error {
-            catalog::Rejection::Forbidden => StatusCode::FORBIDDEN,
-            catalog::Rejection::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            _ => StatusCode::BAD_REQUEST,
-        };
-        return rejected(status, error, false);
-    }
     let mut revision = ticket.revision.clone();
     let connection = match state.backend.api.connection(&state.backend, ticket).await {
         Ok(connection) => connection,
@@ -1154,7 +1054,7 @@ mod tests {
         let uri = format!("/api/home/theme?name={}", "%FF".repeat(10_000))
             .parse()
             .unwrap();
-        let parsed = parse_query(&uri, &["name?"], &budget).unwrap();
+        let parsed = parse_query(&uri, &["name"], &budget).unwrap();
         assert_eq!(parsed["name"], "\u{fffd}".repeat(10_000));
         assert!(budget.used() >= parsed["name"].capacity());
         assert_eq!(budget.used(), process.used());
@@ -1162,7 +1062,7 @@ mod tests {
         assert_eq!(process.used(), 0);
         let held = budget.reserve(1024 * 1024, false).unwrap();
         assert_eq!(
-            parse_query(&uri, &["name?"], &budget).unwrap_err().status(),
+            parse_query(&uri, &["name"], &budget).unwrap_err().status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
         drop(held);
@@ -1172,7 +1072,7 @@ mod tests {
             .unwrap();
         let untouched = ConnectionBudget::new(process.clone(), 1024 * 1024, 0);
         assert_eq!(
-            parse_query(&flood, &["name?"], &untouched)
+            parse_query(&flood, &["name"], &untouched)
                 .unwrap_err()
                 .status(),
             StatusCode::BAD_REQUEST

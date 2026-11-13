@@ -68,15 +68,6 @@ pub fn daemon_socket_path() -> PathBuf {
     splitty_core::config::run_dir().join("daemon.sock")
 }
 
-/// Owner-control composition for a native-only service. The narrow control
-/// router never exposes browser credentials, static assets or an HTTP listener.
-pub fn spawn_service(
-    service: std::sync::Arc<crate::service::State>,
-    path: PathBuf,
-) -> ControlChannel {
-    spawn_at(service, path)
-}
-
 fn runtime_dir() -> PathBuf {
     runtime_dir_for(splitty_core::config::config_dir_override())
 }
@@ -269,7 +260,9 @@ pub fn spawn(service: std::sync::Arc<crate::service::State>) -> ControlChannel {
     spawn_at(service, socket_path())
 }
 
-/// Serve the control socket at `path` (a daemon's [`daemon_socket_path`]).
+/// Serve the control socket at `path` (a daemon's [`daemon_socket_path`], or
+/// the path a native-only service chose). The narrow control router never
+/// exposes browser credentials, static assets or an HTTP listener.
 pub fn spawn_at(service: std::sync::Arc<crate::service::State>, path: PathBuf) -> ControlChannel {
     match bind_at(path) {
         Ok((listener, path)) => {

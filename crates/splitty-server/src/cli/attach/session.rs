@@ -1,6 +1,8 @@
 //! The attached session: the session protocol on one side, the terminal on
 //! the other. Written over a message stream and a writer, so a scripted server
-//! can drive it in tests.
+//! can drive it in tests, and independent of the carrier: it reads frames
+//! through [`SessionFrame`] and writes each session message as one JSON text,
+//! which the carrier (WebSocket or native framing) frames itself.
 
 use std::io::Write;
 use std::time::Duration;
@@ -11,7 +13,6 @@ use splitty_core::protocol::{MSG_ACTIVITY, MSG_ATTACH, MSG_DETACH, MSG_INPUT, MS
 use splitty_core::pty::replay::ReplayFilter;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::Message;
 
 use super::input::{DetachKey, Utf8Input};
 use super::Outcome;
@@ -61,8 +62,9 @@ pub enum View<'a> {
 pub trait SessionFrame {
     fn view(&self) -> View<'_>;
 }
-impl SessionFrame for Message {
+impl SessionFrame for tokio_tungstenite::tungstenite::Message {
     fn view(&self) -> View<'_> {
+        use tokio_tungstenite::tungstenite::Message;
         match self {
             Message::Text(text) => View::Text(text.as_str()),
             Message::Binary(bytes) => View::Binary(bytes),
@@ -88,7 +90,8 @@ impl SessionFrame for splitty_transport::budget::Charged<splitty_transport::peer
 }
 
 /// Show the session until the user detaches, its process ends, the terminal
-/// goes or the connection is lost.
+/// goes or the connection is lost. `to_server` takes each session message as
+/// its JSON text.
 pub async fn run<Tx, Rx, RxError, RxFrame>(
     attach: Attach,
     mut to_server: Tx,
@@ -97,7 +100,7 @@ pub async fn run<Tx, Rx, RxError, RxFrame>(
     screen: &mut impl Write,
 ) -> Result<Outcome, CliError>
 where
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<String> + Unpin,
     Rx: Stream<Item = Result<RxFrame, RxError>> + Unpin,
     RxFrame: SessionFrame,
 {
@@ -218,10 +221,10 @@ fn resize(id: &str, (cols, rows): (u16, u16), redraw: bool) -> Value {
 
 async fn send<Tx>(to_server: &mut Tx, message: Value) -> Result<(), CliError>
 where
-    Tx: Sink<Message> + Unpin,
+    Tx: Sink<String> + Unpin,
 {
     to_server
-        .send(Message::text(message.to_string()))
+        .send(message.to_string())
         .await
         .map_err(|_| lost())
 }
@@ -246,6 +249,7 @@ mod tests {
     use super::*;
     use crate::client_session::codec::encode_binary_frame;
     use futures::channel::mpsc as channel;
+    use tokio_tungstenite::tungstenite::Message;
 
     const SID: &str = "sess-1";
 
@@ -272,7 +276,7 @@ mod tests {
     /// A scripted server and terminal around one attach.
     struct Harness {
         to_client: channel::UnboundedSender<Result<Message, String>>,
-        from_client: channel::UnboundedReceiver<Message>,
+        from_client: channel::UnboundedReceiver<String>,
         events: mpsc::Sender<Event>,
         screen: Screen,
         task: tokio::task::JoinHandle<Result<Outcome, CliError>>,
@@ -325,7 +329,7 @@ mod tests {
 
         async fn next_sent(&mut self) -> Value {
             let message = self.from_client.next().await.expect("a message");
-            serde_json::from_str(message.to_text().expect("text")).expect("JSON")
+            serde_json::from_str(&message).expect("JSON")
         }
 
         /// Wait until the terminal shows `expected`.
@@ -368,7 +372,7 @@ mod tests {
             let outcome = task.await.expect("client task");
             drop((to_client, events));
             let rest = from_client
-                .map(|m| serde_json::from_str(m.to_text().expect("text")).expect("JSON"))
+                .map(|m| serde_json::from_str(&m).expect("JSON"))
                 .collect()
                 .await;
             (outcome, screen.bytes(), rest)

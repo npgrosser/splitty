@@ -66,9 +66,10 @@ const TICKET_TTL: Duration = Duration::from_secs(10);
 /// docs/security/findings.md).
 const BOOTSTRAP_TTL: Duration = Duration::from_secs(120);
 
-/// Name of the session cookie. `__Host-` is deliberately not used: that prefix
-/// requires `Secure`, which browsers refuse to honour over plaintext HTTP, and
-/// the loopback listener has no TLS.
+/// Prefix of the session cookie's name; each store adds its own instance.
+/// `__Host-` is deliberately not used: that prefix requires `Secure`, which
+/// browsers refuse to honour over plaintext HTTP, and the loopback listener has
+/// no TLS.
 pub const SESSION_COOKIE: &str = "splitty-session";
 
 /// Credential store for one server process.
@@ -76,10 +77,9 @@ pub const SESSION_COOKIE: &str = "splitty-session";
 /// Nothing here is persisted. A restart invalidates every session and ticket,
 /// which is the desired behaviour: these credentials describe a live UI
 /// connection, not a durable identity.
-#[derive(Default)]
 pub struct SessionStore {
     inner: Mutex<Inner>,
-    cookie_name: Option<String>,
+    cookie_name: String,
 }
 
 #[derive(Default)]
@@ -93,22 +93,17 @@ struct Inner {
 }
 
 impl SessionStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
+    /// A store whose cookie name is its own, so that two gateways on one host
+    /// never accept each other's sessions.
     pub fn isolated() -> Self {
         Self {
-            cookie_name: Some(format!(
-                "{SESSION_COOKIE}-{}",
-                crate::service::new_instance()
-            )),
-            ..Self::default()
+            inner: Mutex::default(),
+            cookie_name: format!("{SESSION_COOKIE}-{}", crate::service::new_instance()),
         }
     }
 
     pub fn cookie_name(&self) -> &str {
-        self.cookie_name.as_deref().unwrap_or(SESSION_COOKIE)
+        &self.cookie_name
     }
 
     /// Mint a bootstrap code for a launcher to embed in the URL it opens.
@@ -298,7 +293,7 @@ mod tests {
     use super::*;
 
     fn store() -> SessionStore {
-        SessionStore::new()
+        SessionStore::isolated()
     }
 
     #[test]

@@ -43,7 +43,8 @@ impl<'ast> Visit<'ast> for Routes {
                     lit: syn::Lit::Str(path),
                     ..
                 }) => path.value(),
-                // The gateway's loop that serves every catalog operation.
+                // The loops of the gateway and the control socket that serve
+                // catalog operations.
                 syn::Expr::Field(field) if matches!(&field.member, syn::Member::Named(name) if name == "path") =>
                 {
                     visit::visit_expr_method_call(self, call);
@@ -64,8 +65,8 @@ impl<'ast> Visit<'ast> for Routes {
 
 /// Every hand-registered route (the browser gateway's own routes, the
 /// control socket's and the job routes) is either a catalog operation or an
-/// adapter route, and every adapter route is registered; the gateway serves
-/// the catalog's operations from the catalog itself.
+/// adapter route, and every adapter route is registered; the gateway and the
+/// control socket serve catalog operations from the catalog itself.
 #[test]
 fn every_registered_method_and_path_has_an_explicit_classification() {
     let mut routes = Routes::default();
@@ -105,6 +106,10 @@ fn every_registered_method_and_path_has_an_explicit_classification() {
         include_str!("../../http/gateway.rs").contains("for entry in catalog::OPERATIONS"),
         "the gateway serves the catalog's operations"
     );
+    assert!(
+        include_str!("../../http/routes.rs").contains("for entry in catalog::OPERATIONS"),
+        "the control socket serves the catalog's control operations"
+    );
 }
 
 #[test]
@@ -114,15 +119,31 @@ fn published_catalog_matches_the_checked_policy() {
             .expect("catalog fixture");
     let catalog: Vec<_> = OPERATIONS.iter().map(|entry| {
         assert_eq!(entry.name, entry.operation.description().name);
-        json!({
+        let mut published = json!({
             "operation": entry.name, "method": entry.method, "path": entry.path,
-            "scope": match entry.scope { Scope::Backend => "backend", Scope::LocalHub => "localHub" },
-            "arguments": entry.arguments, "maxBodyBytes": entry.body_limit,
+            "scope": match entry.scope {
+                Scope::Backend => "backend", Scope::Control => "control", Scope::LocalHub => "localHub",
+            },
+            "arguments": entry.arguments.iter().map(|argument| {
+                format!("{}{}", argument.name, if argument.optional { "?" } else { "" })
+            }).collect::<Vec<_>>(),
+            "maxBodyBytes": entry.body_limit,
             "cancellation": match entry.cancellation {
                 Cancellation::Read => "read", Cancellation::Mutation => "mutation", Cancellation::Registration => "registration",
             },
             "deadlineMs": entry.deadline.duration().map(|duration| duration.as_millis()),
-        })
+            "errors": match entry.errors {
+                ErrorStyle::Plain => "plain", ErrorStyle::Job => "job", ErrorStyle::Viewer => "viewer",
+            },
+        });
+        let counts: Vec<_> = entry.arguments.iter()
+            .filter(|argument| argument.kind == ArgumentType::Count)
+            .map(|argument| argument.name)
+            .collect();
+        if !counts.is_empty() {
+            published["countArguments"] = json!(counts);
+        }
+        published
     }).collect();
     assert_eq!(
         published,

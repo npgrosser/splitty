@@ -968,9 +968,10 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
     assert_eq!(native_theme.1["terminal"], light["terminal"]);
     assert_ne!(native_theme.1["ui"], light["ui"]);
     state.config.write().unwrap().terminal.theme = "default".into();
-    for operation in crate::service::catalog::OPERATIONS.iter().filter(|entry| {
-        entry.method == "GET" && entry.arguments.iter().all(|arg| arg.ends_with('?'))
-    }) {
+    for operation in crate::service::catalog::OPERATIONS
+        .iter()
+        .filter(|entry| entry.method == "GET" && entry.arguments.iter().all(|arg| arg.optional))
+    {
         let expected = exchange(&browser, api("GET", operation.path, None)).await;
         let actual = native(&state, operation.operation, json!({})).await;
         assert_eq!(actual, expected, "{}", operation.name);
@@ -2036,4 +2037,177 @@ async fn a_save_by_name_answers_alike_over_http_and_native() {
     );
     let (_, list) = exchange(&browser, api("GET", "/api/templates", None)).await;
     assert_eq!(list, json!([{"slug": "v1-2", "displayName": "V1 2"}]));
+}
+
+/// access-control, Control Socket Route Set: the owner control socket routes a
+/// catalog operation exactly when its scope is `Control`; the job operations
+/// come with the job router it shares with the agent grant sockets.
+#[tokio::test]
+async fn the_control_socket_routes_exactly_the_catalogs_control_operations() {
+    use crate::service::catalog::{Scope, OPERATIONS};
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let control = crate::http::build_control_router(state.service.clone());
+    for entry in OPERATIONS {
+        if entry.name.starts_with("job.") {
+            continue;
+        }
+        let path = entry.path.replace("{id}", "x").replace("{slug}", "x");
+        // No content type and an undefined query argument: a routed operation
+        // refuses it, an unrouted path is not found.
+        let request = Request::builder()
+            .method(entry.method)
+            .uri(format!("{path}?undefined=1"))
+            .body(Body::empty())
+            .expect("request");
+        let expected = match entry.scope {
+            Scope::Control if entry.takes_body() => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Scope::Control => StatusCode::BAD_REQUEST,
+            Scope::Backend | Scope::LocalHub => StatusCode::NOT_FOUND,
+        };
+        assert_eq!(status(&control, request).await, expected, "{}", entry.name);
+    }
+}
+
+/// control-api, Two Control Transports (Malformed request on both
+/// transports), and access-control, JSON Request Bodies: the control socket
+/// and the browser gateway answer a malformed request alike, and neither
+/// reads a body without a JSON content type.
+#[tokio::test]
+async fn malformed_requests_are_answered_alike_on_both_transports() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    state
+        .mux_store
+        .dispatch(Op::CreateScreen {
+            name: None,
+            screen_id: Some(ScreenId::from("s1")),
+            new_pane_id: Some(PaneId::from("p1")),
+            shell_profile_id: None,
+        })
+        .expect("screen");
+    let session = state
+        .mux_store
+        .session_id_for_pane(&PaneId::from("p1"))
+        .expect("session");
+    let browser = browser_router(&state);
+    let control = crate::http::build_control_router(state.service.clone());
+    let request = |method: &str, path: &str, content_type: Option<&str>, body: &str| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", ADDR)
+            .header("authorization", "Bearer process-token");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        request.body(Body::from(body.to_owned())).expect("request")
+    };
+    let workspace = || serde_json::to_value(state.mux_store.get_workspace_state()).expect("state");
+    let before = workspace();
+    let send = format!("/api/session/{session}/send");
+    let json = Some("application/json");
+    for (method, path, content_type, body, expected) in [
+        (
+            "POST",
+            "/api/mux/op",
+            json,
+            r#"{"op":{"type":"close_screen"}}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "POST",
+            "/api/mux/op",
+            json,
+            "{",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "GET",
+            "/api/mux/neighbor?undefined=1",
+            None,
+            "",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            "/api/mux/op",
+            Some("text/plain"),
+            r#"{"screenId":"s1","op":{"type":"close_screen","screenId":"s1"}}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "POST",
+            send.as_str(),
+            None,
+            r#"{"data":"printf leaked\n"}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "POST",
+            "/api/viewer/comments/reply",
+            Some("application/json; charset=utf-8"),
+            r#"{"screenId":"s1"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let over_gateway = exchange(&browser, request(method, path, content_type, body)).await;
+        let over_socket = exchange(&control, request(method, path, content_type, body)).await;
+        assert_eq!(
+            over_gateway.0, expected,
+            "{method} {path}: {over_gateway:?}"
+        );
+        assert!(over_gateway.1["error"].is_string(), "{over_gateway:?}");
+        assert_eq!(over_socket, over_gateway, "{method} {path}");
+    }
+    assert_eq!(workspace(), before, "no request changed the workspace");
+}
+
+/// Count arguments stay decimal strings on the native wire and an operation
+/// reports its own decoding errors in its style: job operations as
+/// `invalid_request`, viewer operations as `invalid`, others as 422.
+#[tokio::test]
+async fn native_arguments_and_bodies_are_decoded_in_the_operations_error_style() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    assert_eq!(
+        native(&state, Operation::JobLogs, json!({"id":"job-1","tail":"x"})).await,
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"code":"invalid_request","error":"invalid tail"})
+        )
+    );
+    let (status, body) = native(&state, Operation::JobLogs, json!({"id":"job-1","limit":3})).await;
+    assert_eq!(
+        (status, body),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"error":"unsupported or malformed native request: limit must be a string"})
+        )
+    );
+    let (status, body) = native(&state, Operation::JobLaunch, json!({"body":{}})).await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid_request"))
+    );
+    let (status, body) = native(
+        &state,
+        Operation::ViewerReviewWait,
+        json!({"body":{"screenId":"s1"}}),
+    )
+    .await;
+    assert_eq!(
+        (status, &body["code"]),
+        (StatusCode::BAD_REQUEST, &json!("invalid"))
+    );
+    assert!(body["error"]
+        .as_str()
+        .expect("error")
+        .starts_with("invalid request: "));
+    let (status, body) = native(&state, Operation::MuxOp, json!({"body":{"op":{}}})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        body["error"].is_string() && body.get("code").is_none(),
+        "{body}"
+    );
 }

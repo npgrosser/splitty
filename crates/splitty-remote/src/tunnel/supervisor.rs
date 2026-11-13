@@ -58,13 +58,32 @@ pub struct Connected<C> {
     pub client: C,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+/// The steps of connecting to a host, as `splitty connect` reports them and
+/// the remote-window helper passes them on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Install,
     Daemon,
     Started,
     Tunnel,
+}
+
+impl Step {
+    /// The step's name on the wire, the one place it is spelled.
+    pub fn name(self) -> &'static str {
+        match self {
+            Step::Install => "install",
+            Step::Daemon => "daemon",
+            Step::Started => "started",
+            Step::Tunnel => "tunnel",
+        }
+    }
+}
+
+impl Serialize for Step {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.name())
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {

@@ -8,7 +8,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "home.metadata",
@@ -18,7 +19,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "home.update",
@@ -30,7 +32,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "theme.get",
@@ -42,7 +45,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "theme.list",
@@ -52,7 +56,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "shellProfiles.get",
@@ -62,7 +67,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "shellProfiles.update",
@@ -74,7 +80,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "serverSettings.get",
@@ -84,7 +91,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "serverSettings.update",
@@ -96,7 +104,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "template.extract",
@@ -108,7 +117,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "template.list",
@@ -118,7 +128,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "template.get",
@@ -130,7 +141,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "template.save",
@@ -143,7 +155,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "template.create",
@@ -155,7 +168,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "template.delete",
@@ -167,7 +181,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "build.get",
@@ -177,7 +192,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "stats.get",
@@ -187,7 +203,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "command.send",
@@ -199,57 +216,62 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "mux.state",
       "method": "GET",
       "path": "/api/mux/state",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "mux.screens",
       "method": "GET",
       "path": "/api/mux/screens",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "mux.screen",
       "method": "GET",
       "path": "/api/mux/screen/{id}",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "id"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "mux.op",
       "method": "POST",
       "path": "/api/mux/op",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "body"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "mux.neighbor",
       "method": "GET",
       "path": "/api/mux/neighbor",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "screen?",
         "pane?",
@@ -257,60 +279,65 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "mux.status",
       "method": "GET",
       "path": "/api/mux/status",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "session.send",
       "method": "POST",
       "path": "/api/session/{id}/send",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "id",
         "body"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "editor.open",
       "method": "POST",
       "path": "/api/editor/open",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "body"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "registration",
-      "deadlineMs": 35000
+      "deadlineMs": 35000,
+      "errors": "plain"
     },
     {
       "operation": "file.offer",
       "method": "POST",
       "path": "/api/file/offer",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "body"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "registration",
-      "deadlineMs": null
+      "deadlineMs": null,
+      "errors": "plain"
     },
     {
       "operation": "viewer.comments",
       "method": "GET",
       "path": "/api/viewer/comments",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "screenId?",
         "paneId?",
@@ -319,31 +346,34 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "viewer"
     },
     {
       "operation": "viewer.commentReply",
       "method": "POST",
       "path": "/api/viewer/comments/reply",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "body"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "viewer"
     },
     {
       "operation": "viewer.reviewWait",
       "method": "POST",
       "path": "/api/viewer/review/wait",
-      "scope": "backend",
+      "scope": "control",
       "arguments": [
         "body"
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "registration",
-      "deadlineMs": null
+      "deadlineMs": null,
+      "errors": "viewer"
     },
     {
       "operation": "job.list",
@@ -353,7 +383,8 @@
       "arguments": [],
       "maxBodyBytes": 131072,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "job"
     },
     {
       "operation": "job.launch",
@@ -365,7 +396,8 @@
       ],
       "maxBodyBytes": 131072,
       "cancellation": "mutation",
-      "deadlineMs": 15000
+      "deadlineMs": 15000,
+      "errors": "job"
     },
     {
       "operation": "job.inspect",
@@ -377,7 +409,8 @@
       ],
       "maxBodyBytes": 131072,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "job"
     },
     {
       "operation": "job.logs",
@@ -392,9 +425,15 @@
         "waitMs?",
         "format?"
       ],
+      "countArguments": [
+        "tail",
+        "limit",
+        "waitMs"
+      ],
       "maxBodyBytes": 131072,
       "cancellation": "read",
-      "deadlineMs": 35000
+      "deadlineMs": 35000,
+      "errors": "job"
     },
     {
       "operation": "job.input",
@@ -407,7 +446,8 @@
       ],
       "maxBodyBytes": 131072,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "job"
     },
     {
       "operation": "job.stop",
@@ -419,7 +459,8 @@
       ],
       "maxBodyBytes": 131072,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "job"
     },
     {
       "operation": "job.forget",
@@ -431,7 +472,8 @@
       ],
       "maxBodyBytes": 131072,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "job"
     },
     {
       "operation": "remote.directory.get",
@@ -441,7 +483,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "ssh.prompts.get",
@@ -451,7 +494,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "ssh.prompts.answer",
@@ -463,7 +507,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "host.list",
@@ -473,7 +518,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "host.forget",
@@ -485,7 +531,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "hostPreferences.get",
@@ -495,7 +542,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "hostPreferences.update",
@@ -507,7 +555,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "hostOrder.get",
@@ -517,7 +566,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "hostOrder.update",
@@ -529,7 +579,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "remoteScreens.get",
@@ -539,7 +590,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "remoteScreens.update",
@@ -551,7 +603,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "remoteScreens.updateHost",
@@ -563,7 +616,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "catalog.get",
@@ -573,7 +627,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "catalog.update",
@@ -585,7 +640,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "forward.list",
@@ -595,7 +651,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "forward.open",
@@ -607,7 +664,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 180000
+      "deadlineMs": 180000,
+      "errors": "plain"
     },
     {
       "operation": "forward.stop",
@@ -619,7 +677,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 180000
+      "deadlineMs": 180000,
+      "errors": "plain"
     },
     {
       "operation": "forwardPreferences.get",
@@ -629,7 +688,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "forwardPreferences.save",
@@ -641,7 +701,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "forwardPreferences.forget",
@@ -653,7 +714,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "reverse.list",
@@ -663,7 +725,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "reverse.open",
@@ -675,7 +738,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 180000
+      "deadlineMs": 180000,
+      "errors": "plain"
     },
     {
       "operation": "reverse.stop",
@@ -687,7 +751,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 180000
+      "deadlineMs": 180000,
+      "errors": "plain"
     },
     {
       "operation": "reversePreferences.get",
@@ -697,7 +762,8 @@
       "arguments": [],
       "maxBodyBytes": 1048576,
       "cancellation": "read",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "reversePreferences.save",
@@ -709,7 +775,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     },
     {
       "operation": "reversePreferences.forget",
@@ -721,7 +788,8 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000
+      "deadlineMs": 30000,
+      "errors": "plain"
     }
   ],
   "sessionOperations": [

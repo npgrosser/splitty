@@ -85,7 +85,18 @@ The terminal service owns workspace state, jobs, configuration and the host hub.
 `service::State` contains no browser credentials, origins or listening address;
 those belong to the browser gateway (`http::gateway`). The `client_session` module owns connection identities, session dispatch, editor/file registrations and cleanup. A browser never reaches it directly: the gateway turns each `/api` request into a native request and each WebSocket into a native connection (`http::browser_wire` translates the frames), so native carriers are the only ones the service has. Each carrier creates its own client connection, so one tab or native window closing does not detach another. Liveness belongs to the carrier: the session loop (`client_session::handler`) keeps no heartbeat and its session messages carry no ping. The native transport ends a peer that leaves its ping unanswered (a check every 15 seconds, ended once the last matching pong is 30 seconds old, so within 45 seconds of silence) and the gateway closes a browser 30 seconds after its last matching WebSocket pong; either closes the session's delivery context, which ends the loop and releases the client's registrations. Editor requests and file offers expire by the deadline each waiting request holds, not by a sweep of the loop. The native operation catalog is published in
 [`native-operations.json`](native-operations.json), with each method/path mapping,
-argument names, role, body limit, deadline and cancellation policy. Session
+argument names and types, role, body limit, deadline, cancellation policy and error
+style. Non-body arguments are strings, as path and query arguments are; a count
+argument (`job.logs`' `tail`, `limit`, `waitMs`) is a decimal string the dispatcher
+turns into a number, and a body or count that does not decode is answered in the
+operation's error style (`plain`: 422 `{"error"}`, `job`: 400 `invalid_request`,
+`viewer`: 400 `invalid`). The owner control socket serves the catalog's `control`
+scope from the catalog too: `http::operation` turns an HTTP request into a native
+request (query and path arguments, a body only with a JSON `Content-Type`, else 415,
+catalog validation) for the gateway and the control socket alike, and the control
+socket hands it to `State::execute` with the main role, so the two transports
+answer every request, malformed or not, the same way. Its job and grant routes keep
+their own router (`http::jobs`), which the agent grant sockets share. Session
 messages keep their existing dispatcher validation and connection ownership.
 Remote-window roles can operate on their assigned service but cannot invoke the
 local host hub. Browser authentication and owner/grant administration are separate

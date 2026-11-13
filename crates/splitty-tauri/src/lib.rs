@@ -772,8 +772,7 @@ fn start_local_backend() -> (Arc<splitty_server::service::State>, EmbeddedServer
                 Arc::new(splitty_core::pty::terminal::LocalTerminals),
                 &control_path,
             );
-            let control =
-                splitty_server::control::spawn_service(backend.state.clone(), control_path);
+            let control = splitty_server::control::spawn_at(backend.state.clone(), control_path);
             if state_tx.send(backend.state.clone()).is_ok() {
                 let _ = stop_rx.await;
             }

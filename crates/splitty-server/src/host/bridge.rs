@@ -88,11 +88,12 @@ mod tests {
             let args = description
                 .arguments
                 .iter()
-                .filter(|name| !name.ends_with('?'))
+                .filter(|argument| !argument.optional)
+                .map(|argument| argument.name)
                 .map(|name| {
                     (
-                        (*name).to_owned(),
-                        if *name == "body" {
+                        name.to_owned(),
+                        if name == "body" {
                             serde_json::json!({})
                         } else {
                             serde_json::json!("target")

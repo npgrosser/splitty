@@ -140,7 +140,7 @@ fn state_on(
     let client_state = Arc::new(client_state);
     TestState {
         token: "process-token".to_owned(),
-        sessions: Arc::new(SessionStore::new()),
+        sessions: Arc::new(SessionStore::isolated()),
         allowed_origins: Arc::new(allowed_origins(listen_addr)),
         service: Arc::new(crate::service::State {
             instance: crate::service::new_instance(),
@@ -733,10 +733,19 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
         .headers_mut()
         .insert("content-type", "application/json".parse().expect("header"));
     assert_eq!(status(&app, broken).await, StatusCode::UNPROCESSABLE_ENTITY);
+    let mut empty = api("PUT", CATALOG, None);
+    empty
+        .headers_mut()
+        .insert("content-type", "application/json".parse().expect("header"));
     assert_eq!(
-        status(&app, api("PUT", CATALOG, None)).await,
+        status(&app, empty).await,
         StatusCode::UNPROCESSABLE_ENTITY,
         "no body"
+    );
+    assert_eq!(
+        status(&app, api("PUT", CATALOG, None)).await,
+        StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "no body and no JSON content type"
     );
     assert_eq!(std::fs::read(&file).expect("file"), saved);
     assert!(host.asked().is_empty());
@@ -874,7 +883,7 @@ async fn remote_catalog_requires_api_authentication_and_origin_guards() {
                     request.headers_mut().remove("authorization");
                     request.headers_mut().insert(
                         "cookie",
-                        format!("splitty-session={session}")
+                        format!("{}={session}", state.sessions.cookie_name())
                             .parse()
                             .expect("cookie"),
                     );
@@ -896,7 +905,7 @@ async fn remote_catalog_requires_api_authentication_and_origin_guards() {
     request.headers_mut().remove("authorization");
     request.headers_mut().insert(
         "cookie",
-        format!("splitty-session={session}")
+        format!("{}={session}", state.sessions.cookie_name())
             .parse()
             .expect("cookie"),
     );

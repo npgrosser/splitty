@@ -8,17 +8,18 @@
 use std::collections::HashMap;
 
 use axum::{
-    extract::{rejection::JsonRejection, Path, Query, State},
-    http::StatusCode,
+    extract::{Request, State},
+    http::{Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{on, post, MethodFilter},
     Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::json;
+use splitty_transport::budget::ConnectionBudget;
 
+use super::operation;
 use super::ControlState;
-use crate::service::operations::{self, MuxOpRequest, SessionSendRequest};
-use crate::service::review;
+use crate::service::catalog::{self, Operation, Role, Scope};
 
 /// Routes reachable over the local control socket.
 ///
@@ -43,25 +44,68 @@ use crate::service::review;
 /// credential is handed to panes implicitly, so nothing portable leaks through
 /// `env` output, crash reports or CI logs.
 ///
-/// The handlers call the same service operations as the native catalog the
-/// browser gateway serves; only the set of registered paths differs.
+/// The set is the catalog's `Control` scope: those operations go through the
+/// same request translation as the browser gateway's and into the service's
+/// native entry point, so a request is answered alike on both transports.
 pub fn control_routes() -> Router<ControlState> {
-    Router::new()
-        .route("/api/daemon/stop", post(stop_daemon_instance))
-        .route("/api/mux/state", get(get_mux_state))
-        .route("/api/mux/screens", get(get_mux_screens))
-        .route("/api/mux/screen/{id}", get(get_mux_screen))
-        .route("/api/mux/op", post(post_mux_op))
-        .route("/api/mux/neighbor", get(get_mux_neighbor))
-        .route("/api/mux/status", get(get_mux_status))
-        .route("/api/session/{id}/send", post(post_session_send))
-        .route("/api/editor/open", post(post_editor_open))
-        .route("/api/file/offer", post(post_file_offer))
-        // What the user handed over on the viewer panes of the caller's
-        // screen, agents' replies to it, and waits for the user's review.
-        .route("/api/viewer/comments", get(get_viewer_comments))
-        .route("/api/viewer/comments/reply", post(post_comment_reply))
-        .route("/api/viewer/review/wait", post(post_review_wait))
+    let mut router = Router::new().route("/api/daemon/stop", post(stop_daemon_instance));
+    for entry in catalog::OPERATIONS
+        .iter()
+        .filter(|entry| entry.scope == Scope::Control)
+    {
+        let operation = entry.operation;
+        let method = MethodFilter::try_from(
+            Method::from_bytes(entry.method.as_bytes()).expect("catalog method"),
+        )
+        .expect("catalog filter");
+        router = router.route(
+            entry.path,
+            on(
+                method,
+                move |State(state): State<ControlState>, request: Request| {
+                    control_operation(state, operation, request)
+                },
+            ),
+        );
+    }
+    router
+}
+
+/// One catalog operation over the control socket, with the owner's local
+/// main role. Dropping the request (a closed connection) drops the call,
+/// which ends a held wait such as a review.
+async fn control_operation(
+    state: ControlState,
+    operation: Operation,
+    request: Request,
+) -> Response {
+    let description = operation.description();
+    if let Some(refused) = operation::refuse_content_type(description, request.headers()) {
+        return refused;
+    }
+    let budget = ConnectionBudget::default();
+    let (query, _parameter_bytes) =
+        match operation::query_arguments(description, request.uri(), &budget) {
+            Ok(query) => query.into_parts(),
+            Err(response) => return *response,
+        };
+    let (mut parts, body) = request.into_parts();
+    let path = match operation::path_arguments(&mut parts).await {
+        Ok(path) => path,
+        Err(response) => return *response,
+    };
+    let bytes = match operation::read_body(body, operation::body_limit(description)).await {
+        Ok(bytes) => bytes,
+        Err(response) => return *response,
+    };
+    match operation::native_request(operation, path, query, &bytes, Role::Main) {
+        Ok(request) => state
+            .service
+            .execute(request, Role::Main)
+            .await
+            .into_response(),
+        Err(response) => *response,
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -122,102 +166,6 @@ pub(crate) fn refuse_upgrade(
         return Some((StatusCode::UNAUTHORIZED, "Unauthorized").into_response());
     }
     None
-}
-
-// ── Control-socket handlers ──────────────────────────────────────────────────
-
-async fn get_mux_state(State(state): State<ControlState>) -> Json<Value> {
-    Json(operations::get_mux_state(&state.service).await.0)
-}
-
-async fn get_mux_screen(State(state): State<ControlState>, Path(id): Path<String>) -> Response {
-    operations::get_mux_screen(&state.service, id)
-        .await
-        .into_response()
-}
-
-async fn post_mux_op(State(state): State<ControlState>, Json(req): Json<MuxOpRequest>) -> Response {
-    operations::post_mux_op(&state.service, req)
-        .await
-        .into_response()
-}
-
-async fn get_mux_neighbor(
-    State(state): State<ControlState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    operations::get_mux_neighbor(&state.service, params)
-        .await
-        .into_response()
-}
-
-async fn get_mux_screens(State(state): State<ControlState>) -> Json<Value> {
-    Json(operations::get_mux_screens(&state.service).await.0)
-}
-
-async fn get_mux_status(State(state): State<ControlState>) -> Json<Value> {
-    Json(operations::get_mux_status(&state.service).await.0)
-}
-
-async fn post_session_send(
-    State(state): State<ControlState>,
-    Path(id): Path<String>,
-    Json(req): Json<SessionSendRequest>,
-) -> Response {
-    operations::post_session_send(&state.service, id, req)
-        .await
-        .into_response()
-}
-
-async fn post_file_offer(
-    State(state): State<ControlState>,
-    Json(input): Json<crate::client_session::files::OfferRequest>,
-) -> Response {
-    operations::post_file_offer(&state.service, input)
-        .await
-        .into_response()
-}
-
-async fn post_editor_open(
-    State(state): State<ControlState>,
-    Json(input): Json<crate::client_session::editor::OpenRequest>,
-) -> Response {
-    operations::post_editor_open(&state.service, input)
-        .await
-        .into_response()
-}
-
-async fn get_viewer_comments(
-    State(state): State<ControlState>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    review::get_viewer_comments(&state.service, params)
-        .await
-        .into_response()
-}
-
-async fn post_comment_reply(
-    State(state): State<ControlState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    match body {
-        Ok(Json(body)) => review::post_comment_reply(&state.service, body).await,
-        Err(error) => review::invalid_body(error.body_text()),
-    }
-    .into_response()
-}
-
-/// Held until the user answers or the viewer pane closes; a closed
-/// connection drops the handler, which ends the wait.
-async fn post_review_wait(
-    State(state): State<ControlState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response {
-    match body {
-        Ok(Json(body)) => review::post_review_wait(&state.service, body).await,
-        Err(error) => review::invalid_body(error.body_text()),
-    }
-    .into_response()
 }
 
 // ── Frontend static files ───────────────────────────────────────────────────

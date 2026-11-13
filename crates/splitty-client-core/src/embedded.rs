@@ -56,7 +56,7 @@ impl EmbeddedService {
                 connector: Box::new(offline::NoHosts),
             },
         );
-        let control = control::spawn_service(runtime.state.clone(), path);
+        let control = control::spawn_at(runtime.state.clone(), path);
         Self {
             runtime: Some(runtime),
             control: Some(control),
@@ -113,7 +113,7 @@ impl EmbeddedService {
             Arc::new(splitty_core::pty::terminal::LocalTerminals),
             &path,
         );
-        let control = control::spawn_service(runtime.state.clone(), path);
+        let control = control::spawn_at(runtime.state.clone(), path);
         Self {
             runtime: Some(runtime),
             control: Some(control),

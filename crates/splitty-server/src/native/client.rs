@@ -584,7 +584,7 @@ async fn attach_service(result: io::Result<Client>, service: ServiceTask) -> io:
     }
 }
 
-/// A terminal's existing session dispatcher can write to native framing
+/// Session messages, each as its JSON text, written to native framing
 /// without a second relay queue or a task per message.
 pub struct SessionSink {
     sender: Sender,
@@ -598,7 +598,7 @@ impl SessionSink {
         }
     }
 }
-impl futures::Sink<tokio_tungstenite::tungstenite::Message> for SessionSink {
+impl futures::Sink<String> for SessionSink {
     type Error = io::Error;
     fn poll_ready(
         self: std::pin::Pin<&mut Self>,
@@ -613,19 +613,8 @@ impl futures::Sink<tokio_tungstenite::tungstenite::Message> for SessionSink {
             Ok(())
         })
     }
-    fn start_send(
-        self: std::pin::Pin<&mut Self>,
-        message: tokio_tungstenite::tungstenite::Message,
-    ) -> io::Result<()> {
-        match message {
-            tokio_tungstenite::tungstenite::Message::Text(text) => {
-                self.sender.data(Kind::Text, text.as_bytes())
-            }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "unsupported native session input",
-            )),
-        }
+    fn start_send(self: std::pin::Pin<&mut Self>, text: String) -> io::Result<()> {
+        self.sender.data(Kind::Text, text.as_bytes())
     }
     fn poll_flush(
         mut self: std::pin::Pin<&mut Self>,

@@ -184,15 +184,7 @@ impl Provider {
                         }
                         let event = event.map(|event| {
                             let (phase, message) = match event {
-                                tunnel::Progress::Step { step, message } => (
-                                    match step {
-                                        tunnel::Step::Install => "install",
-                                        tunnel::Step::Daemon => "daemon",
-                                        tunnel::Step::Started => "started",
-                                        tunnel::Step::Tunnel => "tunnel",
-                                    },
-                                    message,
-                                ),
+                                tunnel::Progress::Step { step, message } => (step.name(), message),
                                 tunnel::Progress::Notice { message } => ("notice", message),
                             };
                             wire::Progress {

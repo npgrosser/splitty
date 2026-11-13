@@ -81,7 +81,7 @@ fn unavailable() -> CliError {
 
 #[cfg(unix)]
 async fn run_in_terminal(options: Options) -> Result<Outcome, CliError> {
-    use futures::StreamExt;
+    use futures::{SinkExt, StreamExt};
 
     if !terminal::is_terminal() {
         return Err(CliError::Failed("splitty attach needs a terminal".into()));
@@ -140,6 +140,11 @@ async fn run_in_terminal(options: Options) -> Result<Outcome, CliError> {
     // Read only once the terminal is raw, so no read waits for a whole line.
     let mut events = terminal::events().map_err(|e| CliError::Failed(e.to_string()))?;
     let (to_server, from_server) = socket.split();
+    let to_server = to_server.with(|text: String| {
+        futures::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
+            tokio_tungstenite::tungstenite::Message::text(text),
+        ))
+    });
     let attach = session::Attach {
         session_id,
         detach_key: options.detach_key,

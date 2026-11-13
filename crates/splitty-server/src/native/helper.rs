@@ -77,9 +77,7 @@ where
         |report| {
             Ok(report.map(|report| {
                 let (phase, message) = match report {
-                    tunnel::Progress::Step { step, message } => {
-                        (format!("{step:?}").to_lowercase(), message)
-                    }
+                    tunnel::Progress::Step { step, message } => (step.name().into(), message),
                     tunnel::Progress::Notice { message } => ("notice".into(), message),
                 };
                 splitty_transport::wire::Progress { phase, message }
@@ -250,7 +248,7 @@ where
         &control_path,
     );
     #[cfg(unix)]
-    let control = crate::control::spawn_service(runtime.state.clone(), control_path);
+    let control = crate::control::spawn_at(runtime.state.clone(), control_path);
     let mut closed = context.closing();
     let result = tokio::select! {
         result = super::serve_ready(read, write, runtime.state.clone(), assignment, context, opening, carrier) => result,

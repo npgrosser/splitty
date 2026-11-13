@@ -1,6 +1,6 @@
 //! Native entry point: fixed operation and trusted role, then the same domain
 //! implementations used by browser/control adapters. No URL routing or auth.
-use super::catalog::{Operation, Rejection, Request, Role};
+use super::catalog::{ArgumentType, ErrorStyle, Operation, Rejection, Request, Role};
 use super::operations as op;
 use super::reply::{IntoReply, Payload, Reply};
 use super::{jobs, review, State};
@@ -9,18 +9,24 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-fn decode<T: DeserializeOwned>(body: Value, job: bool) -> Result<T, Reply> {
-    serde_json::from_value(body).map_err(|error| {
-        if job {
+/// The answer of an operation of `style` to an argument or body it cannot
+/// decode.
+fn undecodable(style: ErrorStyle, error: impl std::fmt::Display) -> Reply {
+    match style {
+        ErrorStyle::Plain => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Payload(json!({"error": error.to_string()})),
+        )
+            .into_reply(),
+        ErrorStyle::Job => {
             crate::jobs::JobError::new(400, "invalid_request", error.to_string()).into_reply()
-        } else {
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                Payload(json!({"error": error.to_string()})),
-            )
-                .into_reply()
         }
-    })
+        ErrorStyle::Viewer => review::invalid_body(error),
+    }
+}
+
+fn decode<T: DeserializeOwned>(body: Value, style: ErrorStyle) -> Result<T, Reply> {
+    serde_json::from_value(body).map_err(|error| undecodable(style, error))
 }
 
 impl State {
@@ -32,6 +38,20 @@ impl State {
                 Rejection::Invalid(_) => StatusCode::BAD_REQUEST,
             };
             return (status, Payload(json!({"error":error.to_string()}))).into_reply();
+        }
+        let description = request.operation.description();
+        let style = description.errors;
+        for argument in description.arguments {
+            if argument.kind != ArgumentType::Count {
+                continue;
+            }
+            if let Some(value) = request.args.get_mut(argument.name) {
+                let parsed = value.as_str().and_then(|value| value.parse::<u64>().ok());
+                let Some(number) = parsed else {
+                    return undecodable(style, format!("invalid {}", argument.name));
+                };
+                *value = json!(number);
+            }
         }
         let body = request.args.remove("body").unwrap_or(Value::Null);
         let id = request
@@ -53,14 +73,9 @@ impl State {
                 })
                 .collect()
         };
-        let is_job = request
-            .operation
-            .description()
-            .path
-            .starts_with("/api/jobs");
         macro_rules! body {
             () => {
-                match decode(body, is_job) {
+                match decode(body, style) {
                     Ok(body) => body,
                     Err(error) => return error,
                 }
@@ -108,8 +123,8 @@ impl State {
             Operation::EditorOpen => op::post_editor_open(self, body!()).await,
             Operation::FileOffer => op::post_file_offer(self, body!()).await,
             Operation::ViewerComments => review::get_viewer_comments(self, query()).await,
-            Operation::ViewerCommentReply => review::post_comment_reply(self, body).await,
-            Operation::ViewerReviewWait => review::post_review_wait(self, body).await,
+            Operation::ViewerCommentReply => review::post_comment_reply(self, body!()).await,
+            Operation::ViewerReviewWait => review::post_review_wait(self, body!()).await,
             Operation::JobList => job!(jobs.list()),
             Operation::JobLaunch => job!(jobs.launch(body!())),
             Operation::JobInspect => job!(jobs.inspect(id)),
@@ -117,21 +132,7 @@ impl State {
             Operation::JobStop => job!(jobs.stop(id)),
             Operation::JobForget => job!(jobs.forget(id)),
             Operation::JobLogs => {
-                for name in ["tail", "limit", "waitMs"] {
-                    if let Some(value) = request.args.get_mut(name) {
-                        let parsed = value.as_str().and_then(|value| value.parse::<u64>().ok());
-                        let Some(number) = parsed else {
-                            return crate::jobs::JobError::new(
-                                400,
-                                "invalid_request",
-                                format!("invalid {name}"),
-                            )
-                            .into_reply();
-                        };
-                        *value = json!(number);
-                    }
-                }
-                let args = match decode(Value::Object(request.args), true) {
+                let args = match decode(Value::Object(request.args), style) {
                     Ok(args) => args,
                     Err(error) => return error,
                 };

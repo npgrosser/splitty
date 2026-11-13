@@ -9,6 +9,7 @@ mod browser_wire;
 pub mod gateway;
 pub mod jobs;
 pub mod middleware;
+mod operation;
 pub mod routes;
 pub mod server;
 pub mod session;
