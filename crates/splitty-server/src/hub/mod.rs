@@ -364,9 +364,11 @@ impl Hub {
         watch: &mut auto_forward::Watch,
         frame: &splitty_transport::codec::Frame,
     ) {
-        watch.observe(frame, self.auto_forward_enabled(), |target, port| {
-            self.forwards.open_automatically(target, port)
-        });
+        watch.observe(
+            frame,
+            || self.auto_forward_enabled(),
+            |target, port| self.forwards.open_automatically(target, port),
+        );
     }
 
     /// The hub of the user the server runs as: the system `ssh`, the

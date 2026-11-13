@@ -68,14 +68,14 @@ pub(super) struct Watch {
 }
 
 impl Watch {
-    /// Follow `frame` when it is a `ports.changed` the host sent. With the
-    /// setting `enabled`, `open` is asked to forward each port that appeared
+    /// Follow `frame` when it is a `ports.changed` the host sent. When the
+    /// setting is `enabled` (read only for such a list), `open` is asked to forward each port that appeared
     /// and was not forwarded for the same process yet; it answers whether
     /// it started one.
     pub(super) fn observe(
         &mut self,
         frame: &Frame,
-        enabled: bool,
+        enabled: impl FnOnce() -> bool,
         open: impl FnMut(&str, u16) -> bool,
     ) {
         if frame.kind != Kind::Text {
@@ -85,7 +85,7 @@ impl Watch {
             return;
         };
         if let Some(ports) = parse(bytes) {
-            self.list(ports, enabled, open);
+            self.list(ports, enabled(), open);
         }
     }
 
@@ -274,10 +274,14 @@ mod tests {
         let mut watch = forwards.watch("vm1");
         let opened = std::cell::RefCell::new(Vec::new());
         let observe = |watch: &mut Watch, frame: &Frame| {
-            watch.observe(frame, true, |_, port| {
-                opened.borrow_mut().push(port);
-                true
-            })
+            watch.observe(
+                frame,
+                || true,
+                |_, port| {
+                    opened.borrow_mut().push(port);
+                    true
+                },
+            )
         };
         let list = |ports: &str| {
             format!(r#"{{"type":"ports.changed","id":"e1","timestamp":1,"ports":[{ports}]}}"#)
