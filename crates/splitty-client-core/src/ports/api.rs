@@ -106,9 +106,6 @@ fn body(request: &ForwardRequest, local: Option<u16>, label: bool) -> Map<String
     }
     if !label && matches!(request.action, ForwardAction::Start | ForwardAction::Open) {
         body["preserveRestore"] = json!(true);
-        if request.automatic {
-            body["automatic"] = json!(true);
-        }
     }
     Map::from_iter([("body".into(), body)])
 }

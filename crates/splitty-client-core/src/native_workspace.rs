@@ -1,5 +1,4 @@
 //! Own the local service and route workspace intents on one ordered connection.
-mod auto_forward;
 mod editor_uri;
 mod editors;
 mod files;
@@ -1604,9 +1603,6 @@ async fn run_service_with_presence(
     // `remote.reconnectHosts` as first read; those hosts are reconnected once.
     let mut reconnect = None::<Vec<String>>;
     let mut reconnect_settled = false;
-    let mut auto_forward = auto_forward::AutoForward::default();
-    let mut auto_forward_enabled = false;
-    let mut forwards = None::<Arc<ForwardSnapshot>>;
     let mut remotes = remote::Remotes::new(&service).with_window_presence(presence.clone());
     let mut known = None::<Arc<HostDirectorySnapshot>>;
     let mut host_connects = HostConnects::default();
@@ -1658,7 +1654,7 @@ async fn run_service_with_presence(
                 Next::SshPrompts(list) => publish(&updates,Update::SshPrompts(list),&stop).await?,
                 Next::Ports(event) => {
                     if let Some(ports)=&ports {ports.revalidate(&window);}
-                    let update=match event {PortsEvent::Snapshot(snapshot)=>{forwards=Some(snapshot.clone());Update::Forwards(snapshot)},PortsEvent::Result(result)=>Update::Forward(*result)};
+                    let update=match event {PortsEvent::Snapshot(snapshot)=>Update::Forwards(snapshot),PortsEvent::Result(result)=>Update::Forward(*result)};
                     publish(&updates,update,&stop).await?;
                 }
                 Next::Hub(HubEvent::Management(mut result)) => {
@@ -1698,7 +1694,6 @@ async fn run_service_with_presence(
                             if reconnect.is_none() {
                                 reconnect=Some(match snapshot.value(crate::settings::SettingsField::ReconnectHosts) {Some(crate::settings::SettingsValue::List(hosts))=>hosts,_=>Vec::new()});
                             }
-                            auto_forward_enabled=snapshot.value(crate::settings::SettingsField::AutoForwardPorts)==Some(crate::settings::SettingsValue::Bool(true));
                             Update::Appearance(snapshot)
                         },
                         Ok(LocalServiceUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason:error.to_string() },
@@ -1931,12 +1926,6 @@ async fn run_service_with_presence(
             if let Some(memory)=&mut remembered {memory.sync(&window);}
             if hub.is_some() {
                 host_reports.sync(&window,known.as_deref().map(HostDirectorySnapshot::directory),|target,screens|local.client.report_host_screens(target,screens));
-            }
-            if let Some(ports)=&mut ports {
-                // Their results are not published: an automatic forward brings no notice.
-                for request in auto_forward.appeared(auto_forward_enabled,&window,forwards.as_deref()) {
-                    let _=ports.enqueue(owner,uuid::Uuid::new_v4(),request,&window);
-                }
             }
             if !reconnect_settled {
                 let list=remembered.as_ref().and_then(|memory|memory.known()).cloned();

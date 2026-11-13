@@ -81,7 +81,6 @@ pub struct ForwardRequest {
     restore: Option<bool>,
     label: Option<String>,
     link: Option<(TerminalToken, WebUrl)>,
-    automatic: bool,
 }
 impl ForwardRequest {
     pub fn start(
@@ -100,14 +99,7 @@ impl ForwardRequest {
             restore: None,
             label,
             link: None,
-            automatic: false,
         })
-    }
-    /// Started by `remote.autoForwardPorts`, not by the user: the service
-    /// never remaps a saved port for it.
-    pub fn automatic(mut self) -> Self {
-        self.automatic = true;
-        self
     }
     pub fn open(
         key: MappingKey,
@@ -148,7 +140,6 @@ impl ForwardRequest {
             restore: None,
             label: None,
             link: None,
-            automatic: false,
         }
     }
     pub fn forget(key: MappingKey) -> Self {
