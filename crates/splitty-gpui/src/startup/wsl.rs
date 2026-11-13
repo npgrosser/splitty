@@ -480,7 +480,7 @@ mod windows {
 
     /// Remembers `distro` for the next start, once it is known to be supported.
     pub fn select(distro: &str) -> Result<(), String> {
-        let inspection = inspect(distro, "", "", &NEVER)?;
+        let inspection = inspect(distro, "", &NEVER)?;
         if let Some(why) = unsupported(distro, &inspection) {
             return Err(format!("'{distro}' cannot be used: {why}"));
         }
