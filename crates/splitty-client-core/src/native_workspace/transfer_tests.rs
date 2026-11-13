@@ -275,7 +275,6 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     let mut plan = final_model.assess_close(900, CloseTarget::Window).unwrap();
     plan.affected.push(CloseAffected {
         identity: CloseIdentity::Reconciliation,
-        busy: false,
         unresolved: true,
     });
     plan.affected.sort_by(|a, b| a.identity.cmp(&b.identity));

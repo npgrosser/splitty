@@ -693,6 +693,7 @@ impl<'a> Remotes<'a> {
                 | CommandKind::TransferPane { .. }
                 | CommandKind::ApplyTemplate { .. }
                 | CommandKind::ExtractTemplate { .. }
+                | CommandKind::AssessClose { .. }
         ) || matches!(&command.kind,CommandKind::RequestClose {plan,..} if plan.target!=CloseTarget::Window);
         let effects = if allowed {
             host.source

@@ -619,29 +619,6 @@ impl Workspace {
             .unwrap_or_default()
     }
 
-    /// How many annotations end with a close: those of a viewer pane, or of
-    /// every viewer pane of a Screen.
-    pub(in crate::workspace) fn annotations_lost(
-        &self,
-        source: Option<SourceId>,
-        screen: &str,
-        pane: Option<&str>,
-    ) -> usize {
-        source
-            .and_then(|source| self.model_for_source(source))
-            .and_then(|model| model.screen(screen))
-            .and_then(|screen| screen.snapshot())
-            .map_or(0, |screen| {
-                screen
-                    .panes
-                    .values()
-                    .filter(|entry| pane.is_none_or(|pane| entry.id.as_str() == pane))
-                    .filter_map(|entry| entry.viewer.as_ref())
-                    .map(|viewer| viewer.annotations.len())
-                    .sum()
-            })
-    }
-
     pub(super) fn viewer_open_notes(&self, key: &PaneKey) -> usize {
         self.viewer_record(key).map_or(0, |(_, _, record)| {
             record

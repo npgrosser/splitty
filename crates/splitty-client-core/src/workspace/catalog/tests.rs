@@ -271,8 +271,31 @@ fn removed_maximized_slot_restores_full_view_and_focuses_survivor() {
     assert_eq!(workspace.maximized_slot_id(), None);
 }
 
+/// What the server says closing `target` of `screen` ends: `running` and
+/// `scratchpad` name panes with that loss.
+fn assessed(screen: &str, running: &[&str], scratchpad: &[&str]) -> CloseImpact {
+    let mut assessment = mux::CloseAssessment::default();
+    for (pane, is_running) in running
+        .iter()
+        .map(|pane| (pane, true))
+        .chain(scratchpad.iter().map(|pane| (pane, false)))
+    {
+        assessment.entries.push(mux::CloseLoss {
+            screen_id: screen.into(),
+            pane_id: Some((*pane).into()),
+            running: is_running,
+            scratchpad: !is_running,
+            ..Default::default()
+        });
+        assessment.running += u32::from(is_running);
+        assessment.scratchpads += u32::from(!is_running);
+    }
+    assessment.confirm = !assessment.entries.is_empty();
+    CloseImpact::Assessed(assessment)
+}
+
 #[test]
-fn close_plan_counts_unique_sessions_across_hidden_screens_and_rejects_identity_changes() {
+fn close_plan_binds_identities_across_hidden_screens_and_takes_impact_from_the_server() {
     let mut workspace = model(&["a", "b"]);
     let connection = workspace.connection_id;
     workspace
@@ -282,8 +305,14 @@ fn close_plan_counts_unique_sessions_across_hidden_screens_and_rejects_identity_
         .apply_snapshot(connection, &terminal_snapshot("b", "pb", "sb", true))
         .unwrap();
     let plan = workspace.assess_close(7, CloseTarget::Window).unwrap();
-    assert_eq!(plan.busy_count, 1, "hidden busy session is included once");
     assert_eq!(plan.unresolved_count, 0);
+    assert!(
+        plan.needs_confirmation(),
+        "no answer from the server yet: the window asks"
+    );
+    let plan = plan.with_impact(&assessed("b", &["pb"], &[]));
+    assert_eq!(plan.running_count(), 1, "hidden busy session is included");
+    assert!(plan.needs_confirmation());
     assert!(workspace.validate_close(&plan, true).is_ok());
     let mut titled = terminal_snapshot("b", "pb", "sb", true);
     titled["screen"]["panes"]["pb"]["title"] = json!("new title");
@@ -305,29 +334,43 @@ fn close_plan_counts_unique_sessions_across_hidden_screens_and_rejects_identity_
 }
 
 #[test]
-fn close_plan_requires_consent_for_new_busy_or_unresolved_work() {
+fn close_plan_asks_from_the_server_answer_and_for_new_unresolved_work() {
     let mut workspace = model(&["a"]);
     let connection = workspace.connection_id;
-    workspace
-        .apply_snapshot(connection, &terminal_snapshot("a", "pa", "sa", false))
-        .unwrap();
-    let idle = workspace
-        .assess_close(
-            1,
-            CloseTarget::Pane {
-                screen: "a".into(),
-                pane: "pa".into(),
-            },
-        )
-        .unwrap();
-    assert!(!idle.needs_confirmation());
+    // The snapshot's busy flag is not the client's to judge.
     workspace
         .apply_snapshot(connection, &terminal_snapshot("a", "pa", "sa", true))
         .unwrap();
-    assert!(workspace.validate_close(&idle, false).is_err());
+    let pane = CloseTarget::Pane {
+        screen: "a".into(),
+        pane: "pa".into(),
+    };
+    let idle = workspace
+        .assess_close(1, pane.clone())
+        .unwrap()
+        .with_impact(&assessed("a", &[], &[]));
+    assert!(!idle.needs_confirmation());
+    assert!(workspace.validate_close(&idle, false).is_ok());
+    // An idle pane whose scratchpad holds text asks (session-scratchpad).
+    let text = workspace
+        .assess_close(2, pane.clone())
+        .unwrap()
+        .with_impact(&assessed("a", &[], &["pa"]));
+    assert!(text.needs_confirmation());
+    assert_eq!(text.running_count(), 0);
+    assert!(workspace.validate_close(&text, false).is_err());
+    assert!(workspace.validate_close(&text, true).is_ok());
+    // Without the server's answer the window asks generically.
+    let unknown = workspace
+        .assess_close(3, pane)
+        .unwrap()
+        .with_impact(&CloseImpact::Unknown);
+    assert!(unknown.needs_confirmation());
+    assert!(workspace.validate_close(&unknown, false).is_err());
     let busy = workspace
-        .assess_close(2, CloseTarget::Screen { screen: "a".into() })
-        .unwrap();
+        .assess_close(4, CloseTarget::Screen { screen: "a".into() })
+        .unwrap()
+        .with_impact(&assessed("a", &["pa"], &[]));
     assert!(busy.needs_confirmation());
     assert!(workspace.validate_close(&busy, false).is_err());
     assert!(workspace.validate_close(&busy, true).is_ok());
@@ -344,6 +387,47 @@ fn close_plan_requires_consent_for_new_busy_or_unresolved_work() {
 }
 
 #[test]
+fn an_assessment_of_several_panes_splits_into_one_per_pane() {
+    let impact = assessed("a", &["p1"], &["p2"]);
+    let pane = |pane: &str| CloseTarget::Pane {
+        screen: "a".into(),
+        pane: pane.into(),
+    };
+    let first = impact.for_target(&pane("p1"));
+    let first = first.assessment().unwrap();
+    assert!(first.confirm);
+    assert_eq!((first.running, first.scratchpads), (1, 0));
+    let second = impact.for_target(&pane("p2"));
+    assert_eq!(second.assessment().unwrap().scratchpads, 1);
+    let idle = impact.for_target(&pane("p3"));
+    assert!(!idle.assessment().unwrap().confirm);
+    assert!(idle.assessment().unwrap().entries.is_empty());
+    let other_screen = impact.for_target(&CloseTarget::Screen { screen: "b".into() });
+    assert!(!other_screen.assessment().unwrap().confirm);
+    assert_eq!(
+        impact
+            .for_target(&CloseTarget::Window)
+            .assessment()
+            .unwrap()
+            .entries
+            .len(),
+        2
+    );
+    assert_eq!(
+        CloseImpact::Unknown.for_target(&pane("p1")),
+        CloseImpact::Unknown
+    );
+    assert_eq!(
+        serde_json::to_value(close_scope(&pane("p1"))).unwrap(),
+        json!({"kind": "panes", "screenId": "a", "paneIds": ["p1"]})
+    );
+    assert_eq!(
+        serde_json::to_value(close_scope(&CloseTarget::Window)).unwrap(),
+        json!({"kind": "workspace"})
+    );
+}
+
+#[test]
 fn pending_screen_and_connection_replacement_invalidate_window_close() {
     let mut workspace = model(&["a"]);
     workspace
@@ -352,7 +436,10 @@ fn pending_screen_and_connection_replacement_invalidate_window_close() {
             &terminal_snapshot("a", "pa", "sa", false),
         )
         .unwrap();
-    let idle = workspace.assess_close(3, CloseTarget::Window).unwrap();
+    let idle = workspace
+        .assess_close(3, CloseTarget::Window)
+        .unwrap()
+        .with_impact(&assessed("a", &[], &[]));
     assert!(!idle.needs_confirmation());
     reserve(&mut workspace, "pending", "new-pane", 1);
     assert!(

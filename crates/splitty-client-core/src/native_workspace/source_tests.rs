@@ -242,6 +242,92 @@ async fn queued_event_envelope_retains_charge_until_consumer_drops_it() {
     assert!(!path.exists());
 }
 
+/// mux-protocol, Close Assessment; session-scratchpad, Confirmation Before
+/// Text Is Lost (Close a native pane with text): the worker asks the service
+/// and hands its answer to the window with the request ID.
+#[tokio::test]
+async fn close_assessment_reaches_the_window_with_the_scratchpad_of_an_idle_pane() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let state = runtime.state.clone();
+    let (commands, receiver) = mpsc::channel(8);
+    let (sender, mut updates) = mpsc::channel(64);
+    let stop = Arc::new(AtomicBool::new(false));
+    let cleanup = Arc::new(AtomicBool::new(false));
+    let worker = tokio::spawn(run_service(
+        crate::EmbeddedService::from_runtime(runtime),
+        receiver,
+        sender,
+        stop.clone(),
+        cleanup.clone(),
+        ColorScheme::Dark,
+    ));
+    let model = loop {
+        if let Update::Workspace(model) = next(&mut updates).await {
+            let model = local_projection(&model);
+            if model.routes().len() == 1
+                && model.session_ready(&model.routes()[0].session_id)
+                && model.close_assessments_supported()
+            {
+                break model;
+            }
+        }
+    };
+    let owner = model.source_token();
+    let screen = model.shown_screen_id().unwrap().to_owned();
+    let route = model.routes()[0].clone();
+    state
+        .mux_store
+        .dispatch_screen(
+            &splitty_core::ids::ScreenId::from(screen.as_str()),
+            splitty_core::mux::ScreenOp::SetScratchpad {
+                session_id: route.session_id.as_str().into(),
+                text: "send after the build".into(),
+            },
+        )
+        .unwrap();
+    let target = CloseTarget::Pane {
+        screen: screen.clone(),
+        pane: route.pane_id.clone(),
+    };
+    commands
+        .send(Command::new(
+            owner,
+            CommandKind::AssessClose {
+                request_id: 41,
+                scope: crate::workspace::close_scope(&target),
+            },
+        ))
+        .await
+        .unwrap();
+    let impact = loop {
+        if let Update::CloseAssessed {
+            source,
+            request_id: 41,
+            impact,
+        } = next(&mut updates).await
+        {
+            assert_eq!(source, owner);
+            break impact;
+        }
+    };
+    let assessment = impact.assessment().expect("the service assesses");
+    assert!(assessment.confirm);
+    assert_eq!(assessment.scratchpads, 1);
+    assert_eq!(
+        assessment.entries[0].pane_id.as_ref().map(|id| id.as_str()),
+        Some(route.pane_id.as_str())
+    );
+    let plan = model.assess_close(42, target).unwrap().with_impact(&impact);
+    assert!(plan.needs_confirmation(), "an idle pane with text asks");
+    stop.store(true, Ordering::Release);
+    worker.await.unwrap().unwrap();
+    assert!(cleanup.load(Ordering::Acquire));
+    assert!(!path.exists());
+}
+
 #[tokio::test]
 async fn startup_close_consent_survives_workspace_publication_without_ui_consumption() {
     let (runtime, path) = crate::appearance::local::tests::fixture();

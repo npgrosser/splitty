@@ -60,6 +60,8 @@ fn replacement_consent_capacity_queue_rejection_and_single_admission() {
         |screen, r| {
             assert_eq!(screen, "old");
             assert!(!r.create_screen);
+            // templates, Confirmed Screen Replacement.
+            assert!(r.replace_confirmed);
             assert!(r
                 .template
                 .panes
@@ -89,14 +91,22 @@ fn replacement_consent_capacity_queue_rejection_and_single_admission() {
         .is_err());
     let mut m = model();
     let p = plan(&m, false);
-    Arc::make_mut(m.models.get_mut("old").unwrap().snapshot.as_mut().unwrap())
+    // A replaced session is another identity than the reviewed one; the
+    // busy flag is the server's to judge and not checked here.
+    let snapshot = Arc::make_mut(m.models.get_mut("old").unwrap().snapshot.as_mut().unwrap());
+    snapshot
         .sessions
         .get_mut(&SessionId::from("s"))
         .unwrap()
         .busy = true;
+    snapshot
+        .panes
+        .get_mut(&splitty_core::ids::PaneId::from("p"))
+        .unwrap()
+        .session_id = Some(SessionId::from("replacement"));
     assert!(m
         .apply_template_with(p, TemplateApplyChoice::RunCommands, true, |_, _| panic!(
-            "stale risk"
+            "stale review"
         ))
         .is_err());
     m.set_templates_supported(false);
@@ -118,7 +128,10 @@ fn pending_close_identity_navigation_and_authoritative_partial_outcome() {
         p.clone(),
         TemplateApplyChoice::RunCommands,
         false,
-        |_, _| Ok(()),
+        |_, r| {
+            assert!(r.create_screen && !r.replace_confirmed);
+            Ok(())
+        },
     )
     .unwrap();
     assert!(m.validate_close(&oldclose, true).is_err());

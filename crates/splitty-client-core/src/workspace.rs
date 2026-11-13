@@ -33,7 +33,9 @@ pub use splitty_core::mux::jobs::JobState;
 pub use splitty_core::mux::{
     Axis, Direction, FloatBounds, FloatingEntry, LayoutNode, ScreenInfo, ScreenState,
 };
-pub use splitty_core::mux::{ViewerSource, ViewerState};
+pub use splitty_core::mux::{
+    CloseAssessment, CloseLoss, CloseScope, SessionStatus, ViewerSource, ViewerState,
+};
 use splitty_core::{
     ids::{NodeId, PaneId, SessionId},
     mux::{self, ScreenOp},
@@ -115,12 +117,89 @@ pub enum CloseIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CloseAffected {
     pub identity: CloseIdentity,
-    pub busy: bool,
+    /// The client's own view of this part is still pending (a creation, a
+    /// Screen or a reconciliation it has not seen settle).
     pub unresolved: bool,
 }
 
-/// A bounded, UI-free assessment. Busy and unresolved counts describe the
-/// prompt; identities and connection generation bind its eventual approval.
+/// What the server says a close ends (`mux-protocol`, Close Assessment). The
+/// client keeps no rule of its own about busy, starting, scratchpad or
+/// annotation impact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseImpact {
+    /// Not asked yet.
+    Pending,
+    /// The service does not assess closes, or its answer failed: the window
+    /// asks a generic question.
+    Unknown,
+    Assessed(mux::CloseAssessment),
+}
+
+impl CloseImpact {
+    /// The part of an assessment that concerns `target`; an assessment of
+    /// several panes is split this way into one per pane.
+    pub fn for_target(&self, target: &CloseTarget) -> Self {
+        let Self::Assessed(assessment) = self else {
+            return self.clone();
+        };
+        let mut part = mux::CloseAssessment::default();
+        for entry in &assessment.entries {
+            let keep = match target {
+                CloseTarget::Pane { screen, pane } => {
+                    entry.screen_id.as_str() == screen
+                        && entry.pane_id.as_ref().is_some_and(|id| id.as_str() == pane)
+                }
+                CloseTarget::Screen { screen } => entry.screen_id.as_str() == screen,
+                CloseTarget::Window => true,
+            };
+            if keep {
+                part.running += u32::from(entry.running);
+                part.starting += u32::from(entry.starting);
+                part.scratchpads += u32::from(entry.scratchpad);
+                part.annotations = part.annotations.saturating_add(entry.annotations);
+                part.entries.push(entry.clone());
+            }
+        }
+        part.confirm = !part.entries.is_empty();
+        Self::Assessed(part)
+    }
+
+    pub fn assessment(&self) -> Option<&mux::CloseAssessment> {
+        match self {
+            Self::Assessed(assessment) => Some(assessment),
+            _ => None,
+        }
+    }
+}
+
+/// The scope a server assesses for `target` (`mux.assess_close`).
+pub fn close_scope(target: &CloseTarget) -> mux::CloseScope {
+    match target {
+        CloseTarget::Pane { screen, pane } => mux::CloseScope::Panes {
+            screen_id: screen.as_str().into(),
+            pane_ids: vec![pane.as_str().into()],
+        },
+        CloseTarget::Screen { screen } => mux::CloseScope::Screens {
+            screen_ids: vec![screen.as_str().into()],
+        },
+        CloseTarget::Window => mux::CloseScope::Workspace,
+    }
+}
+
+/// The scope of closing several tabs of one Screen at once.
+pub fn tabs_close_scope<'a>(
+    screen: &str,
+    panes: impl IntoIterator<Item = &'a str>,
+) -> mux::CloseScope {
+    mux::CloseScope::Panes {
+        screen_id: screen.into(),
+        pane_ids: panes.into_iter().map(Into::into).collect(),
+    }
+}
+
+/// A bounded, UI-free close decision. Identities and connection generation
+/// bind its eventual approval; the server's impact and the client's
+/// unresolved parts describe the prompt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClosePlan {
     source_id: Option<SourceId>,
@@ -128,16 +207,33 @@ pub struct ClosePlan {
     pub connection_id: Option<Uuid>,
     pub target: CloseTarget,
     pub affected: Vec<CloseAffected>,
-    pub busy_count: usize,
     pub unresolved_count: usize,
+    pub impact: CloseImpact,
 }
 
 impl ClosePlan {
     pub fn source_token(&self) -> Option<SourceToken> {
         Some(SourceToken::new(self.source_id?, self.connection_id?))
     }
+    /// Asks when the server says something ends, when it gave no answer, or
+    /// while a part of the client's own view is unresolved.
     pub fn needs_confirmation(&self) -> bool {
-        self.busy_count != 0 || self.unresolved_count != 0
+        self.unresolved_count != 0
+            || self
+                .impact
+                .assessment()
+                .is_none_or(|assessment| assessment.confirm)
+    }
+    /// Terminals whose program runs, as the server reported them.
+    pub fn running_count(&self) -> usize {
+        self.impact
+            .assessment()
+            .map_or(0, |assessment| assessment.running as usize)
+    }
+    /// The plan with the server's answer for its target.
+    pub fn with_impact(mut self, impact: &CloseImpact) -> Self {
+        self.impact = impact.for_target(&self.target);
+        self
     }
 
     /// Before discovery, the only meaningful target is the owned window.
@@ -149,11 +245,10 @@ impl ClosePlan {
             target: CloseTarget::Window,
             affected: vec![CloseAffected {
                 identity: CloseIdentity::Catalog,
-                busy: false,
                 unresolved: true,
             }],
-            busy_count: 0,
             unresolved_count: 1,
+            impact: CloseImpact::Unknown,
         }
     }
 }

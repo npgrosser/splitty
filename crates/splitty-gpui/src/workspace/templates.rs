@@ -39,6 +39,10 @@ enum TemplateMode {
     },
     Review {
         plan: Arc<TemplateApplyPlan>,
+        /// What replacing the Screen ends, from its service; asked with
+        /// `impact_request` (`templates`, Native Template Replacement Consent).
+        impact: CloseImpact,
+        impact_request: u64,
     },
     Delete {
         slug: String,
@@ -591,6 +595,53 @@ impl Workspace {
         }
     }
 
+    /// Asks the service what replacing `screen` ends, for the review's text.
+    fn assess_template_replacement(&mut self, source: SourceToken, screen: String) {
+        let request_id = self.next_close_id.saturating_add(1);
+        self.next_close_id = request_id;
+        let sent = self.commands.try_send(WorkerCommand::new(
+            source,
+            Command::AssessClose {
+                request_id,
+                scope: close_scope(&CloseTarget::Screen { screen }),
+            },
+        ));
+        if let Some(TemplateMode::Review {
+            impact,
+            impact_request,
+            ..
+        }) = self.template_dialog.as_mut().map(|dialog| &mut dialog.mode)
+        {
+            *impact_request = request_id;
+            if sent.is_err() {
+                *impact = CloseImpact::Unknown;
+            }
+        }
+    }
+
+    /// The service's answer for the review's replacement; false when the
+    /// answer is for something else.
+    pub(super) fn template_replacement_assessed(
+        &mut self,
+        source: SourceToken,
+        request_id: u64,
+        answer: &CloseImpact,
+    ) -> bool {
+        let Some(TemplateMode::Review {
+            plan,
+            impact,
+            impact_request,
+        }) = self.template_dialog.as_mut().map(|dialog| &mut dialog.mode)
+        else {
+            return false;
+        };
+        if *impact_request != request_id || plan.source_token() != source {
+            return false;
+        }
+        *impact = answer.clone();
+        true
+    }
+
     fn template_prepare_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = &self.template_dialog else {
             return;
@@ -625,6 +676,7 @@ impl Workspace {
             root.read(cx).value().to_string(),
         );
         let mut direct_layout = false;
+        let mut assess = None;
         if let Some(dialog) = &mut self.template_dialog {
             match result {
                 Ok(plan) => {
@@ -637,13 +689,25 @@ impl Workspace {
                                 .get(name)
                                 .is_none_or(|pane| pane.command.trim().is_empty())
                         });
+                    let replaced = plan
+                        .replacement_impact()
+                        .map(|_| plan.screen_id().to_owned());
+                    let source = plan.source_token();
                     dialog.mode = TemplateMode::Review {
                         plan: Arc::new(plan),
+                        impact: CloseImpact::Pending,
+                        impact_request: 0,
                     };
                     dialog.error = None;
+                    if let Some(screen) = replaced {
+                        assess = Some((source, screen));
+                    }
                 }
                 Err(error) => dialog.error = Some(format!("Cannot apply: {error}")),
             }
+        }
+        if let Some((source, screen)) = assess {
+            self.assess_template_replacement(source, screen);
         }
         if direct_layout {
             self.template_apply(TemplateApplyChoice::LayoutOnly, window, cx);
@@ -666,7 +730,7 @@ impl Workspace {
         let Some(dialog) = self.template_dialog.as_mut() else {
             return;
         };
-        let TemplateMode::Review { plan } = &dialog.mode else {
+        let TemplateMode::Review { plan, .. } = &dialog.mode else {
             return;
         };
         if self.pending_template_apply.is_some() {
@@ -1021,7 +1085,7 @@ impl Workspace {
                                 })),
                         );
                 }
-                TemplateMode::Review { plan } => {
+                TemplateMode::Review { plan, impact, .. } => {
                     body = body.child(format!(
                         "Target: {} · Root: {}",
                         plan.display_name(),
@@ -1031,11 +1095,25 @@ impl Workspace {
                             plan.root_directory()
                         }
                     ));
-                    if let Some(impact) = plan.replacement_impact() {
+                    if let Some(replaced) = plan.replacement_impact() {
+                        let ends = match impact {
+                            CloseImpact::Pending => "Checking what runs there…".to_owned(),
+                            CloseImpact::Unknown => {
+                                "This service does not say what runs there.".to_owned()
+                            }
+                            CloseImpact::Assessed(assessment) if !assessment.confirm => {
+                                "Nothing runs there.".to_owned()
+                            }
+                            CloseImpact::Assessed(assessment) => impact_detail(assessment),
+                        };
+                        let loading = if replaced.unresolved_count == 0 {
+                            ""
+                        } else {
+                            " Session state is still loading."
+                        };
                         body = body.child(format!(
-                        "Replacing this Screen ends all its terminal sessions (including hidden and floating). Running: {} · Unresolved: {}. Layout only also ends them.",
-                        impact.busy_count, impact.unresolved_count,
-                    ));
+                            "Replacing this Screen ends all its terminal sessions (including hidden and floating). {ends}{loading} Layout only also ends them.",
+                        ));
                     }
                     if plan.projection().skipped_web_count != 0 {
                         body = body.child(format!(

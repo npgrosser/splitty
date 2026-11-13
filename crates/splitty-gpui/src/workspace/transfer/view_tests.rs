@@ -1,7 +1,7 @@
 //! In-process tests of the tab context menu and tab dragging through the real
 //! workspace view.
 use super::{TabMenuAction, TransferChoice, Workspace};
-use crate::workspace::{CloseTarget, Command, Destination};
+use crate::workspace::{answer_close_assessment as assess, CloseTarget, Command, Destination};
 use gpui_kit::{
     point, px, size, AppContext, Bounds, Entity, Modifiers, MouseButton, MouseDownEvent,
     MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext,
@@ -223,6 +223,7 @@ fn inactive_tab_close_pointer_uses_assessed_captured_pane() {
         |window, view, mut receiver| {
             open(window, &view, "p1", point(px(120.), px(80.)));
             click(window, "tab-context-close");
+            assess(window, &view, &mut receiver);
             let (plan, _) = next_close(&mut receiver);
             assert_eq!(plan.connection_id, Some(owner));
             assert_eq!(closed_pane(&plan), "p1");
@@ -239,6 +240,7 @@ fn tab_close_keyboard_and_stale_owner_do_not_redirect() {
         |window, view, mut receiver| {
             open(window, &view, "p1", point(px(120.), px(80.)));
             keys(window, "enter");
+            assess(window, &view, &mut receiver);
             let (plan, _) = next_close(&mut receiver);
             assert_eq!(closed_pane(&plan), "p1");
             deliver(
@@ -384,6 +386,7 @@ fn close_other_tabs_closes_idle_tabs_one_after_another() {
         |window, view, mut receiver| {
             open(window, &view, "p1", point(px(120.), px(80.)));
             click(window, "tab-context-close-others");
+            assess(window, &view, &mut receiver);
             assert!(
                 !window.has_pending_prompt(),
                 "idle tabs need no confirmation"
@@ -420,6 +423,7 @@ fn close_tabs_to_the_right_leaves_earlier_tabs() {
         |window, view, mut receiver| {
             open(window, &view, "p0", point(px(120.), px(80.)));
             click(window, "tab-context-close-right");
+            assess(window, &view, &mut receiver);
             let (first, _) = next_close(&mut receiver);
             assert_eq!(closed_pane(&first), "p2");
             settle(window, &view, &first);
@@ -442,6 +446,7 @@ fn busy_tabs_get_one_confirmation_before_any_close() {
         |window, view, mut receiver| {
             open(window, &view, "p1", point(px(120.), px(80.)));
             click(window, "tab-context-close-others");
+            assess(window, &view, &mut receiver);
             let (title, detail) = window.pending_prompt().expect("one confirmation");
             assert_eq!(title, "Close 2 tabs?");
             assert!(detail.contains("Running sessions: 2"), "{detail}");
@@ -457,6 +462,7 @@ fn busy_tabs_get_one_confirmation_before_any_close() {
 
             open(window, &view, "p1", point(px(120.), px(80.)));
             click(window, "tab-context-close-others");
+            assess(window, &view, &mut receiver);
             window.simulate_prompt_answer("Close");
             window.run_until_parked();
             let (first, confirmed) = next_close(&mut receiver);
@@ -483,6 +489,7 @@ fn a_rejected_close_leaves_the_remaining_tabs_open() {
         |window, view, mut receiver| {
             open(window, &view, "p1", point(px(120.), px(80.)));
             click(window, "tab-context-close-others");
+            assess(window, &view, &mut receiver);
             let (first, _) = next_close(&mut receiver);
             deliver(
                 window,
@@ -500,14 +507,47 @@ fn a_rejected_close_leaves_the_remaining_tabs_open() {
     );
 }
 
+/// session-scratchpad, Confirmation Before Text Is Lost: the native window asks
+/// from the server's assessment, so an idle tab with scratchpad text asks.
 #[test]
-fn a_tab_that_turns_busy_after_an_unconfirmed_decision_stays_open() {
+fn an_idle_tab_with_scratchpad_text_asks_before_it_closes() {
+    let owner = Uuid::new_v4();
+    let mut model = local_model(owner, &[("p0", false), ("p1", false)], None);
+    let mut notes = snapshot(&[("p0", false), ("p1", false)], None);
+    notes["screen"]["revision"] = 3.into();
+    notes["screen"]["sessions"]["s-p1"]["scratchpad"] = "next: run the migration".into();
+    let token = model.lifecycle_token();
+    model
+        .source_mut(token.source_id())
+        .unwrap()
+        .apply_snapshot(owner, &notes)
+        .unwrap();
+    with_model(model, |window, view, mut receiver| {
+        open(window, &view, "p1", point(px(120.), px(80.)));
+        click(window, "tab-context-close");
+        assess(window, &view, &mut receiver);
+        let (_, detail) = window.pending_prompt().expect("a confirmation");
+        assert!(detail.contains("1 scratchpad holds text"), "{detail}");
+        no_close(&mut receiver);
+        window.simulate_prompt_answer("Close");
+        window.run_until_parked();
+        let (plan, confirmed) = next_close(&mut receiver);
+        assert_eq!(closed_pane(&plan), "p1");
+        assert!(confirmed);
+    });
+}
+
+/// client-connections, Native Close Consent Scope: a queued tab whose
+/// session changed after the unconfirmed decision is not closed.
+#[test]
+fn a_tab_whose_session_changed_after_an_unconfirmed_decision_stays_open() {
     let owner = Uuid::new_v4();
     with_model(
         local_model(owner, &[("p0", false), ("p1", false), ("p2", false)], None),
         |window, view, mut receiver| {
             open(window, &view, "p1", point(px(120.), px(80.)));
             click(window, "tab-context-close-others");
+            assess(window, &view, &mut receiver);
             let (first, _) = next_close(&mut receiver);
             window.update(|_, cx| {
                 view.update(cx, |workspace, _| {
@@ -515,6 +555,10 @@ fn a_tab_that_turns_busy_after_an_unconfirmed_decision_stays_open() {
                     let token = model.lifecycle_token();
                     let mut busy = snapshot(&[("p0", true), ("p1", false)], None);
                     busy["screen"]["revision"] = 3.into();
+                    busy["screen"]["panes"]["p0"]["sessionId"] = "s-p0-replaced".into();
+                    busy["screen"]["sessions"]["s-p0-replaced"] =
+                        busy["screen"]["sessions"]["s-p0"].clone();
+                    busy["screen"]["sessions"]["s-p0-replaced"]["id"] = "s-p0-replaced".into();
                     model
                         .source_mut(token.source_id())
                         .unwrap()
@@ -787,6 +831,7 @@ fn remote_tab_copies_its_ssh_path_and_can_move_to_a_screen() {
             });
             draw(window);
             click(window, "tab-context-close");
+            assess(window, &view, &mut receiver);
             let (plan, _) = next_close(&mut receiver);
             assert_eq!(plan.source_token(), Some(source));
             assert_eq!(closed_pane(&plan), "p0");

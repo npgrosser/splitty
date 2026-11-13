@@ -54,10 +54,11 @@ use splitty_client_core::native_workspace::{
 use splitty_client_core::notifications::NotificationCenter;
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
-    Axis, CloseIdentity, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode,
-    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ProgramStatusSeen,
-    RemoteScreenCreateRequest, ScreenKey, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget,
-    SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
+    close_scope, tabs_close_scope, Axis, CloseAssessment, CloseIdentity, CloseImpact, ClosePlan,
+    CloseScope, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode, MovePlacement,
+    PaneActionTarget, PaneDrag, PaneKey, ProgramStatusSeen, RemoteScreenCreateRequest, ScreenKey,
+    ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken,
+    SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
 };
 use splitty_client_core::zoom::{PresentedZoom, Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -801,6 +802,113 @@ struct PaneView {
     marker: bool,
     tail: String,
 }
+#[cfg(all(test, feature = "ui-test-support"))]
+impl Workspace {
+    /// Answers `command`, a close assessment, as a service would from this
+    /// window's snapshots: busy sessions run, scratchpads hold text, viewer
+    /// panes hold annotations. View tests use it in place of a service.
+    pub(crate) fn answer_close_assessment_for_test(
+        &mut self,
+        command: &WorkerCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Command::AssessClose { request_id, scope } = command.kind() else {
+            return false;
+        };
+        let Some(source) = command.source_token() else {
+            return false;
+        };
+        let Some(model) = self.model_for_source(source.source_id()) else {
+            return false;
+        };
+        let mut entries = Vec::new();
+        for info in model.screens() {
+            let screen = info.id.as_str();
+            let Some(snapshot) = model.screen(screen).and_then(ScreenModel::snapshot) else {
+                continue;
+            };
+            let mut panes: Vec<_> = snapshot.panes.values().collect();
+            panes.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+            for pane in panes {
+                let wanted = match scope {
+                    CloseScope::Panes {
+                        screen_id,
+                        pane_ids,
+                    } => {
+                        screen_id.as_str() == screen
+                            && pane_ids.iter().any(|id| id.as_str() == pane.id.as_str())
+                    }
+                    CloseScope::Screens { screen_ids } => {
+                        screen_ids.iter().any(|id| id.as_str() == screen)
+                    }
+                    CloseScope::Workspace => true,
+                };
+                let session = pane
+                    .session_id
+                    .as_ref()
+                    .and_then(|id| snapshot.sessions.get(id));
+                use splitty_client_core::workspace::SessionStatus;
+                let running =
+                    session.is_some_and(|s| s.busy && matches!(s.status, SessionStatus::Running));
+                let starting = session.is_some_and(|s| matches!(s.status, SessionStatus::Starting));
+                let scratchpad = session.is_some_and(|session| !session.scratchpad.is_empty());
+                let annotations = pane
+                    .viewer
+                    .as_ref()
+                    .map_or(0, |viewer| viewer.annotations.len());
+                if wanted && (running || starting || scratchpad || annotations != 0) {
+                    entries.push(serde_json::json!({
+                        "screenId": screen, "paneId": pane.id.as_str(),
+                        "sessionId": pane.session_id.as_ref().map(|id| id.as_str()),
+                        "running": running, "starting": starting,
+                        "scratchpad": scratchpad, "annotations": annotations,
+                    }));
+                }
+            }
+        }
+        let count = |key: &str| entries.iter().filter(|e| e[key] == true).count();
+        let assessment: CloseAssessment = serde_json::from_value(serde_json::json!({
+            "confirm": !entries.is_empty(),
+            "running": count("running"),
+            "starting": count("starting"),
+            "scratchpads": count("scratchpad"),
+            "annotations": entries.iter().map(|e| e["annotations"].as_u64().unwrap_or(0)).sum::<u64>(),
+            "entries": entries,
+        }))
+        .expect("assessment");
+        self.close_assessed(
+            source,
+            *request_id,
+            CloseImpact::Assessed(assessment),
+            window,
+            cx,
+        );
+        true
+    }
+}
+
+/// Answers the next close assessment the window asked for, dropping the
+/// commands before it.
+#[cfg(all(test, feature = "ui-test-support"))]
+pub(crate) fn answer_close_assessment(
+    window: &mut gpui_kit::VisualTestContext,
+    view: &Entity<Workspace>,
+    receiver: &mut mpsc::Receiver<WorkerCommand>,
+) {
+    loop {
+        let command = receiver.try_recv().expect("close assessment asked");
+        if window.update(|window, cx| {
+            view.update(cx, |workspace, cx| {
+                workspace.answer_close_assessment_for_test(&command, window, cx)
+            })
+        }) {
+            break;
+        }
+    }
+    window.update(|window, cx| window.draw(cx).clear(cx));
+}
+
 #[cfg(test)]
 fn dispatch_owned_update<T>(
     model: Option<&SourceWorkspace>,
@@ -967,6 +1075,81 @@ struct ClosePrompt<'a> {
     title: &'a str,
     detail: &'a str,
     answers: &'a [&'a str],
+}
+/// How long a close waits for the service's assessment before it asks a
+/// generic question.
+const CLOSE_ASSESSMENT_WAIT: Duration = Duration::from_secs(5);
+/// The question when the service does not say what a close ends.
+const UNKNOWN_CLOSE_IMPACT: &str =
+    "This service does not say what closing ends: running programs, scratchpad text and comments may be lost.";
+
+/// A close waiting for its service's assessment (`mux-protocol`, Close Assessment).
+struct AssessingClose {
+    source: SourceToken,
+    request_id: u64,
+    plans: VecDeque<ClosePlan>,
+    follow_up: CloseFollowUp,
+}
+/// How the close goes on once the assessment is there.
+enum CloseFollowUp {
+    Single {
+        source: Option<SourceId>,
+        remote_terminate: bool,
+    },
+    /// Several tabs of one Screen, with their titles for the prompt.
+    Tabs { titles: HashMap<String, String> },
+}
+
+fn comments_end(count: usize) -> String {
+    match count {
+        1 => "1 comment ends".to_owned(),
+        count => format!("{count} comments end"),
+    }
+}
+
+/// What the server says a close ends, as the prompt's detail.
+fn impact_detail(assessment: &CloseAssessment) -> String {
+    let running = format!("Running sessions: {}", assessment.running);
+    let extras = impact_extras(assessment, true);
+    if assessment.running == 0 && !extras.is_empty() {
+        extras.trim_start_matches(". ").trim_start().to_owned()
+    } else {
+        format!("{running}{extras}")
+    }
+}
+
+/// The losses besides running programs, each as a sentence, led by a space
+/// (or by ". " after a running count when `after_count`).
+fn impact_extras(assessment: &CloseAssessment, after_count: bool) -> String {
+    let mut parts = Vec::new();
+    match assessment.starting {
+        0 => {}
+        1 => parts.push("1 terminal is still starting.".to_owned()),
+        count => parts.push(format!("{count} terminals are still starting.")),
+    }
+    match assessment.scratchpads {
+        0 => {}
+        1 => parts.push("1 scratchpad holds text, which ends with it.".to_owned()),
+        count => parts.push(format!(
+            "{count} scratchpads hold text, which end with them."
+        )),
+    }
+    if assessment.annotations != 0 {
+        parts.push(format!(
+            "{} with {}.",
+            comments_end(assessment.annotations as usize),
+            if assessment.annotations == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    let lead = if after_count { ". " } else { " " };
+    format!("{lead}{}", parts.join(" "))
 }
 /// How many tabs of a stopped multi-tab close remain open.
 fn tabs_stayed_open(count: usize) -> String {
@@ -1136,6 +1319,8 @@ pub struct Workspace {
     rename: Option<RenameEditor>,
     rename_subscription: Option<Subscription>,
     pending_close: Option<PendingClose>,
+    /// A close waiting for its service's assessment, before it asks or closes.
+    assessing_close: Option<AssessingClose>,
     next_close_id: u64,
     _poll: Task<()>,
     started: Instant,
@@ -1523,6 +1708,7 @@ impl Workspace {
                 rename: None,
                 rename_subscription: None,
                 pending_close: None,
+                assessing_close: None,
                 next_close_id: 0,
                 _poll: poll,
                 started: Instant::now(),
@@ -2194,21 +2380,142 @@ impl Workspace {
                     .as_ref()
                     .is_some_and(|model| source != model.local_source().source_id())
             });
-        // Annotations end with their viewer pane: that is asked first too.
-        let notes = match &target {
-            CloseTarget::Pane { screen, pane } => self.annotations_lost(source, screen, Some(pane)),
-            CloseTarget::Screen { screen } => self.annotations_lost(source, screen, None),
-            CloseTarget::Window => 0,
+        let scope = close_scope(&plan.target);
+        self.assess_then_decide(
+            VecDeque::from([plan]),
+            scope,
+            CloseFollowUp::Single {
+                source,
+                remote_terminate,
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Asks the service of `plans` what closing `scope` ends, then decides
+    /// (`mux-protocol`, Close Assessment). A plan without a source, the
+    /// window before discovery, and a command that cannot be sent decide at
+    /// once with a generic question; an answer that does not come in time
+    /// does too. A newer close request replaces one still waiting.
+    fn assess_then_decide(
+        &mut self,
+        plans: VecDeque<ClosePlan>,
+        scope: CloseScope,
+        follow_up: CloseFollowUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(last) = plans.back() else {
+            return;
         };
-        if !plan.needs_confirmation() && notes == 0 {
+        let request_id = last.request_id;
+        let Some(source) = last.source_token() else {
+            self.decide_close(plans, follow_up, &CloseImpact::Unknown, window, cx);
+            return;
+        };
+        if self
+            .commands
+            .try_send(WorkerCommand::new(
+                source,
+                Command::AssessClose { request_id, scope },
+            ))
+            .is_err()
+        {
+            self.decide_close(plans, follow_up, &CloseImpact::Unknown, window, cx);
+            return;
+        }
+        self.assessing_close = Some(AssessingClose {
+            source,
+            request_id,
+            plans,
+            follow_up,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(CLOSE_ASSESSMENT_WAIT).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.close_assessed(source, request_id, CloseImpact::Unknown, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The service's answer for the close waiting for it; any other answer
+    /// is stale and ignored.
+    fn close_assessed(
+        &mut self,
+        source: SourceToken,
+        request_id: u64,
+        impact: CloseImpact,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.template_replacement_assessed(source, request_id, &impact) {
+            cx.notify();
+            return;
+        }
+        if !self
+            .assessing_close
+            .as_ref()
+            .is_some_and(|waiting| waiting.source == source && waiting.request_id == request_id)
+        {
+            return;
+        }
+        let waiting = self.assessing_close.take().expect("matched assessment");
+        if self.pending_close.is_some() {
+            return;
+        }
+        self.decide_close(waiting.plans, waiting.follow_up, &impact, window, cx);
+        cx.notify();
+    }
+
+    fn decide_close(
+        &mut self,
+        plans: VecDeque<ClosePlan>,
+        follow_up: CloseFollowUp,
+        impact: &CloseImpact,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let plans: VecDeque<_> = plans
+            .into_iter()
+            .map(|plan| plan.with_impact(impact))
+            .collect();
+        match follow_up {
+            CloseFollowUp::Single {
+                source,
+                remote_terminate,
+            } => {
+                if let Some(plan) = plans.into_iter().next() {
+                    self.decide_single_close(plan, source, remote_terminate, window, cx);
+                }
+            }
+            CloseFollowUp::Tabs { titles } => self.decide_tabs_close(plans, &titles, window, cx),
+        }
+    }
+
+    fn decide_single_close(
+        &mut self,
+        plan: ClosePlan,
+        source: Option<SourceId>,
+        remote_terminate: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !plan.needs_confirmation() {
             self.submit_close(plan, false, cx);
             return;
         }
-        let comments = match notes {
-            1 => "1 comment ends".to_owned(),
-            count => format!("{count} comments end"),
-        };
-        if !plan.needs_confirmation() {
+        let target = plan.target.clone();
+        let assessment = plan.impact.assessment();
+        // Annotations end with their viewer pane: that is asked with its own words.
+        if let Some(notes) = assessment
+            .filter(|_| plan.unresolved_count == 0)
+            .filter(|a| a.running == 0 && a.starting == 0 && a.scratchpads == 0)
+            .map(|a| a.annotations as usize)
+            .filter(|notes| *notes != 0)
+        {
+            let comments = comments_end(notes);
             let (title, detail) = match &target {
                 CloseTarget::Pane { .. } => {
                     ("Close this document?", format!("{comments} with it."))
@@ -2251,6 +2558,7 @@ impl Workspace {
             CloseTarget::Screen { .. } => "Close Screen?".to_owned(),
             CloseTarget::Window => "End this local workspace?".to_owned(),
         };
+        let lost = assessment.map(impact_detail).unwrap_or_default();
         let detail = if remote_terminate {
             let host = source
                 .and_then(|source| self.model.as_ref()?.source_target(source))
@@ -2259,10 +2567,8 @@ impl Workspace {
                 .affected
                 .iter()
                 .filter_map(|affected| match &affected.identity {
-                    splitty_client_core::workspace::CloseIdentity::Session { session, .. } => {
-                        Some(session.as_str())
-                    }
-                    splitty_client_core::workspace::CloseIdentity::Pane {
+                    CloseIdentity::Session { session, .. } => Some(session.as_str()),
+                    CloseIdentity::Pane {
                         session: Some(session),
                         ..
                     } => Some(session.as_str()),
@@ -2274,20 +2580,28 @@ impl Workspace {
                 1 => "Ends 1 terminal".to_owned(),
                 count => format!("Ends {count} terminals"),
             };
-            let busy = match plan.busy_count {
+            let busy = match plan.running_count() {
                 0 => String::new(),
                 1 => " 1 is still running a command.".to_owned(),
                 count => format!(" {count} are still running a command."),
             };
-            format!("{ends} on {}.{busy}", hosts::display(host))
+            let extra = assessment
+                .map(|a| impact_extras(a, false))
+                .unwrap_or_default();
+            format!("{ends} on {}.{busy}{extra}", hosts::display(host))
         } else if target == CloseTarget::Window {
-            "Ends all local terminal sessions.".to_owned()
+            format!(
+                "Ends all local terminal sessions.{}",
+                assessment
+                    .map(|a| impact_extras(a, false))
+                    .unwrap_or_default()
+            )
         } else if plan.unresolved_count != 0 {
             "Session state is still loading.".to_owned()
-        } else if notes != 0 {
-            format!("Running sessions: {}. {comments} with it.", plan.busy_count)
+        } else if assessment.is_none() {
+            UNKNOWN_CLOSE_IMPACT.to_owned()
         } else {
-            format!("Running sessions: {}", plan.busy_count)
+            lost
         };
         self.prompt_close(
             plan,
@@ -2417,25 +2731,52 @@ impl Workspace {
             }
         }
         self.next_close_id = request_id;
+        let scope = tabs_close_scope(
+            screen,
+            plans.iter().filter_map(|plan| match &plan.target {
+                CloseTarget::Pane { pane, .. } => Some(pane.as_str()),
+                _ => None,
+            }),
+        );
+        self.assess_then_decide(
+            plans,
+            scope,
+            CloseFollowUp::Tabs {
+                titles: titles.clone(),
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// One decision for several tabs: one confirmation when any of them
+    /// asks, and none of them closes on "Keep open".
+    fn decide_tabs_close(
+        &mut self,
+        mut plans: VecDeque<ClosePlan>,
+        titles: &HashMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let count = plans.len();
-        let mut busy_sessions = BTreeSet::new();
+        let mut running = 0;
         let mut busy_tabs = Vec::new();
         let mut unresolved = 0;
+        let mut unknown = false;
+        let mut total = splitty_client_core::workspace::CloseAssessment::default();
         for plan in &plans {
             unresolved += plan.unresolved_count;
-            let mut busy = false;
-            for affected in plan.affected.iter().filter(|affected| affected.busy) {
-                busy = true;
-                if let CloseIdentity::Pane {
-                    session: Some(session),
-                    ..
-                }
-                | CloseIdentity::Session { session, .. } = &affected.identity
-                {
-                    busy_sessions.insert(session.clone());
-                }
-            }
-            if let (true, CloseTarget::Pane { pane, .. }) = (busy, &plan.target) {
+            let Some(assessment) = plan.impact.assessment() else {
+                unknown = true;
+                continue;
+            };
+            running += assessment.running as usize;
+            total.running += assessment.running;
+            total.starting += assessment.starting;
+            total.scratchpads += assessment.scratchpads;
+            total.annotations = total.annotations.saturating_add(assessment.annotations);
+            if let (true, CloseTarget::Pane { pane, .. }) = (assessment.running != 0, &plan.target)
+            {
                 busy_tabs.push(
                     titles
                         .get(pane)
@@ -2445,17 +2786,10 @@ impl Workspace {
             }
         }
         let needs_confirmation = plans.iter().any(ClosePlan::needs_confirmation);
-        let notes: usize = plans
-            .iter()
-            .map(|plan| match &plan.target {
-                CloseTarget::Pane { screen, pane } => {
-                    self.annotations_lost(Some(source.source_id()), screen, Some(pane))
-                }
-                _ => 0,
-            })
-            .sum();
-        let first = plans.pop_front().expect("at least one pane");
-        if !needs_confirmation && notes == 0 {
+        let Some(first) = plans.pop_front() else {
+            return;
+        };
+        if !needs_confirmation {
             self.submit_close_queued(first, false, plans, cx);
             return;
         }
@@ -2464,15 +2798,22 @@ impl Workspace {
         } else {
             format!("Close {count} tabs?")
         };
-        let comments = match notes {
-            1 => "1 comment ends".to_owned(),
-            count => format!("{count} comments end"),
-        };
-        let detail = if !needs_confirmation {
-            format!("{comments} with these documents.")
+        let only_notes = !unknown
+            && unresolved == 0
+            && total.running == 0
+            && total.starting == 0
+            && total.scratchpads == 0
+            && total.annotations != 0;
+        let detail = if only_notes {
+            format!(
+                "{} with these documents.",
+                comments_end(total.annotations as usize)
+            )
         } else if unresolved != 0 {
             "Session state is still loading.".to_owned()
-        } else {
+        } else if unknown {
+            UNKNOWN_CLOSE_IMPACT.to_owned()
+        } else if running != 0 {
             let mut names = busy_tabs
                 .iter()
                 .take(3)
@@ -2482,7 +2823,12 @@ impl Workspace {
             if busy_tabs.len() > 3 {
                 names.push_str(&format!(" and {} more", busy_tabs.len() - 3));
             }
-            format!("Running sessions: {} ({names})", busy_sessions.len())
+            format!(
+                "Running sessions: {running} ({names}){}",
+                impact_extras(&total, true)
+            )
+        } else {
+            impact_detail(&total)
         };
         self.prompt_close(
             first,
@@ -4012,6 +4358,11 @@ impl Workspace {
                     }
                     cx.notify();
                 }
+                Update::CloseAssessed {
+                    source,
+                    request_id,
+                    impact,
+                } => self.close_assessed(source, request_id, impact, window, cx),
                 Update::CloseSubmitted { request_id, source } => {
                     if !self.pending_close.as_ref().is_some_and(|pending| {
                         pending.matches_response(
@@ -4308,15 +4659,7 @@ impl Workspace {
                 // Attachment can finish while a shell still reads terminal
                 // queries during startup. Wait for its observed idle state
                 // before injecting commands into all four real terminals.
-                if !model
-                    .assess_close(
-                        0,
-                        CloseTarget::Screen {
-                            screen: screen.to_owned(),
-                        },
-                    )
-                    .is_ok_and(|close| !close.needs_confirmation())
-                {
+                if !model.terminals_observed_idle(screen) {
                     return;
                 }
                 self.smoke_tab = model.focused_pane().map(str::to_owned);
@@ -4383,10 +4726,9 @@ impl Workspace {
                     screen: screen_id.to_owned(),
                     pane: tab.clone(),
                 };
-                let Ok(close) = model.assess_close(0, target) else {
-                    return;
-                };
-                if close.needs_confirmation() {
+                if model.assess_close(0, target).is_err()
+                    || !model.terminals_observed_idle(screen_id)
+                {
                     // The marker can arrive before the shell's later idle
                     // snapshot. This smoke exercises the no-prompt shortcut.
                     return;

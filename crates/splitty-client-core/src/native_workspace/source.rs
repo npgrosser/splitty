@@ -5,6 +5,7 @@ use crate::{
     workspace::{RemoteScreenCreateRequest, SourceId, SourceKind, WorkspaceDelta},
     Client,
 };
+use splitty_core::mux;
 use std::{io, time::Instant};
 
 #[derive(Default)]
@@ -57,6 +58,9 @@ pub(super) struct SourceRuntime {
     /// Template extractions under way: the request's wire ID with the
     /// connection that keeps templates and the window's request.
     extractions: HashMap<String, (uuid::Uuid, uuid::Uuid)>,
+    /// Close assessments under way: the request's wire ID with the window's
+    /// close request (`mux-protocol`, Close Assessment).
+    assessments: HashMap<String, u64>,
 }
 impl SourceRuntime {
     pub fn new(client: Client, owner: SourceToken) -> Self {
@@ -86,6 +90,7 @@ impl SourceRuntime {
             viewers: viewers::Viewers::default(),
             editors: editors::EditorRequests::default(),
             extractions: HashMap::new(),
+            assessments: HashMap::new(),
         }
     }
     /// Greet welcomes with the presence of this window; until set, the
@@ -624,6 +629,32 @@ impl SourceRuntime {
             }
             return Ok(out);
         }
+        if let CommandKind::AssessClose { request_id, scope } = command {
+            // The server's answer arrives as `mux.close_assessed`; without
+            // the capability the window asks generically.
+            let wire = format!("close-{request_id}");
+            let result = if !model
+                .as_ref()
+                .is_some_and(|model| model.close_assessments_supported())
+            {
+                Err(std::io::Error::other("This service does not assess closes"))
+            } else if self.assessments.len() >= 16 {
+                Err(std::io::Error::other("Too many close assessments"))
+            } else {
+                self.client.assess_close(&wire, &scope)
+            };
+            match result {
+                Ok(()) => {
+                    self.assessments.insert(wire, request_id);
+                }
+                Err(_) => out.push(Update::CloseAssessed {
+                    source: self.owner,
+                    request_id,
+                    impact: CloseImpact::Unknown,
+                }),
+            }
+            return Ok(out);
+        }
         if let CommandKind::ExtractTemplate {
             owner,
             request_id,
@@ -699,6 +730,7 @@ impl SourceRuntime {
             | CommandKind::TemplateApi { .. }
             | CommandKind::ApplyTemplate { .. }
             | CommandKind::ExtractTemplate { .. }
+            | CommandKind::AssessClose { .. }
             | CommandKind::FloatPane { .. }
             | CommandKind::DockFloat { .. }
             | CommandKind::MoveFloat { .. }
@@ -982,6 +1014,7 @@ impl SourceRuntime {
         self.viewers
             .event(&self.client, source, &event, &mut out.updates);
         self.template_extracted(&event, &mut out.updates);
+        self.close_assessed(&event, &mut out.updates);
         if let Some(json) = event.json() {
             match json["type"].as_str() {
                 Some("mux.welcome") if !self.welcomed => {
@@ -1001,6 +1034,12 @@ impl SourceRuntime {
                         json["capabilities"]
                             .as_array()
                             .is_some_and(|caps| caps.iter().any(|cap| cap == "viewer-v1")),
+                    );
+                    workspace.set_close_assessments_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter()
+                                .any(|cap| cap == mux::CLOSE_ASSESSMENT_CAPABILITY)
+                        }),
                     );
                     workspace.set_tab_selection_supported(supports_tab_selection);
                     workspace.set_program_status_supported(
@@ -3244,6 +3283,39 @@ mod tests {
     }
 }
 impl SourceRuntime {
+    /// The service's answer to a close assessment. A malformed answer or an
+    /// error asks generically; it never reads as nothing lost.
+    fn close_assessed(&mut self, event: &Event, out: &mut Vec<Update>) {
+        let Some(value) = event
+            .json()
+            .filter(|value| value["type"] == "mux.close_assessed")
+        else {
+            return;
+        };
+        let Some(request_id) = value["requestId"]
+            .as_str()
+            .and_then(|id| self.assessments.remove(id))
+        else {
+            return;
+        };
+        let impact = if value.get("error").is_some() {
+            CloseImpact::Unknown
+        } else {
+            serde_json::from_value::<mux::CloseAssessment>(value["assessment"].clone())
+                .ok()
+                .filter(|assessment| assessment.entries.len() <= mux::CLOSE_SCOPE_LIMIT * 4)
+                .map_or(CloseImpact::Unknown, |mut assessment| {
+                    assessment.confirm |= !assessment.entries.is_empty();
+                    CloseImpact::Assessed(assessment)
+                })
+        };
+        out.push(Update::CloseAssessed {
+            source: self.owner,
+            request_id,
+            impact,
+        });
+    }
+
     /// The service's answer to a template extraction, as the draft the
     /// window reviews before the local service stores it.
     fn template_extracted(&mut self, event: &Event, out: &mut Vec<Update>) {

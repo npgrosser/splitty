@@ -23,12 +23,12 @@ use crate::{
     shell_profiles::ShellProfilesSnapshot,
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
-        Axis, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome, FloatingActionResult,
-        FloatingTarget, HostActionTarget, HostUpdatePlan, MovePlacement, PaneActionTarget,
-        PaneDrag, PlacementOutcome, ScreenKey, ScreenTransferOutcome, ScreenTransferResult,
-        ScreenTransferTarget, SourceToken, SourceWorkspace, TabStep, TemplateApplyChoice,
-        TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult, TerminalToken,
-        WindowWorkspace, WorkspaceRefresh,
+        Axis, CloseImpact, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome,
+        FloatingActionResult, FloatingTarget, HostActionTarget, HostUpdatePlan, MovePlacement,
+        PaneActionTarget, PaneDrag, PlacementOutcome, ScreenKey, ScreenTransferOutcome,
+        ScreenTransferResult, ScreenTransferTarget, SourceToken, SourceWorkspace, TabStep,
+        TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult,
+        TerminalToken, WindowWorkspace, WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -228,6 +228,12 @@ pub enum CommandKind {
         plan: Arc<TemplateApplyPlan>,
         choice: TemplateApplyChoice,
         replace_confirmed: bool,
+    },
+    /// Ask this source's service what closing `scope` ends; the answer is
+    /// [`Update::CloseAssessed`] with the same request ID.
+    AssessClose {
+        request_id: u64,
+        scope: splitty_core::mux::CloseScope,
     },
     /// Read a Screen of this source as a template draft. The draft belongs
     /// to `owner`, the local connection that keeps templates.
@@ -493,6 +499,12 @@ pub enum Update {
         request_id: u64,
         reason: String,
     },
+    /// The service's answer to [`CommandKind::AssessClose`].
+    CloseAssessed {
+        source: SourceToken,
+        request_id: u64,
+        impact: CloseImpact,
+    },
     CloseSettled {
         source: Option<SourceToken>,
         request_id: u64,
@@ -580,6 +592,11 @@ fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: 
         CommandKind::ExtractTemplate {
             owner, request_id, ..
         } => Update::TemplateApi(TemplateApiResult::rejected(*owner, *request_id, reason)),
+        CommandKind::AssessClose { request_id, .. } if source.is_some() => Update::CloseAssessed {
+            source: source.expect("captured owner"),
+            request_id: *request_id,
+            impact: CloseImpact::Unknown,
+        },
         CommandKind::ApplyTemplate { plan, .. } => Update::TemplateApply(TemplateApplyResult {
             connection_id: plan.connection_id(),
             request_id: plan.request_id(),

@@ -388,6 +388,38 @@ impl Client {
         })
     }
 
+    /// Ask the service what closing `scope` ends (`mux.close_assessed`
+    /// answers with the same request ID; `mux-protocol`, Close Assessment).
+    pub fn assess_close(
+        &self,
+        request_id: &str,
+        scope: &splitty_core::mux::CloseScope,
+    ) -> io::Result<()> {
+        let ids: Vec<&str> = match scope {
+            splitty_core::mux::CloseScope::Panes {
+                screen_id,
+                pane_ids,
+            } => std::iter::once(screen_id.as_str())
+                .chain(pane_ids.iter().map(|id| id.as_str()))
+                .collect(),
+            splitty_core::mux::CloseScope::Screens { screen_ids } => {
+                screen_ids.iter().map(|id| id.as_str()).collect()
+            }
+            splitty_core::mux::CloseScope::Workspace => Vec::new(),
+        };
+        if ids.len() > splitty_core::mux::CLOSE_SCOPE_LIMIT + 1 {
+            return Err(invalid("Close scope exceeds limit"));
+        }
+        for id in &ids {
+            identifier(id)?;
+        }
+        let size = ids.iter().map(|id| id.len() + 3).sum();
+        self.command(
+            size,
+            || json!({"type":"mux.assess_close", "requestId":request_id, "scope":scope}),
+        )
+    }
+
     pub fn rename_screen(&self, screen_id: &str, name: &str) -> io::Result<()> {
         identifier(screen_id)?;
         validate_rename_name(name)?;

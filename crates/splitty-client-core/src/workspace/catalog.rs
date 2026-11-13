@@ -85,6 +85,7 @@ pub struct SourceWorkspace {
     pending_template: Option<templates::PendingTemplate>,
     templates_supported: bool,
     viewers_supported: bool,
+    close_assessments_supported: bool,
     template_failures: HashMap<String, (String, String)>,
     reconciling: bool,
     route_generation: u64,
@@ -95,8 +96,10 @@ pub struct SourceWorkspace {
 }
 
 impl SourceWorkspace {
-    /// Assess this source's terminal impact, retaining pane and session identity
-    /// across a later prompt. The existing admission bounds limit this plan.
+    /// The identities a close of `target` covers and the parts of this
+    /// client's own view that are still unresolved. What the close ends on
+    /// the server comes separately, from the server's assessment
+    /// ([`ClosePlan::with_impact`]); the plan starts without it.
     pub fn assess_close(&self, request_id: u64, target: CloseTarget) -> io::Result<ClosePlan> {
         if self.kind() == SourceKind::Remote && target == CloseTarget::Window {
             return Err(invalid("remote Screens detach on window close"));
@@ -114,8 +117,8 @@ impl SourceWorkspace {
             connection_id: Some(self.connection_id),
             target: target.clone(),
             affected: Vec::new(),
-            busy_count: 0,
             unresolved_count: 0,
+            impact: CloseImpact::Pending,
         };
         match target {
             CloseTarget::Pane { screen, pane } => {
@@ -142,7 +145,6 @@ impl SourceWorkspace {
                 if !self.catalog_initialized {
                     plan.affected.push(CloseAffected {
                         identity: CloseIdentity::Catalog,
-                        busy: false,
                         unresolved: true,
                     });
                 }
@@ -162,59 +164,40 @@ impl SourceWorkspace {
         if let Some(pending) = &self.pending_template {
             plan.affected.push(CloseAffected {
                 identity: CloseIdentity::Template(pending.preview.request_id().to_string()),
-                busy: false,
                 unresolved: true,
             });
         }
         if self.reconciling {
             plan.affected.push(CloseAffected {
                 identity: CloseIdentity::Reconciliation,
-                busy: false,
                 unresolved: true,
             });
         }
         plan.affected.sort_by(|a, b| a.identity.cmp(&b.identity));
-        let mut busy_sessions = HashSet::new();
-        for part in &plan.affected {
-            if !part.busy {
-                continue;
-            }
-            match &part.identity {
-                CloseIdentity::Pane {
-                    session: Some(session),
-                    ..
-                }
-                | CloseIdentity::Session { session, .. } => {
-                    busy_sessions.insert(session);
-                }
-                _ => {}
-            }
-        }
-        plan.busy_count = busy_sessions.len();
         plan.unresolved_count = plan.affected.iter().filter(|part| part.unresolved).count();
         Ok(plan)
     }
 
     /// A fresh observation must cover the same identities and must not gain
-    /// impact that the user's earlier decision did not include.
+    /// unresolved parts that the user's earlier decision did not include.
+    /// The server's impact the decision was shown with stays as it was.
     pub fn validate_close(&self, plan: &ClosePlan, confirmed: bool) -> io::Result<()> {
         if plan.source_token() != Some(self.source_token()) {
             return Err(invalid("close belongs to a previous connection"));
         }
-        let current = self.assess_close(plan.request_id, plan.target.clone())?;
+        let mut current = self.assess_close(plan.request_id, plan.target.clone())?;
         if plan.affected.len() != current.affected.len()
             || plan
                 .affected
                 .iter()
                 .zip(&current.affected)
                 .any(|(before, now)| {
-                    before.identity != now.identity
-                        || (now.busy && !before.busy && !before.unresolved)
-                        || (now.unresolved && !before.unresolved)
+                    before.identity != now.identity || (now.unresolved && !before.unresolved)
                 })
         {
             return Err(invalid("close impact changed; request close again"));
         }
+        current.impact = plan.impact.clone();
         if current.needs_confirmation() && !confirmed {
             return Err(invalid("close now requires confirmation"));
         }
@@ -226,7 +209,6 @@ impl SourceWorkspace {
         let snapshot = model.and_then(ScreenModel::snapshot);
         plan.affected.push(CloseAffected {
             identity: CloseIdentity::Screen(id.to_owned()),
-            busy: false,
             unresolved: self.pending_screens.contains_key(id) || snapshot.is_none(),
         });
         let Some(model) = model else {
@@ -260,21 +242,23 @@ impl SourceWorkspace {
             }
         }
         if let Some(snapshot) = snapshot {
-            for (session_id, session) in &snapshot.sessions {
+            for session_id in snapshot.sessions.keys() {
                 if !linked_sessions.contains(session_id.as_str()) {
                     plan.affected.push(CloseAffected {
                         identity: CloseIdentity::Session {
                             screen: id.to_owned(),
                             session: session_id.to_string(),
                         },
-                        busy: session.busy && session.status == mux::SessionStatus::Running,
-                        unresolved: session.status == mux::SessionStatus::Starting,
+                        unresolved: false,
                     });
                 }
             }
         }
     }
 
+    /// A pane this client created but has not seen in a snapshot yet, or
+    /// whose snapshot lacks it, is unresolved; whether its program runs is
+    /// the server's to say.
     fn add_pane_impact(
         model: &ScreenModel,
         screen: &str,
@@ -290,30 +274,38 @@ impl SourceWorkspace {
         let session = state
             .and_then(|pane| pane.session_id.as_ref().map(ToString::to_string))
             .or_else(|| model.pane_sessions.get(pane).cloned());
-        let terminal = pending
-            || state.is_none_or(|pane| {
-                pane.role
-                    .as_ref()
-                    .is_none_or(|role| *role == mux::PaneRole::Terminal)
-            });
-        let metadata = session.as_ref().and_then(|session| {
-            snapshot.and_then(|snapshot| snapshot.sessions.get(&SessionId::from(session.as_str())))
-        });
         plan.affected.push(CloseAffected {
             identity: CloseIdentity::Pane {
                 screen: screen.to_owned(),
                 pane: pane.to_owned(),
                 session,
             },
-            busy: terminal
-                && metadata
-                    .is_some_and(|entry| entry.busy && entry.status == mux::SessionStatus::Running),
-            unresolved: terminal
-                && (pending
-                    || state.is_none()
-                    || metadata.is_none_or(|entry| entry.status == mux::SessionStatus::Starting)),
+            unresolved: pending || state.is_none(),
         });
         true
+    }
+
+    /// Whether every terminal of `screen` has started and is idle as this
+    /// client last saw it. Only a test's synchronization uses this; whether a
+    /// close asks is the server's answer.
+    pub fn terminals_observed_idle(&self, screen: &str) -> bool {
+        self.models
+            .get(screen)
+            .and_then(ScreenModel::snapshot)
+            .is_some_and(|snapshot| {
+                snapshot
+                    .sessions
+                    .values()
+                    .all(|session| session.status == mux::SessionStatus::Running && !session.busy)
+            })
+    }
+
+    /// Whether this connection's service assesses closes (`close-assessment-v1`).
+    pub fn close_assessments_supported(&self) -> bool {
+        self.close_assessments_supported
+    }
+    pub(crate) fn set_close_assessments_supported(&mut self, value: bool) {
+        self.close_assessments_supported = value;
     }
 
     pub fn new(connection_id: Uuid) -> Self {
@@ -342,6 +334,7 @@ impl SourceWorkspace {
             pending_template: None,
             templates_supported: false,
             viewers_supported: false,
+            close_assessments_supported: false,
             template_failures: HashMap::new(),
             reconciling: false,
             route_generation: 0,

@@ -1,6 +1,7 @@
 use crate::terminal::Terminal;
 use crate::workspace::{
-    chrome::view_tests::with_view, Command, Destination, WorkerCommand, Workspace,
+    answer_close_assessment, chrome::view_tests::with_view, Command, Destination, WorkerCommand,
+    Workspace,
 };
 use gpui_kit::{
     ClipboardItem, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext,
@@ -188,6 +189,7 @@ fn body_menu_uses_clicked_split_for_paste_find_split_and_assessed_close() {
         });
         right_click(window, &clicked, Modifiers::default());
         activate_item(window, &view, "Close Pane");
+        answer_close_assessment(window, &view, &mut receiver);
         window.update(|_, cx| {
             let close = view
                 .read(cx)

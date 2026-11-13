@@ -158,6 +158,7 @@ fn forwarded_commands_act_on_a_pane_of_the_shown_screen_of_their_service() {
             connection,
             json!({"type":"pane.close","paneId":"p1"}),
         );
-        window.update(|_, cx| assert!(view.read(cx).pending_close.is_some()));
+        // The close first waits for its service's assessment.
+        window.update(|_, cx| assert!(view.read(cx).assessing_close.is_some()));
     });
 }

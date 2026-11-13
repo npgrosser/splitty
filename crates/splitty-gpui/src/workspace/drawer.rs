@@ -1158,7 +1158,8 @@ mod view_tests {
             mouse_click(window, name.center(), MouseButton::Right, 1);
             window.simulate_keystrokes("down down enter");
             assert!(
-                receiver.try_recv().is_err(),
+                !std::iter::from_fn(|| receiver.try_recv().ok())
+                    .any(|command| !matches!(command.kind(), Command::AssessClose { .. })),
                 "disabled menu cannot send fallback"
             );
         });
