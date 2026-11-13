@@ -285,6 +285,12 @@ interface SessionState {
    */
   scratchpad?: string;
   /**
+   * Raised by every accepted set_scratchpad, also an emptying one
+   * ("scratchpad-versions-v1"); absent while 0, and left out where
+   * `scratchpad` is.
+   */
+  scratchpadVersion?: number;
+  /**
    * The session's root program status record (ProgramStatusRecord), absent
    * while it holds none. Only GET /api/mux/state and /api/mux/screen/{id}
    * carry it; screen snapshots over the WebSocket leave it out, where
@@ -579,6 +585,19 @@ interface Template {
   floating?: { layout: TemplateLayout; bounds: { x: number; y: number; w: number; h: number } }[];
 }
 interface TemplateLayout { slot?: string | string[]; split?: "horizontal" | "vertical"; children?: TemplateLayout[]; ratio?: number }
+/**
+ * POST /api/templates and native template.create ("template-names-v1", see
+ * `templates`, Saved Template Names): save under the template's name. The
+ * server derives the file name (ASCII letters and digits of the trimmed name,
+ * lowercased, other runs as one "-", at most 128 bytes). Without `overwrite`
+ * it saves only when no file of that name exists; check and save are one
+ * step. 200 TemplateSaved; 409 { error: "template exists"; slug } and nothing
+ * changes; 400 { error } for an invalid template or a name without letters
+ * or digits. POST /api/templates/{slug} (template.save) still saves under a
+ * caller's slug without these checks.
+ */
+interface SaveTemplateByName { template: Template; overwrite?: boolean }
+interface TemplateSaved { slug: string; replaced: boolean }
 /** Window-only intent; the envelope screenId names the replaced/new screen.
  * Server registers all panes atomically and runs their launch effects. Invalid
  * references, reused IDs and non-slot floating layouts reject without mutation. */
@@ -986,7 +1005,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1" and "screen-names-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1" and "scratchpad-versions-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1492,12 +1511,17 @@ interface MovePaneToScreenOp {
  * Replace a session's scratchpad with `text` (empty clears it). Only a window
  * sends it, over the WebSocket; POST /api/mux/op answers 400. Refused for an
  * unknown session or more than 64 KiB of UTF-8. Other clients get `mux.nudge`
- * for the screen; the sender gets nothing.
+ * for the screen; the sender gets nothing. With `ifVersion`
+ * ("scratchpad-versions-v1"), only while the session's `scratchpadVersion`
+ * still equals it; otherwise mux.op_failed and nothing changes. A window
+ * sends the version its text is based on and expects its save to become
+ * that version plus one.
  */
 interface SetScratchpadOp {
   type: "set_scratchpad";
   sessionId: string;
   text: string;
+  ifVersion?: number;
 }
 
 /**
@@ -3002,6 +3026,7 @@ export type NativeCall =
   | { operation: "template.list"; args?: { } }
   | { operation: "template.get"; args: { slug: string; } }
   | { operation: "template.save"; args: { slug: string; body: unknown; } }
+  | { operation: "template.create"; args: { body: SaveTemplateByName; } }
   | { operation: "template.delete"; args: { slug: string; } }
   | { operation: "build.get"; args?: { } }
   | { operation: "stats.get"; args?: { } }

@@ -87,6 +87,16 @@ Keep temporary fixture paths short enough for Unix sockets.
   scratchpads and annotations included. The close plan keeps only the
   identity and pending-state checks. View tests answer the assessment with
   `answer_close_assessment`, a fake service built from the model's snapshots.
+- The template dialog has no file name field: `template.create` sends the
+  name and the service names the file (`template-names-v1`); an existing
+  file comes back as `OverwriteRequired` with its name, and the confirmation
+  saves the same name with `overwrite`. A local service without the
+  capability refuses the save with an update notice.
+- Scratchpad editors (`workspace/scratchpad.rs`) save with `ifVersion` from
+  `ScratchpadVersion` when the source announces `scratchpad-versions-v1`
+  and ignore snapshots below the version their own save is expected to
+  become; the two-second hold after a save is left only for services
+  without versions.
 
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec

@@ -336,6 +336,11 @@ Hardening candidates, not open holes.
 Found by the inventory of `frontend/src` for `frontend-client-core` (2026-11-04). The draft change named in each
 entry fixes it; entries without one are small fixes or belong to `frontend-client-core`.
 
+- **The web window projects templates itself** (found 2026-11-13 by `server-side-save-rules`, open).
+  `lib/template_intent.ts` repeats the core's template projection without all of its validation, and
+  `lib/template_guard.ts` and the native dialog each list a template's command panes. The projection gives a new
+  or replaced screen its layout before the server's snapshot; removing it needs the server to report the
+  projection or the window to wait for the snapshot, together with how the web window starts a screen.
 - **Applied templates did not reach the server — resolved 2026-11-06** (`server-templates`).
   One `apply_template` intent now registers the complete layout and runs server-owned spawns. The window uses
   queued optimistic snapshots, so applying in a new screen no longer depends on mounting within one frame.
