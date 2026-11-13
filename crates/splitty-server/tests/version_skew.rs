@@ -927,8 +927,11 @@ fn bridge_session(sandbox: &Sandbox, bridge: &Build, pane: &Pane) {
                 "{what}: {error}"
             );
         }
+        // A bridge that still relays a frame when the client closes ends on
+        // the closed pipe; any other failure is one.
         assert!(
-            ended.status.as_ref().is_ok_and(ExitStatus::success),
+            ended.status.as_ref().is_ok_and(ExitStatus::success)
+                || ended.stderr.to_string().trim() == "Broken pipe (os error 32)",
             "{what}: the bridge's exit\n{}",
             ended.stderr
         );

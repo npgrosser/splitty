@@ -537,12 +537,13 @@ that area touches them.
 
 ## Flaky tests
 
-- **Ending a native bridge can report a broken pipe** (seen once, 2026-11-12, in the release run of v0.3.5; not
-  reproduced in six local runs): in `tests/version_skew.rs`,
-  `the_clients_of_one_build_use_the_daemon_of_the_other` sends `detach` and finishes its
-  `splitty_remote::bridge::NativeBridge`, whose transport result was `Broken pipe (os error 32)` although the
-  bridge then exits successfully. The test now accepts that error kind there. Not investigated: which side closes
-  first, and whether a client can lose its last frame that way.
+- **Ending a native bridge can report a broken pipe** (seen 2026-11-12 in the release runs of v0.3.5 and v0.3.6;
+  on two CPU cores in most runs, also at the commit that added the test, rarely on more): in
+  `tests/version_skew.rs`, `the_clients_of_one_build_use_the_daemon_of_the_other` sends `detach` and finishes its
+  `splitty_remote::bridge::NativeBridge`. Either the client's transport result or the `remote-bridge` process
+  (exit status, stderr `Broken pipe (os error 32)`) then reports the closed pipe, with either build's bridge. The
+  test accepts both. Not investigated: which side closes first, whether a client can lose its last frame that
+  way, and whether the bridge should end successfully when its client is gone.
 - **`splitty-client-core`'s native workspace tests fail now and then when the module runs in parallel** (seen
   2026-11-12 under WSL 2, at `47f7e95` and later; each passes alone): one to three of
   `native_workspace::close_tests::worker_maximize_filters_stale_visibility_and_size_reports_without_losing_output`
