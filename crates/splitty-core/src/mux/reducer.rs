@@ -239,6 +239,26 @@ pub fn reduce_workspace(
             Ok((state, effects))
         }
 
+        Op::CreateFirstScreen {
+            name,
+            screen_id,
+            new_pane_id,
+            shell_profile_id,
+        } => {
+            if !state.screens.is_empty() {
+                return Err(MuxError::WorkspaceNotEmpty);
+            }
+            reduce_workspace(
+                state,
+                Op::CreateScreen {
+                    name,
+                    screen_id,
+                    new_pane_id,
+                    shell_profile_id,
+                },
+            )
+        }
+
         Op::CloseScreen { screen_id } => {
             if !state.screens.contains_key(&screen_id) {
                 return Err(MuxError::ScreenNotFound(screen_id));
@@ -1812,6 +1832,78 @@ mod tests {
         assert_eq!(
             state.screens[&ScreenId::from("e")].name.as_deref(),
             Some("Screen 4")
+        );
+    }
+
+    #[test]
+    fn first_screen_is_created_only_in_an_empty_workspace() {
+        let first = |id: &str| Op::CreateFirstScreen {
+            name: None,
+            screen_id: Some(id.into()),
+            new_pane_id: Some(format!("p-{id}").into()),
+            shell_profile_id: None,
+        };
+        let (state, effects) =
+            reduce_workspace(WorkspaceState::default(), first("a")).expect("first screen");
+        assert_eq!(effects.len(), 1);
+        assert_eq!(state.screen_order, vec![ScreenId::from("a")]);
+        assert_eq!(state.active_screen_id, Some(ScreenId::from("a")));
+        assert_eq!(
+            state.screens[&ScreenId::from("a")].name.as_deref(),
+            Some("Screen 1")
+        );
+
+        // A second window's first screen, applied after the first one.
+        let error = reduce_workspace(state.clone(), first("b")).expect_err("not empty");
+        assert!(matches!(error, MuxError::WorkspaceNotEmpty));
+        assert_eq!(error.to_string(), "the workspace already has screens");
+
+        // An ordinary create still adds a screen, named by the server.
+        let (state, _) = reduce_workspace(
+            state,
+            Op::CreateScreen {
+                name: None,
+                screen_id: Some("c".into()),
+                new_pane_id: Some("p-c".into()),
+                shell_profile_id: None,
+            },
+        )
+        .expect("second screen");
+        assert_eq!(
+            state.screens[&ScreenId::from("c")].name.as_deref(),
+            Some("Screen 2")
+        );
+    }
+
+    #[test]
+    fn concurrent_first_screens_leave_exactly_one() {
+        let store = super::super::Store::new();
+        let results: Vec<_> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..4)
+                .map(|n| {
+                    let store = &store;
+                    scope.spawn(move || {
+                        store.dispatch(Op::CreateFirstScreen {
+                            name: None,
+                            screen_id: Some(format!("s{n}").into()),
+                            new_pane_id: Some(format!("p{n}").into()),
+                            shell_profile_id: None,
+                        })
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| matches!(error, MuxError::WorkspaceNotEmpty)));
+        let state = store.get_workspace_state();
+        assert_eq!(state.screens.len(), 1);
+        assert_eq!(
+            state.screens.values().next().unwrap().name.as_deref(),
+            Some("Screen 1")
         );
     }
 

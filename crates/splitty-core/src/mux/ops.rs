@@ -75,6 +75,16 @@ pub enum Op {
         shell_profile_id: Option<String>,
     },
 
+    /// `CreateScreen` for the first screen of an empty workspace
+    /// (`onlyIfEmpty`): rejected while the workspace holds any screen, so of
+    /// concurrent first screens exactly one is created.
+    CreateFirstScreen {
+        name: Option<String>,
+        screen_id: Option<ScreenId>,
+        new_pane_id: Option<PaneId>,
+        shell_profile_id: Option<String>,
+    },
+
     /// Close and remove a screen.
     CloseScreen { screen_id: ScreenId },
 

@@ -115,6 +115,7 @@ impl MuxHandler {
             capabilities.push(splitty_core::protocol::PROGRAM_STATUS_CAPABILITY.into());
             capabilities.push(splitty_core::mux::CLOSE_ASSESSMENT_CAPABILITY.into());
             capabilities.push(splitty_core::protocol::notice::CAPABILITY.into());
+            capabilities.push(splitty_core::mux::SCREEN_NAMES_CAPABILITY.into());
         }
         self.send_event(&event).await;
     }
@@ -352,12 +353,23 @@ impl MuxHandler {
                             .map(|p| p.id.clone())
                     });
 
-                dispatch(Op::CreateScreen {
-                    name,
-                    screen_id: sid,
-                    new_pane_id: pid,
-                    shell_profile_id,
-                })
+                // The first screen of an empty workspace: refused once any
+                // screen exists (`workspace-model`, First Screen of an Empty Workspace).
+                if msg.op.get("onlyIfEmpty").and_then(Value::as_bool) == Some(true) {
+                    dispatch(Op::CreateFirstScreen {
+                        name,
+                        screen_id: sid,
+                        new_pane_id: pid,
+                        shell_profile_id,
+                    })
+                } else {
+                    dispatch(Op::CreateScreen {
+                        name,
+                        screen_id: sid,
+                        new_pane_id: pid,
+                        shell_profile_id,
+                    })
+                }
             }
             "close_screen" => dispatch(Op::CloseScreen {
                 screen_id: screen_id.clone(),
@@ -1039,6 +1051,43 @@ mod tests {
         let screen = store.get_screen(&ScreenId::from("screen-1")).unwrap();
         assert!(screen.panes.contains_key(&PaneId::from("terminal-1")));
         assert_eq!(screen.panes.len(), 1);
+    }
+
+    /// mux-protocol, Server-Chosen Screen Names and Client Resynchronization:
+    /// the welcome announces the capability; of two windows' first screens
+    /// against an empty workspace the second is refused to its sender, and
+    /// the server named the first one.
+    #[tokio::test]
+    async fn a_second_first_screen_is_refused_to_its_window() {
+        let store = Arc::new(Store::new());
+        let others = Default::default();
+        let (first, mut first_sent) = window(&store, "first", &others);
+        let (second, mut second_sent) = window(&store, "second", &others);
+        second.send_welcome().await;
+        assert!(next_text(&mut second_sent)["capabilities"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|c| c == "screen-names-v1")));
+
+        let create = |screen: &str, pane: &str| serde_json::json!({"type":"mux.op", "screenId":screen, "op":{"type":"create_screen", "screenId":screen, "newPaneId":pane, "onlyIfEmpty":true}});
+        first.handle_value(create("s1", "p1")).await;
+        // Whether its shell starts is not the point here; drain its answer.
+        while first_sent.try_recv().is_ok() {}
+        let created = store
+            .get_screen(&ScreenId::from("s1"))
+            .expect("first screen");
+        assert_eq!(created.name.as_deref(), Some("Screen 1"));
+        others.lock().expect("recorder").clear();
+
+        second.handle_value(create("s2", "p2")).await;
+        let refused = next_text(&mut second_sent);
+        assert_eq!(refused["type"], "mux.op_failed");
+        assert_eq!(refused["op"], "create_screen");
+        assert_eq!(refused["screenId"], "s2");
+        assert_eq!(refused["paneId"], "p2");
+        assert_eq!(refused["error"], "the workspace already has screens");
+        assert!(second_sent.try_recv().is_err(), "no spawn result");
+        assert!(others.lock().expect("recorder").is_empty(), "no nudge");
+        assert_eq!(store.get_workspace_state().screens.len(), 1);
     }
 
     /// Layout-only edits have no process effects, but each accepted revision

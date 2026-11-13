@@ -812,12 +812,21 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                         .default_profile()
                         .map(|p| p.id.clone())
                 });
-            state.mux_store.dispatch(mux::Op::CreateScreen {
-                name,
-                screen_id: Some(sid),
-                new_pane_id: pid,
-                shell_profile_id,
-            })
+            if req.op.get("onlyIfEmpty").and_then(|v| v.as_bool()) == Some(true) {
+                state.mux_store.dispatch(mux::Op::CreateFirstScreen {
+                    name,
+                    screen_id: Some(sid),
+                    new_pane_id: pid,
+                    shell_profile_id,
+                })
+            } else {
+                state.mux_store.dispatch(mux::Op::CreateScreen {
+                    name,
+                    screen_id: Some(sid),
+                    new_pane_id: pid,
+                    shell_profile_id,
+                })
+            }
         }
         "close_screen" => state.mux_store.dispatch(mux::Op::CloseScreen {
             screen_id: screen_id.clone(),

@@ -58,6 +58,11 @@ use thiserror::Error;
 
 use crate::ids::*;
 
+/// Announced in `mux.welcome`: the server names Screens created without a
+/// name and takes `onlyIfEmpty` on `create_screen` (`mux-protocol`,
+/// Server-Chosen Screen Names).
+pub const SCREEN_NAMES_CAPABILITY: &str = "screen-names-v1";
+
 /// Errors from mux operations.
 #[derive(Debug, Error)]
 pub enum MuxError {
@@ -83,6 +88,9 @@ pub enum MuxError {
 
     #[error("screen {0} already exists")]
     ScreenExists(ScreenId),
+
+    #[error("the workspace already has screens")]
+    WorkspaceNotEmpty,
 
     #[error("replacing screen {0} needs replaceConfirmed")]
     ReplaceNotConfirmed(ScreenId),
