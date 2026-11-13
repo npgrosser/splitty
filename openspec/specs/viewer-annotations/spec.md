@@ -71,7 +71,7 @@ Edits of one annotation, or of one reply, from several windows SHALL resolve as 
 - **THEN** #1 holds the new remark and the agent's reply
 
 ### Requirement: Anchoring By Quote
-A window SHALL find each annotation's passage in the document it shows by the annotation's quote, in the text of the annotation's view: the document's source, or the text of its rendered view. Where the quote occurs more than once, the occurrence whose surrounding text matches the context best SHALL win, and among equal ones the one nearest the recorded lines. Where it does not occur, the window SHALL search again with runs of whitespace treated as one space. Where that fails as well, the window SHALL look for the passage the quote most likely became, near the recorded lines, and anchor the annotation there, marked as changed, when that passage is similar enough to the quote; otherwise the annotation SHALL be marked as not found in the current version. An annotation whose passage changed or was not found SHALL keep its recorded quote and lines, and SHALL be anchored without a mark again when a later version contains the quote. The window SHALL anchor again on every new version of the document and when the user switches between the views. The user SHALL be able to move an annotation to the passage currently selected in the pane, which becomes its target. The server SHALL store annotations without interpreting their text.
+Each annotation's passage SHALL be found in the document by the annotation's quote. The server SHALL find it in the document's source, for every annotation, on a window's request (see `mux-protocol`, Review Texts And Anchors); a window SHALL find an annotation taken from its rendered view in the text of that view while it shows the document rendered, and every other annotation where the server found it. Where the quote occurs more than once, the occurrence whose surrounding text matches the context best SHALL win, and among equal ones the one nearest the recorded lines. Where it does not occur, the search SHALL run again with runs of whitespace treated as one space. Where that fails as well, the passage the quote most likely became SHALL be looked for near the recorded lines, and the annotation anchored there, marked as changed, when that passage is similar enough to the quote; otherwise the annotation SHALL be marked as not found in the current version. An annotation whose passage changed or was not found SHALL keep its recorded quote and lines, and SHALL be anchored without a mark again when a later version contains the quote. The window SHALL anchor again on every new version of the document and when the user switches between the views. The user SHALL be able to move an annotation to the passage currently selected in the pane, which becomes its target. The server SHALL store annotations without interpreting their text.
 
 #### Scenario: Lines inserted above the passage
 - **WHEN** an agent inserts ten lines above an annotated passage of a shown file
@@ -92,6 +92,18 @@ A window SHALL find each annotation's passage in the document it shows by the an
 #### Scenario: The same words twice
 - **WHEN** the quote of an annotation occurs twice in the document and only one occurrence has the recorded context
 - **THEN** the annotation is anchored at that occurrence
+
+#### Scenario: A reflowed paragraph
+- **WHEN** an agent rewraps the lines of an annotated paragraph without changing its words
+- **THEN** the annotation is anchored at the rewrapped words, without a mark of a change
+
+#### Scenario: The same result in every window
+- **WHEN** the web window and the native window show the same file with an annotation on a passage that an agent reworded
+- **THEN** both mark the passage as changed at the same lines, and a review from either names the same lines and note
+
+#### Scenario: A script without spaces
+- **WHEN** a passage of Lao, Khmer, Myanmar, Thai, Chinese or Japanese text is reworded
+- **THEN** the changed passage may start and end at any of its characters, not only at spaces
 
 ### Requirement: Annotations In The Pane
 A window SHALL mark the anchored passage of each open annotation in the view the annotation was taken from, and its lines in the other view. It SHALL list a pane's annotations inside the pane with their numbers and threads: the open ones, the general comments first in creation order, then the anchored ones in document order, then those not found; and after them the resolved ones, folded. It SHALL show which entries were handed over to an agent, and show each reply of an agent as plain text with the title of the pane it came from. A mark SHALL lead to its thread: choosing a marked passage, or the mark beside its lines, SHALL open the list when it is closed and choose that annotation in it, without moving the document; where marks overlap, the shortest passage SHALL come first, and choosing the same marks again SHALL go on to the others. Choosing a mark SHALL NOT take the place of selecting text or following a link. The user SHALL be able to hide the marks in the document, and to show the marks of resolved annotations, without changing the annotations; while the marks are hidden, the window SHALL mark only the passage of the annotation the user chose since. The window SHALL keep these choices per pane for its own lifetime. While a pane holds open annotations, its tab SHALL show a marker with their number. While a process waits for the review of a pane (see Waiting For A Review), its tab SHALL show a marker that names the waiting pane and leads to the pane.
@@ -155,16 +167,16 @@ Closing a viewer pane that holds annotations SHALL ask first, as closing a pane 
 - **THEN** the confirmation counts those annotations
 
 ### Requirement: The Review
-A window SHALL turn annotations of a pane into one Markdown text, the review. The review SHALL hold the pending annotations, the open ones with an entry of the user (the annotation itself or a reply) that the user has not handed over; when no annotation is pending, it SHALL hold all open annotations, except for an approval (see Waiting For A Review). It SHALL consist of:
+The server SHALL turn the annotations of a pane into one Markdown text, the review, when a window asks for it (see `mux-protocol`, Review Texts And Anchors); a window SHALL hand over, copy or save only that text. The review SHALL hold the pending annotations, the open ones with an entry of the user (the annotation itself or a reply) that the user has not handed over; when no annotation is pending, it SHALL hold all open annotations, except for an approval (see Waiting For A Review). It SHALL consist of:
 - a heading with the file's name or the text document's title, and for a file its absolute path;
 - for the answer to a waiting process, a line with its verdict, `Verdict: approved` or `Verdict: changes requested`, and, when the window saw the document change during the wait, a note that the review's lines and quotes refer to the version shown when it was answered;
-- the general comments of the review, before the annotations with a passage;
-- each annotation of the review with a passage in the order of the pane's list, under its number, with its current lines, or its recorded lines and a note when its passage changed or was not found, and no lines for a passage of a rendered HTML page;
+- the general comments of the review, before the annotations with a passage, each under its number;
+- each annotation of the review with a passage in the order of the pane's list, under its number, with its current lines, or its recorded lines and the note `(passage changed in the current version)` or `(passage not found in the current version)`, and no lines for a passage of a rendered HTML page;
 - for each, its kind, its quote as a block quote, its remark, and for a `change` its replacement in a fenced block that its text cannot close, or the request to delete the passage when the replacement is empty;
 - for each annotation, its replies in their order, each with its author and its further lines indented under it;
-- when the review holds an annotation, a last line naming the command with which an agent replies in a thread of this pane, by the viewer pane's ID and with the text in single quotes (see `cli`, Comments Command).
+- when the review holds an annotation, a last line naming the command with which an agent replies in a thread of this pane, by the viewer pane's ID, in single quotes unless it consists of letters, digits and `-_./:` only, and with the text in single quotes (see `cli`, Comments Command).
 
-The review SHALL contain nothing else. Control characters other than tab and line feed, characters that change the direction of text, and invisible format characters (zero-width characters, word joiners, byte order marks and tag characters) SHALL appear in the review as U+FFFD, wherever they come from, so that a pasted review cannot end a bracketed paste early, act as terminal input or carry text that the user does not see.
+The review SHALL contain nothing else. Control characters other than tab and line feed, characters that change the direction of text, and invisible format characters (zero-width characters, word joiners, byte order marks and tag characters) SHALL appear in the review as U+FFFD, wherever they come from, so that a pasted review cannot end a bracketed paste early, act as terminal input or carry text that the user does not see. With the review, the server SHALL name the user's entries it holds that the user has not handed over, each with the content it holds, which a window marks with `mark_sent` once the review went out; a review of all open annotations, sent again, names none.
 
 #### Scenario: A plan with a question and a suggested change
 - **WHEN** a pane showing `/home/me/app/PLAN.md` holds a new comment #1 that asks a question on lines 12 to 14 and a new suggested change #2 on line 30
@@ -176,7 +188,7 @@ The review SHALL contain nothing else. Control characters other than tab and lin
 
 #### Scenario: A thread with an answer
 - **WHEN** annotation #2 was handed over, an agent replied to it, and the user then replied to the agent
-- **THEN** the next review holds #2 with its quote and remark, the agent's reply and the user's reply, each with its author, and no annotation without a new entry of the user
+- **THEN** the next review holds #2 with its quote and remark, the agent's reply and the user's reply, each with its author, and no annotation without a new entry of the user, and it names only the user's reply as an entry to mark
 
 #### Scenario: A terminal selection
 - **WHEN** a pane showing a terminal selection titled `Selection from claude` holds a comment
@@ -189,6 +201,18 @@ The review SHALL contain nothing else. Control characters other than tab and lin
 #### Scenario: A quote with an escape sequence
 - **WHEN** an annotated passage of a document holds the characters ESC `[201~` followed by a line of text
 - **THEN** the review shows U+FFFD in place of ESC, and pasting it ends no bracketed paste
+
+#### Scenario: A reworded passage
+- **WHEN** the passage of comment #1, annotated on line 2, was reworded and now starts on line 3
+- **THEN** the review names #1 with line 2 and the note `(passage changed in the current version)`
+
+#### Scenario: Sent again
+- **WHEN** the user sends the review of a pane whose open annotations have all been handed over
+- **THEN** the review holds all open annotations and names no entry to mark
+
+#### Scenario: Added just before the review
+- **WHEN** a window saves a new comment and asks for the review right after it on the same connection
+- **THEN** the review holds the comment with the number the server gave it
 
 ### Requirement: Handing A Review To A Terminal
 A window SHALL offer to send a pane's review to a terminal pane of the same workspace: by default the viewer's origin while it exists as a terminal pane, otherwise one the user chooses among the terminal panes of the screen. Sending SHALL paste the review into the terminal as the user's own paste would, without submitting it, and focus that terminal. When the terminal's program has not enabled bracketed paste and the review has more than one line, the window SHALL instead store the review as a file and insert its path, and say so. The window SHALL also offer to store the review as a file on that terminal's server with `upload` and insert its quoted path, as a drop with path insertion does, and, when that server announced `scratchpad-v1` and the result stays within the scratchpad's limit, to append it to the terminal's scratchpad. Sending in any of these forms SHALL, once the review went out, mark the annotations and the user's replies the review held as handed over with `mark_sent`, naming each with the content the review held, and SHALL keep them; an entry added or changed in the meantime, in this window or another, SHALL stay pending. A review stored as a file SHALL go out only once the server stored it and its path was inserted; a store that fails, or a terminal that is gone by then, SHALL mark nothing, and the window SHALL say so; a store the user cancels SHALL mark nothing. Copying the review to the clipboard and saving it as a download of the window SHALL mark nothing.
@@ -234,11 +258,15 @@ A window SHALL offer to send a pane's review to a terminal pane of the same work
 - **THEN** no path is inserted, the annotations stay pending, and a notice says that the review was not sent
 
 ### Requirement: Annotations Capability
-The server SHALL announce `viewer-annotations-v1` in `mux.welcome.capabilities`. A client SHALL offer annotations on a server's viewer panes only when that server announced it, so that no annotation is written that a server would not keep.
+The server SHALL announce `viewer-annotations-v1` and `viewer-reviews-v1` in `mux.welcome.capabilities`. A client SHALL offer annotations on a server's viewer panes only when that server announced `viewer-annotations-v1`, so that no annotation is written that a server would not keep, and SHALL offer annotations, the review and the verdicts on a waiting review only when it also announced `viewer-reviews-v1`, since only such a server anchors annotations and builds the review; on a server that announced only `viewer-annotations-v1` the window SHALL say that the host needs an update.
 
 #### Scenario: Host without annotations
 - **WHEN** a window connects to a host whose daemon announces `viewer-v1` but not `viewer-annotations-v1`
 - **THEN** the window shows that host's viewer panes and offers no annotations
+
+#### Scenario: Older host
+- **WHEN** a window shows a viewer pane of a host whose daemon announces `viewer-annotations-v1` but not `viewer-reviews-v1`
+- **THEN** the window shows the document, offers no annotation, no review and no verdict, and says that the host needs an update for annotations
 
 ### Requirement: Threads
 Every annotation SHALL carry a thread of replies in the order they were added, at most 50. A reply SHALL have an ID of the form `rep-` followed by 16 lowercase hex characters, unique within its pane, an author, `user` or `agent`, and a text that is not only whitespace. The user's replies SHALL come from a window (see Saving Annotations Through The Window), with IDs the window chooses. An agent's reply SHALL come from a process in a pane through the control API (see Agents Read And Reply To Handed-Over Threads), with an ID the server chooses, and SHALL carry the pane it came from and that pane's title at that time, at most 256 bytes. The user SHALL be able to edit and remove the user's own replies and to remove an agent's replies; an agent's reply SHALL NOT be changed. Removing an annotation SHALL remove its replies.
