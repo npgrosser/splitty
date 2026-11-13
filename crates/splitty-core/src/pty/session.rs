@@ -583,7 +583,7 @@ fn build_spec(
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
     let (mut cmd, bash_bootstrap) = if let Some(argv) = argv {
-        let mut cmd = CommandBuilder::new(&argv[0]);
+        let mut cmd = super::terminal::command(&argv[0]);
         cmd.args(&argv[1..]);
         (cmd, None)
     } else {
@@ -1002,7 +1002,7 @@ fn build_shell_command(
     integration_dir: Option<&str>,
     plain_shell: bool,
 ) -> (CommandBuilder, Option<BashBootstrap>) {
-    let mut cmd = CommandBuilder::new(shell);
+    let mut cmd = super::terminal::command(shell);
     // Parse only startup options, never the command text or its positional
     // arguments. Bash accepts grouped short options and -o/-O values.
     let mut command = false;

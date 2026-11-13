@@ -120,6 +120,31 @@ pub struct Spawned {
     pub readiness: Readiness,
 }
 
+/// One reader of the password database at a time. portable-pty looks up the
+/// user's shell and home directory with `getpwuid` whenever it builds or
+/// starts a command, whatever the environment says. `getpwuid` answers from
+/// one buffer of the C library, and musl grows that buffer without a lock:
+/// two terminals starting at once could crash the static server.
+static PASSWORD_DATABASE: Mutex<()> = Mutex::new(());
+
+fn password_database() -> std::sync::MutexGuard<'static, ()> {
+    PASSWORD_DATABASE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A command builder for `program`; see [`PASSWORD_DATABASE`].
+pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> CommandBuilder {
+    let _database = password_database();
+    CommandBuilder::new(program)
+}
+
+/// A command builder for `argv`; see [`PASSWORD_DATABASE`].
+pub(crate) fn command_from_argv(argv: Vec<OsString>) -> CommandBuilder {
+    let _database = password_database();
+    CommandBuilder::from_argv(argv)
+}
+
 /// Open a PTY of the spec's size and start the spec's program on it, as a
 /// session leader with the PTY as its controlling terminal, with exactly the
 /// spec's environment.
@@ -140,7 +165,7 @@ fn spawn_with_input(spec: &SessionSpec, nonblocking: bool) -> Result<Spawned, Pt
         })
         .map_err(|e| PtyError::SpawnFailed(e.to_string()))?;
 
-    let mut cmd = CommandBuilder::from_argv(spec.argv.iter().map(OsString::from).collect());
+    let mut cmd = command_from_argv(spec.argv.iter().map(OsString::from).collect());
     cmd.env_clear();
     for (key, value) in &spec.env {
         cmd.env(key, value);
@@ -193,10 +218,11 @@ fn spawn_with_input(spec: &SessionSpec, nonblocking: bool) -> Result<Spawned, Pt
     };
 
     // Allocate fallible PTY descriptors before starting a child.
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| PtyError::SpawnFailed(e.to_string()))?;
+    let child = {
+        let _database = password_database();
+        pair.slave.spawn_command(cmd)
+    }
+    .map_err(|e| PtyError::SpawnFailed(e.to_string()))?;
     let pid = child.process_id();
     // The child holds the only reference to the slave from here on.
     drop(pair.slave);
@@ -421,5 +447,27 @@ impl Terminal for LocalTerminal {
         let master = self.master.lock().expect("terminal master");
         master.as_ref()?;
         foreground_of(self.master_fd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Each builder reads the password database. Unguarded readers at once
+    /// corrupt the C library's buffer on musl and end the process.
+    #[test]
+    fn commands_are_built_from_many_threads_at_once() {
+        let builders: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..500 {
+                        let command = super::command("program");
+                        assert_eq!(command.get_argv().len(), 1);
+                    }
+                })
+            })
+            .collect();
+        for builder in builders {
+            builder.join().expect("a builder thread");
+        }
     }
 }

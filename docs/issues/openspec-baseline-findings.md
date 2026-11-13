@@ -607,10 +607,16 @@ that area touches them.
   the full `splitty-server` unit tests passed in a row afterwards (before: about 1 failure in 8). The
   `splitty-remote` test listed here before, `forwards_take_the_asked_port_or_any_free_one`, no longer exists;
   the tunnel tests hold their port reservations.
-- `splitty-core` unit tests for `x86_64-unknown-linux-musl` in release mode (the payload job of the release
-  workflow): the test process sometimes dies with SIGSEGV while the `keeper::process` and `pty::session` tests
-  spawn processes, in about 1 of 15 runs, already at v0.1.29. The v0.1.30 release run needed a rerun of that job.
-  Not seen with the glibc target.
+- **Fixed (2026-11-14): the static server could crash when two terminals started at once.** Seen since v0.1.29
+  as a SIGSEGV of the `splitty-core` unit tests for `x86_64-unknown-linux-musl` in release mode (the payload job
+  of the release workflow), in about 1 of 15 runs, never with the glibc target; the release runs of v0.1.30 and
+  v0.4.0 needed reruns. `portable-pty` looks up the user's shell and home directory with `getpwuid` whenever it
+  builds or starts a command, whatever the environment says. `getpwuid` answers from one buffer of the C
+  library, and musl grows that buffer without a lock, so two lookups at once corrupt it. The servers for WSL and
+  for hosts are the same static build: two terminals starting at the same moment (a template with several panes,
+  a restore) could end the server. One lock in `crates/splitty-core/src/pty/terminal.rs` now covers every
+  command built or started; the unit test `commands_are_built_from_many_threads_at_once` ends the test process in
+  the static build without it.
 - Seen on 2026-11-07 in CI on `main`, each passing on the next commit without a related change:
   `daemon_lifecycle::remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions` in the
   "Tauri native runtime (macOS)" job (`status.success()` at its bridge process), and

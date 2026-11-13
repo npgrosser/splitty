@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn missing_cli_preserves_path_and_discards_a_stale_hint() {
         let directory = tempfile::tempdir().expect("fixture");
-        let mut command = portable_pty::CommandBuilder::new("program");
+        let mut command = crate::pty::terminal::command("program");
         command.env("PATH", "/first:/second");
         command.env("SPLITTY_CLI_DIR", "/inherited-wrong-cli");
         configure_command(&mut command, Some(directory.path()));
