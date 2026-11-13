@@ -8,6 +8,11 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-startup-progress` NSP-1/NSP-2/NSP-3** (2026-11-13, provisional, tbd; recorded in the change's proposal):
+  - **NSP-1:** a failed start keeps its page with the reason and the failed phase and offers no action; the window is closed to end it. Alternatives: a retry action that restarts the preparation, or a "Connect to host" entry as on the legacy setup page.
+  - **NSP-2:** the hidden Windows window keeps its wait for the backend's appearance, at most one second, before it shows the startup page. Showing it at once would flash the fallback theme on warm starts.
+  - **NSP-3:** with several WSL distributions the choice stays a sequence of system dialogs, kept on top of the window. Alternative: an in-window chooser.
+
 - **Native web look alignment** (2026-11-09, provisional, tbd; no OpenSpec change, recorded in `docs/gpui-spike.md`):
   - **WL-1:** secondary and muted chrome text keep the theme's values, and only primary text is lifted to 4.5:1. The alternative, lifting all text, erases the theme's idle/running distinction.
   - **WL-2:** the default terminal cursor is a bar (the web client's default; `CSI 0 q` restores it), and only the focused terminal shows a cursor.
