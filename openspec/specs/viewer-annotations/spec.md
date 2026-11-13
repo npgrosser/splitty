@@ -187,7 +187,7 @@ The review SHALL contain nothing else. Control characters other than tab and lin
 - **THEN** the review shows U+FFFD in place of ESC, and pasting it ends no bracketed paste
 
 ### Requirement: Handing A Review To A Terminal
-A window SHALL offer to send a pane's review to a terminal pane of the same workspace: by default the viewer's origin while it exists as a terminal pane, otherwise one the user chooses among the terminal panes of the screen. Sending SHALL paste the review into the terminal as the user's own paste would, without submitting it, and focus that terminal. When the terminal's program has not enabled bracketed paste and the review has more than one line, the window SHALL instead store the review as a file and insert its path, and say so. The window SHALL also offer to store the review as a file on that terminal's server with `upload` and insert its quoted path, as a drop with path insertion does, and, when that server announced `scratchpad-v1` and the result stays within the scratchpad's limit, to append it to the terminal's scratchpad. Sending in any of these forms SHALL mark the annotations and the user's replies the review held as handed over with `mark_sent`, naming each with the content the review held, and SHALL keep them; an entry added or changed in the meantime, in this window or another, SHALL stay pending. Copying the review to the clipboard and saving it as a download of the window SHALL mark nothing.
+A window SHALL offer to send a pane's review to a terminal pane of the same workspace: by default the viewer's origin while it exists as a terminal pane, otherwise one the user chooses among the terminal panes of the screen. Sending SHALL paste the review into the terminal as the user's own paste would, without submitting it, and focus that terminal. When the terminal's program has not enabled bracketed paste and the review has more than one line, the window SHALL instead store the review as a file and insert its path, and say so. The window SHALL also offer to store the review as a file on that terminal's server with `upload` and insert its quoted path, as a drop with path insertion does, and, when that server announced `scratchpad-v1` and the result stays within the scratchpad's limit, to append it to the terminal's scratchpad. Sending in any of these forms SHALL, once the review went out, mark the annotations and the user's replies the review held as handed over with `mark_sent`, naming each with the content the review held, and SHALL keep them; an entry added or changed in the meantime, in this window or another, SHALL stay pending. A review stored as a file SHALL go out only once the server stored it and its path was inserted; a store that fails, or a terminal that is gone by then, SHALL mark nothing, and the window SHALL say so; a store the user cancels SHALL mark nothing. Copying the review to the clipboard and saving it as a download of the window SHALL mark nothing.
 
 #### Scenario: Send to the agent
 - **WHEN** the user sends the review of a plan whose viewer was opened from the agent's terminal, and the agent's program has enabled bracketed paste
@@ -224,6 +224,10 @@ A window SHALL offer to send a pane's review to a terminal pane of the same work
 #### Scenario: Added while sending
 - **WHEN** window B adds an annotation to the pane while window A sends the review without it
 - **THEN** B's annotation stays pending
+
+#### Scenario: The file is not stored
+- **WHEN** the user sends a review as a file and the terminal's server answers `upload_failed`
+- **THEN** no path is inserted, the annotations stay pending, and a notice says that the review was not sent
 
 ### Requirement: Annotations Capability
 The server SHALL announce `viewer-annotations-v1` in `mux.welcome.capabilities`. A client SHALL offer annotations on a server's viewer panes only when that server announced it, so that no annotation is written that a server would not keep.
