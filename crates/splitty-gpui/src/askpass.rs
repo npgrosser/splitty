@@ -26,7 +26,8 @@ struct Askpass {
 }
 
 impl Drop for Askpass {
-    /// A dialog closed by the window manager cancels its question.
+    /// A dialog closed by the window manager cancels its question: its window
+    /// holds the only strong handle, so closing the window drops it.
     fn drop(&mut self) {
         if let Some((id, sink)) = self.request.take() {
             sink(id, None);
@@ -107,10 +108,12 @@ fn options(confirm: bool, cx: &App) -> WindowOptions {
     }
 }
 
-/// The open question dialogs, one per question of the local service.
+/// The question dialogs, one per question of the local service, kept until
+/// the service no longer lists the question. Only a dialog's window holds it
+/// strongly, so a closed window drops the dialog and so cancels its question.
 #[derive(Default)]
 pub struct Prompts {
-    dialogs: HashMap<String, (AnyWindowHandle, Entity<Askpass>)>,
+    dialogs: HashMap<String, (AnyWindowHandle, WeakEntity<Askpass>)>,
 }
 
 impl Prompts {
@@ -122,7 +125,9 @@ impl Prompts {
             if list.iter().any(|prompt| &prompt.id == id) {
                 return true;
             }
-            dialog.update(cx, |dialog, _| dialog.request = None);
+            if let Some(dialog) = dialog.upgrade() {
+                dialog.update(cx, |dialog, _| dialog.request = None);
+            }
             let _ = handle.update(cx, |_, window, _| window.remove_window());
             false
         });
@@ -137,8 +142,9 @@ impl Prompts {
                 cx.new(|cx| Askpass::new(request, text, confirm, window, cx))
             });
             match result {
-                Ok(dialog) => {
-                    self.dialogs.insert(prompt.id.clone(), dialog);
+                Ok((handle, dialog)) => {
+                    self.dialogs
+                        .insert(prompt.id.clone(), (handle, dialog.downgrade()));
                     cx.activate(true);
                 }
                 Err(_) => sink(prompt.id.clone(), None),
@@ -277,6 +283,7 @@ mod tests {
     /// or with `None` dismiss it.
     fn act(app: &mut TestAppContext, prompts: &Prompts, id: &str, value: Option<&str>) {
         let (handle, view) = prompts.dialogs[id].clone();
+        let view = view.upgrade().expect("the dialog is open");
         app.update(|cx| {
             handle
                 .update(cx, |_, window, cx| {
@@ -337,6 +344,41 @@ mod tests {
         app.run_until_parked();
         assert!(app.windows().is_empty());
         assert_eq!(answers.borrow().len(), 3, "closing answers nothing again");
+    }
+
+    // remote-hosts, SSH Questions Of The Local Service, Dismissed question:
+    // closing a dialog's window the way its title-bar button does cancels the
+    // question at once. The dialog stays closed while the service still lists
+    // the question, and a question with the same id shows again once the
+    // service dropped it.
+    #[test]
+    fn closing_a_dialog_window_cancels_its_question() {
+        let app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let (sink, answers) = recording();
+        let mut prompts = Prompts::default();
+        let list = [prompt('a', false), prompt('b', true)];
+        app.update(|cx| prompts.show(&list, &sink, cx));
+        app.run_until_parked();
+        assert_eq!(app.windows().len(), 2);
+        // The platform's close callback removes the window, nothing else.
+        let handle = prompts.dialogs[&list[1].id].0;
+        app.update(|cx| {
+            handle
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap()
+        });
+        app.run_until_parked();
+        assert_eq!(*answers.borrow(), [(list[1].id.clone(), None)]);
+        assert_eq!(app.windows().len(), 1);
+        app.update(|cx| prompts.show(&list, &sink, cx));
+        app.run_until_parked();
+        assert_eq!(app.windows().len(), 1, "a closed dialog stays closed");
+        app.update(|cx| prompts.show(&list[..1], &sink, cx));
+        app.update(|cx| prompts.show(&list, &sink, cx));
+        app.run_until_parked();
+        assert_eq!(app.windows().len(), 2, "a new question with that id shows");
+        assert_eq!(answers.borrow().len(), 1, "cancelled once");
     }
 
     #[test]
