@@ -415,6 +415,22 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   only through the built-in steps up to 3.0 (`Zoom::from_values`, `Zoom::apply`,
   `crates/splitty-client-core/src/zoom.rs`). A server that widens the zoom limit would store a level the
   window does not show. The current server's limit is the same range.
+- **A CLI in a pane of the desktop app no longer asks SSH questions** (found on 2026-11-13). A service asks
+  its SSH questions through its clients (`ssh-prompts-v1`), and the fallback to `SPLITTY_ASKPASS_PROGRAM` is gone
+  from `crates/splitty-remote/src/ssh.rs`, with the variable the app set for the processes it started. A
+  `splitty` process that runs `ssh` itself, such as `splitty connect <host>` typed in a pane, has no askpass
+  program and keeps `BatchMode=yes`: a host that needs a password, a passphrase or a host-key confirmation
+  fails with the authentication hint where the app's question window appeared before. Connecting the host from
+  the app asks as before. Letting such a CLI hand its questions to the service it runs under, or asking on its
+  own terminal when it has one, would restore it.
+- **The hint after a cancelled or refused SSH answer says Splitty never asks** (found on 2026-11-13). A host
+  open that fails on authentication reports "Splitty logs in without prompts. Check that `ssh <host>` logs in
+  with a key … without asking for a password." (`crates/splitty-server/src/hub/failure.rs`). That holds for a
+  CLI without a question broker; a service that asked and got no answer, or a wrong one, shows the same hint.
+- **A download keeps a name Windows reserves** (found on 2026-11-13). `download_name`
+  (`crates/splitty-client-core/src/native_workspace/files.rs`) replaces the characters Windows refuses but
+  keeps device names (`CON`, `NUL`, `COM1`, with or without an extension) and trailing dots and spaces; saving
+  such an offered file fails on Windows with the system's error instead of under an adjusted name.
 
 ## Stale documentation
 
