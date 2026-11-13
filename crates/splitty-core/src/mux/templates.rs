@@ -9,6 +9,9 @@ use crate::ids::*;
 use crate::template::{self, Template};
 
 pub const TEMPLATE_CAPABILITY: &str = "server-templates-v1";
+/// Saved templates' file names come from the server (`templates`, Saved
+/// Template Names); announced with the other workspace capabilities.
+pub const TEMPLATE_NAMES_CAPABILITY: &str = crate::template::NAMES_CAPABILITY;
 
 /// One window intent, interpreted identically before and after transport.
 #[derive(Clone, Debug, Deserialize, Serialize)]

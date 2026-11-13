@@ -27,7 +27,7 @@ mod templates;
 mod validate;
 pub use templates::{
     extract_template, project_template, template_directory, ApplyTemplate, TemplateProjection,
-    TEMPLATE_CAPABILITY,
+    TEMPLATE_CAPABILITY, TEMPLATE_NAMES_CAPABILITY,
 };
 
 pub use close_assessment::{

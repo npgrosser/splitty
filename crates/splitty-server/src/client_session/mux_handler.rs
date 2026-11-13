@@ -116,7 +116,7 @@ impl MuxHandler {
             capabilities.push(splitty_core::mux::CLOSE_ASSESSMENT_CAPABILITY.into());
             capabilities.push(splitty_core::protocol::notice::CAPABILITY.into());
             capabilities.push(splitty_core::mux::SCREEN_NAMES_CAPABILITY.into());
-            capabilities.push(splitty_core::template::NAMES_CAPABILITY.into());
+            capabilities.push(splitty_core::mux::TEMPLATE_NAMES_CAPABILITY.into());
             capabilities.push(splitty_core::mux::SCRATCHPAD_VERSIONS_CAPABILITY.into());
         }
         self.send_event(&event).await;
