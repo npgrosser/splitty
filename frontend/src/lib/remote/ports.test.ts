@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  LOOPBACK_HOSTS, MAX_PORTS, appearedPorts, forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts,
+  MAX_PORTS, appearedPorts, forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts,
   portLists, withForward, parseSavedForwards, parseSavedForward, MAX_SAVED_FORWARDS, type DetectedPort, type RemoteForward, type SavedForward,
 } from "./ports.ts";
 import { MAX_TITLE } from "../protocol/untrusted.ts";
@@ -128,19 +128,26 @@ describe("portLists", () => {
 });
 
 describe("loopback links", () => {
-  it("knows the four hosts of the host itself", () => {
-    expect(LOOPBACK_HOSTS).toEqual(["localhost", "127.0.0.1", "0.0.0.0", "[::1]"]);
-    for (const host of LOOPBACK_HOSTS) {
-      expect(loopbackLink(`http://${host}:5173/app`)?.port).toBe(5173);
-    }
+  // The cases of the native client's rule (external_links.rs).
+  it.each([
+    "http://localhost/", "http://LOCALHOST./", "https://dev.localhost:8443/a", "http://one.two.localhost./",
+    "http://127.0.0.1/", "http://127.255.2.3/", "http://2130706433/", "http://0x7f000001/", "http://0.0.0.0/",
+    "http://[::1]/", "http://[::]/", "http://[::ffff:127.0.0.1]/", "http://[::ffff:0.0.0.0]/",
+    "http://public.example@127.1/", "http://127.0.0.2:3000/", "http://[0:0:0:0:0:0:0:1]:3000/",
+  ])("treats %s as the host itself", (raw) => {
+    expect(loopbackLink(raw), raw).not.toBeNull();
+  });
+  it("keeps the port of the link", () => {
+    expect(loopbackLink("http://127.0.0.2:3000/app")?.port).toBe(3000);
     expect(loopbackLink("http://LOCALHOST:3000/")?.port).toBe(3000);
-    expect(loopbackLink("http://[0:0:0:0:0:0:0:1]:3000/")?.port).toBe(3000);
   });
 
   it("leaves other hosts and schemes alone", () => {
     for (const raw of [
-      "http://example.com:5173/", "http://10.0.0.5:8080/", "http://127.0.0.2:8000/", "http://localhost.example:80/",
-      "ftp://localhost:21/", "javascript:alert(1)", "file:///etc/passwd", "not a url", "http://localhost:0/",
+      "http://example.com:5173/", "http://10.0.0.5:8080/", "http://localhost.example:80/",
+      "https://localhost.example/", "http://notlocalhost/", "http://127.0.0.1.example/", "http://localhost@public.example/",
+      "http://127.0.0.2@public.example/", "http://0.0.0.1/", "http://128.0.0.1/", "http://[::2]/", "http://[::ffff:192.168.1.2]/",
+      "http://192.168.1.2/", "ftp://localhost:21/", "javascript:alert(1)", "file:///etc/passwd", "not a url", "http://localhost:0/",
     ]) {
       expect(loopbackLink(raw), raw).toBeNull();
     }

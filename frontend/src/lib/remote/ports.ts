@@ -250,8 +250,25 @@ export function portLists(
 
 // ── Links ──
 
-/** The hosts of a link that mean the host itself. */
-export const LOOPBACK_HOSTS: readonly string[] = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"];
+/**
+ * Whether a URL hostname (as `URL` normalizes it) means the machine itself:
+ * `localhost` and `*.localhost`, all of 127.0.0.0/8, the wildcard `0.0.0.0` and
+ * `[::]`, `[::1]`, and the IPv4-mapped forms of those. The same rule as the
+ * native client's, so both open the same links through a forward.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (v4) return Number(v4[1]) === 127 || (v4.slice(1).every((part) => Number(part) === 0));
+  const v6 = /^\[(.*)\]$/.exec(host);
+  if (!v6) return false;
+  if (v6[1] === "::" || v6[1] === "::1") return true;
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(v6[1]);
+  if (!mapped) return false;
+  const high = parseInt(mapped[1], 16);
+  return high >> 8 === 127 || (high === 0 && parseInt(mapped[2], 16) === 0);
+}
 
 /** A link to a port on the loopback of the host whose pane printed it. */
 export interface LoopbackLink {
@@ -261,7 +278,7 @@ export interface LoopbackLink {
 
 /**
  * The loopback link `raw` is, or null: an `http` or `https` URL whose host is
- * one of {@link LOOPBACK_HOSTS}. Without a port it is the scheme's, 80 or 443
+ * one for which {@link isLoopbackHost} holds. Without a port it is the scheme's, 80 or 443
  * (provisional, tbd).
  */
 export function loopbackLink(raw: string): LoopbackLink | null {
@@ -272,7 +289,7 @@ export function loopbackLink(raw: string): LoopbackLink | null {
     return null;
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  if (!LOOPBACK_HOSTS.includes(url.hostname)) return null;
+  if (!isLoopbackHost(url.hostname)) return null;
   const port = url.port === "" ? (url.protocol === "https:" ? 443 : 80) : Number(url.port);
   return isPort(port) ? { url, port } : null;
 }
