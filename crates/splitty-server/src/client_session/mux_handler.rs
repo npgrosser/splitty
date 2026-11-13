@@ -120,6 +120,7 @@ impl MuxHandler {
             capabilities.push(splitty_core::mux::SCREEN_NAMES_CAPABILITY.into());
             capabilities.push(splitty_core::mux::TEMPLATE_NAMES_CAPABILITY.into());
             capabilities.push(splitty_core::mux::SCRATCHPAD_VERSIONS_CAPABILITY.into());
+            capabilities.push(splitty_core::mux::VIEWER_REVIEWS_CAPABILITY.into());
         }
         self.send_event(&event).await;
     }
@@ -2114,7 +2115,8 @@ mod tests {
         assert!(
             welcome["capabilities"]
                 .as_array()
-                .is_some_and(|all| all.iter().any(|c| c == "viewer-annotations-v1")),
+                .is_some_and(|all| all.iter().any(|c| c == "viewer-annotations-v1")
+                    && all.iter().any(|c| c == "viewer-reviews-v1")),
             "{welcome}"
         );
 

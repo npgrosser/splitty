@@ -237,6 +237,19 @@ impl Store {
         })
     }
 
+    /// The record of the viewer pane `pane_id`, on whichever screen holds
+    /// it: its document and annotations as the next operation would see them.
+    pub fn viewer(&self, pane_id: &PaneId) -> Option<ViewerState> {
+        let state = self.state.read().expect("workspace lock");
+        state.screens.values().find_map(|screen| {
+            let pane = screen.panes.get(pane_id)?;
+            if pane.role != Some(PaneRole::Viewer) {
+                return None;
+            }
+            pane.viewer.clone()
+        })
+    }
+
     /// The wait for a review that the viewer pane `pane_id` names, on
     /// whichever screen holds it (`viewer-annotations`, Waiting For A Review).
     pub fn review_wait(&self, pane_id: &PaneId) -> Option<ReviewWait> {

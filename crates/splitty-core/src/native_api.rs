@@ -291,6 +291,8 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "file.decline",
     "file.read",
     "viewer.read",
+    "viewer.anchor",
+    "viewer.review",
     "viewer.review_answer",
     "hub.catalog.observe",
 ];

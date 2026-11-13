@@ -16,7 +16,8 @@
 //! - [`reviews`] — waits for a review of a viewer pane and the windows'
 //!   answers to them.
 //! - [`sender`] — ordered client sender.
-//! - [`viewer`] — `viewer.read`, the documents of viewer panes.
+//! - [`viewer`] — `viewer.read`, the documents of viewer panes, and
+//!   `viewer.anchor` / `viewer.review`, their annotations' anchors and review.
 
 pub mod codec;
 pub mod editor;

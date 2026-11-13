@@ -4,6 +4,12 @@
 //! version, and a later chunk names the version of the first, so that a file
 //! changed in between fails the read instead of mixing two versions. Reads
 //! run off the connection's message loop, at most four at a time.
+//!
+//! `viewer.anchor` and `viewer.review` read the whole document the same way
+//! and answer the anchors of the pane's annotations in its source and the
+//! pane's review (`mux-protocol`, Review Texts And Anchors). They take the
+//! pane's record when the message arrives, so that the connection's earlier
+//! operations are in it, and share the reads in flight.
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,7 +20,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use splitty_core::ids::PaneId;
-use splitty_core::mux::{viewer_path_is_valid, Store, ViewerSource, VIEWER_TEXT_LIMIT};
+use splitty_core::mux::{
+    anchor_annotations, anchors_in_list_order, build_review, viewer_path_is_valid,
+    viewer_source_text, AnnotationAnchor, RenderedPassage, ReviewRequest, SentEntry, Store,
+    Verdict, ViewerSource, ViewerState, RENDERED_PASSAGE_LIMIT, VIEWER_TEXT_LIMIT,
+};
 use splitty_transport::budget::{ConnectionBudget, Lease};
 use tokio::sync::Semaphore;
 
@@ -136,6 +146,16 @@ enum Answer {
     Unchanged {
         version: String,
     },
+    Anchored {
+        pane_id: String,
+        version: String,
+        anchors: Vec<AnnotationAnchor>,
+    },
+    Reviewed {
+        pane_id: String,
+        version: String,
+        review: splitty_core::mux::Review,
+    },
     Failed(Code),
 }
 
@@ -155,6 +175,22 @@ enum Wire<'a> {
     Unchanged {
         request_id: &'a str,
         version: &'a str,
+    },
+    #[serde(rename = "viewer.anchored", rename_all = "camelCase")]
+    Anchored {
+        request_id: &'a str,
+        pane_id: &'a str,
+        version: &'a str,
+        anchors: &'a [AnnotationAnchor],
+    },
+    #[serde(rename = "viewer.reviewed", rename_all = "camelCase")]
+    Reviewed {
+        request_id: &'a str,
+        pane_id: &'a str,
+        version: &'a str,
+        text: &'a str,
+        count: usize,
+        entries: &'a [SentEntry],
     },
     #[serde(rename = "viewer.failed", rename_all = "camelCase")]
     Failed {
@@ -220,6 +256,211 @@ impl Reads {
     }
 }
 
+impl Reads {
+    /// Answer `viewer.anchor`: the anchors of the pane's annotations in the
+    /// version of its document read now, in the order of the pane's list.
+    pub(super) fn anchor(&self, value: &Value) {
+        let request = match WholeRequest::parse(value, false) {
+            Ok(request) => request,
+            Err(request_id) => {
+                return send(&self.sender, &request_id, Answer::Failed(Code::Invalid))
+            }
+        };
+        self.whole(request);
+    }
+
+    /// Answer `viewer.review`: the pane's review, anchored in the version of
+    /// its document read now.
+    pub(super) fn review(&self, value: &Value) {
+        let request = match WholeRequest::parse(value, true) {
+            Ok(request) => request,
+            Err(request_id) => {
+                return send(&self.sender, &request_id, Answer::Failed(Code::Invalid))
+            }
+        };
+        self.whole(request);
+    }
+
+    fn whole(&self, request: WholeRequest) {
+        // The record as the connection's earlier operations left it.
+        let Some(record) = self.store.viewer(&PaneId::from(request.pane_id.as_str())) else {
+            return send(
+                &self.sender,
+                &request.request_id,
+                Answer::Failed(Code::UnknownPane),
+            );
+        };
+        let Ok(permit) = self.in_flight.clone().try_acquire_owned() else {
+            return send(
+                &self.sender,
+                &request.request_id,
+                Answer::Failed(Code::Busy),
+            );
+        };
+        let sender = self.sender.clone();
+        tokio::spawn(async move {
+            let budget = sender.context().budget;
+            let request_id = request.request_id.clone();
+            let answer = tokio::task::spawn_blocking(move || answer_whole(&request, &record, &budget))
+                .await
+                .unwrap_or(Answer::Failed(Code::Unreadable));
+            send(&sender, &request_id, answer);
+            drop(permit);
+        });
+    }
+}
+
+/// A `viewer.anchor` or `viewer.review`.
+#[derive(Debug)]
+struct WholeRequest {
+    request_id: String,
+    pane_id: String,
+    /// What the review is asked for with; none for anchors.
+    review: Option<ReviewAsked>,
+}
+
+#[derive(Debug)]
+struct ReviewAsked {
+    verdict: Option<Verdict>,
+    changed_during_wait: bool,
+    passages: Vec<RenderedPassage>,
+}
+
+impl WholeRequest {
+    /// The request, or the `requestId` to answer `invalid` with.
+    fn parse(value: &Value, review: bool) -> Result<Self, String> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Incoming {
+            request_id: String,
+            pane_id: String,
+            #[serde(default)]
+            verdict: Option<Verdict>,
+            #[serde(default)]
+            changed_during_wait: bool,
+            #[serde(default)]
+            passages: Vec<RenderedPassage>,
+        }
+        let echo = value["requestId"]
+            .as_str()
+            .filter(|id| id.len() <= MAX_REQUEST_ID)
+            .unwrap_or_default()
+            .to_owned();
+        let Ok(incoming) = Incoming::deserialize(value) else {
+            return Err(echo);
+        };
+        let valid = incoming.request_id.len() <= MAX_REQUEST_ID
+            && incoming.passages.len() <= RENDERED_PASSAGE_LIMIT
+            && incoming.passages.iter().all(RenderedPassage::is_valid)
+            && (review
+                || (incoming.verdict.is_none()
+                    && !incoming.changed_during_wait
+                    && incoming.passages.is_empty()));
+        if !valid {
+            return Err(echo);
+        }
+        Ok(Self {
+            request_id: incoming.request_id,
+            pane_id: incoming.pane_id,
+            review: review.then_some(ReviewAsked {
+                verdict: incoming.verdict,
+                changed_during_wait: incoming.changed_during_wait,
+                passages: incoming.passages,
+            }),
+        })
+    }
+}
+
+/// The anchors or the review of `record`'s pane. Blocking: it reads a file
+/// and anchors in it.
+fn answer_whole(request: &WholeRequest, record: &ViewerState, budget: &ConnectionBudget) -> Answer {
+    let (version, bytes, _scratch) = match whole_document(&record.source, budget) {
+        Ok(read) => read,
+        Err(code) => return Answer::Failed(code),
+    };
+    let text = viewer_source_text(&bytes);
+    drop(bytes);
+    let passages = anchor_annotations(&text, &record.annotations);
+    match &request.review {
+        None => Answer::Anchored {
+            pane_id: request.pane_id.clone(),
+            version,
+            anchors: anchors_in_list_order(&record.annotations, &passages),
+        },
+        Some(asked) => {
+            let review = build_review(
+                &record.source,
+                &request.pane_id,
+                &record.annotations,
+                &passages,
+                ReviewRequest {
+                    verdict: asked.verdict,
+                    changed_during_wait: asked.changed_during_wait,
+                    passages: &asked.passages,
+                },
+            );
+            Answer::Reviewed {
+                pane_id: request.pane_id.clone(),
+                version,
+                review,
+            }
+        }
+    }
+}
+
+/// A document whole, with its version, read as `viewer.read` reads it, and
+/// the connection's budget it holds.
+fn whole_document(
+    source: &ViewerSource,
+    budget: &ConnectionBudget,
+) -> Result<(String, Vec<u8>, Lease), Code> {
+    // The bytes, their text and the answer at once.
+    let reserve = |len: u64| {
+        usize::try_from(len)
+            .ok()
+            .and_then(|len| len.checked_mul(3))
+            .and_then(|bytes| budget.reserve(bytes, false).ok())
+            .ok_or(Code::Busy)
+    };
+    match source {
+        ViewerSource::Text { text, .. } => {
+            if text.len() > VIEWER_TEXT_LIMIT {
+                return Err(Code::TooLarge);
+            }
+            let size = u64::try_from(text.len()).map_err(|_| Code::TooLarge)?;
+            let lease = reserve(size)?;
+            Ok((text_version(text), text.as_bytes().to_vec(), lease))
+        }
+        ViewerSource::File { path } => {
+            if !viewer_path_is_valid(path) {
+                return Err(Code::Unreadable);
+            }
+            let (file, metadata) = match files::open_regular(Path::new(path)) {
+                Ok(opened) => opened,
+                Err(OpenError::Missing) => return Err(Code::NotFound),
+                Err(OpenError::Unreadable) => return Err(Code::Unreadable),
+                Err(OpenError::NotAFile) => return Err(Code::NotAFile),
+            };
+            if metadata.len() > MAX_FILE_BYTES {
+                return Err(Code::TooLarge);
+            }
+            let version = file_version(&metadata);
+            let lease = reserve(metadata.len())?;
+            let bytes = files::read_at(&file, 0, metadata.len()).map_err(|error| {
+                match error.kind() {
+                    io::ErrorKind::UnexpectedEof => Code::Changed,
+                    _ => Code::Unreadable,
+                }
+            })?;
+            match file.metadata() {
+                Ok(after) if file_version(&after) == version => Ok((version, bytes, lease)),
+                Ok(_) => Err(Code::Changed),
+                Err(_) => Err(Code::Unreadable),
+            }
+        }
+    }
+}
+
 /// Queue `answer`; a connection without room for it is closed by the sender.
 fn send(sender: &ClientSender, request_id: &str, answer: Answer) {
     let wire = match &answer {
@@ -241,6 +482,28 @@ fn send(sender: &ClientSender, request_id: &str, answer: Answer) {
         Answer::Unchanged { version } => Wire::Unchanged {
             request_id,
             version,
+        },
+        Answer::Anchored {
+            pane_id,
+            version,
+            anchors,
+        } => Wire::Anchored {
+            request_id,
+            pane_id,
+            version,
+            anchors,
+        },
+        Answer::Reviewed {
+            pane_id,
+            version,
+            review,
+        } => Wire::Reviewed {
+            request_id,
+            pane_id,
+            version,
+            text: &review.text,
+            count: review.count,
+            entries: &review.entries,
         },
         Answer::Failed(code) => Wire::Failed {
             request_id,
@@ -294,8 +557,7 @@ fn read_text(at: &Position, text: &str, budget: &ConnectionBudget) -> Answer {
     let Ok(size) = u64::try_from(text.len()) else {
         return Answer::Failed(Code::TooLarge);
     };
-    let digest = Sha256::digest(text.as_bytes());
-    let version = format!("t-{size}-{}", hex::encode(&digest[..8]));
+    let version = text_version(text);
     chunk(at, size, version, budget, |offset, len| {
         let start = usize::try_from(offset).map_err(|_| Code::Invalid)?;
         let len = usize::try_from(len).map_err(|_| Code::Invalid)?;
@@ -305,6 +567,12 @@ fn read_text(at: &Position, text: &str, budget: &ConnectionBudget) -> Answer {
             .map(<[u8]>::to_vec)
             .ok_or(Code::Invalid)
     })
+}
+
+/// `t-<size>-<16 hex of its SHA-256>` of a text document.
+fn text_version(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    format!("t-{}-{}", text.len(), hex::encode(&digest[..8]))
 }
 
 /// `f-<size>-<mtime ns>-<inode>` of an opened file.
@@ -702,5 +970,142 @@ mod tests {
         reads.read(&read);
         assert_eq!(answer(&mut rx).await["type"], "viewer.chunk");
         assert_eq!(budget.used(), 0, "scratch and frames released");
+    }
+
+    /// Put `annotations` into the viewer pane `pane` of screen `s1`.
+    fn annotate(store: &Store, pane: &str, annotations: Value) {
+        let op = serde_json::from_value(json!({
+            "type": "put_annotations", "paneId": pane, "annotations": annotations,
+        }))
+        .expect("wire op");
+        store
+            .dispatch_screen(&ScreenId::from("s1"), op)
+            .expect("annotations");
+    }
+
+    fn source_target(quote: &str, line: u32) -> Value {
+        json!({"view": "source", "quote": quote, "prefix": "", "suffix": "", "startLine": line, "endLine": line})
+    }
+
+    /// mux-protocol, Review Texts And Anchors: Anchors of a shown file and
+    /// Ranges in the source.
+    #[tokio::test]
+    async fn the_anchors_of_a_shown_file_come_in_list_order_with_their_ranges() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("PLAN.md");
+        std::fs::write(&path, "\u{feff}one\r\ntwo\r\nretry three times\r\n").expect("file");
+        let store = store_showing(&[("v1", file(&path))]);
+        annotate(
+            &store,
+            "v1",
+            json!([
+                {"id": "ann-0000000000000001", "kind": "comment", "body": "why?", "target": source_target("retry three times", 3)},
+                {"id": "ann-0000000000000002", "kind": "comment", "body": "overall"},
+                {"id": "ann-0000000000000003", "kind": "comment", "body": "gone", "target": source_target("nothing like it at all", 1)},
+            ]),
+        );
+        let (reads, mut rx) = reads(store);
+        reads.anchor(&json!({"type": "viewer.anchor", "requestId": "a1", "paneId": "v1"}));
+        let anchored = answer(&mut rx).await;
+        assert_eq!(anchored["type"], "viewer.anchored", "{anchored}");
+        assert_eq!(anchored["requestId"], "a1");
+        assert_eq!(anchored["paneId"], "v1");
+        assert!(anchored["version"].as_str().is_some_and(|version| version.starts_with("f-")));
+        assert_eq!(
+            anchored["anchors"],
+            json!([
+                {"id": "ann-0000000000000002", "state": "general"},
+                {"id": "ann-0000000000000001", "state": "anchored", "start": 8, "end": 25, "startLine": 3, "endLine": 3},
+                {"id": "ann-0000000000000003", "state": "lost"},
+            ])
+        );
+    }
+
+    /// mux-protocol, Review Texts And Anchors: A review on request and
+    /// Passages of a rendered view; viewer-annotations, The Review.
+    #[tokio::test]
+    async fn a_review_is_built_from_the_record_and_the_windows_rendered_passages() {
+        let text = "# Plan\n\nRetry **three** times.\n\nShip it.\n";
+        let store = store_showing(&[(
+            "v1",
+            json!({"kind": "text", "title": "Plan", "text": text, "format": "markdown"}),
+        )]);
+        annotate(
+            &store,
+            "v1",
+            json!([
+                {"id": "ann-0000000000000001", "kind": "comment", "body": "Why three?",
+                 "target": {"view": "rendered", "quote": "Retry three times.", "prefix": "Plan\n", "suffix": "\nShip", "startLine": 3, "endLine": 3}},
+                {"id": "ann-0000000000000002", "kind": "change", "replacement": "Ship it today.", "target": source_target("Ship it.", 5)},
+            ]),
+        );
+        let (reads, mut rx) = reads(store);
+        reads.review(&json!({
+            "type": "viewer.review", "requestId": "r1", "paneId": "v1", "verdict": "changes_requested",
+            "passages": [
+                {"id": "ann-0000000000000001", "state": "anchored", "startLine": 3, "endLine": 3, "offset": 5},
+                {"id": "ann-00000000000000ff", "state": "lost"},
+            ],
+        }));
+        let reviewed = answer(&mut rx).await;
+        assert_eq!(reviewed["type"], "viewer.reviewed", "{reviewed}");
+        assert_eq!(reviewed["requestId"], "r1");
+        assert!(reviewed["version"].as_str().is_some_and(|version| version.starts_with("t-")));
+        assert_eq!(
+            reviewed["text"],
+            "# Review of Plan\n\nVerdict: changes requested\n\n## #1 Line 3, comment\n> Retry three times.\n\nWhy three?\n\n## #2 Line 5, suggested change\n> Ship it.\n\nReplace with:\n```\nShip it today.\n```\n\nReply in a thread: splitty comments reply v1 <number> '<text>'\n"
+        );
+        assert_eq!(reviewed["count"], 2);
+        assert_eq!(
+            reviewed["entries"].as_array().map(|entries| entries.iter().map(|entry| entry["id"].clone()).collect::<Vec<_>>()),
+            Some(vec![json!("ann-0000000000000001"), json!("ann-0000000000000002")])
+        );
+        assert_eq!(reviewed["entries"][1]["replacement"], "Ship it today.");
+        // Without the window's passage the server anchors in the source,
+        // where the marks of the bold word keep the quote from standing.
+        reads.review(&json!({"type": "viewer.review", "requestId": "r2", "paneId": "v1"}));
+        let reviewed = answer(&mut rx).await;
+        assert!(
+            reviewed["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("## #1 Line 3, comment (passage changed in the current version)")),
+            "{reviewed}"
+        );
+    }
+
+    /// mux-protocol, Review Texts And Anchors: A pane that is gone, A
+    /// malformed request.
+    #[tokio::test]
+    async fn requests_for_another_pane_or_malformed_ones_fail() {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = store_showing(&[
+            ("v1", json!({"kind": "text", "title": "Plan", "text": "x"})),
+            ("v2", file(&dir.path().join("missing.md"))),
+        ]);
+        let (reads, mut rx) = reads(store);
+        reads.review(&json!({"type": "viewer.review", "requestId": "r1", "paneId": "nope"}));
+        let failed = answer(&mut rx).await;
+        assert_eq!((failed["type"].clone(), failed["code"].clone(), failed["requestId"].clone()), (json!("viewer.failed"), json!("unknown_pane"), json!("r1")));
+        reads.anchor(&json!({"type": "viewer.anchor", "requestId": "r2", "paneId": "v2"}));
+        assert_eq!(answer(&mut rx).await["code"], "not_found");
+        for (id, request) in [
+            ("m1", json!({"type": "viewer.anchor", "requestId": "m1"})),
+            ("m2", json!({"type": "viewer.review", "requestId": "m2", "paneId": "v1", "verdict": "maybe"})),
+            ("m3", json!({"type": "viewer.review", "requestId": "m3", "paneId": "v1",
+                          "passages": [{"id": "ann-0000000000000001", "state": "anchored", "startLine": 0, "endLine": 1}]})),
+            ("m4", json!({"type": "viewer.review", "requestId": "m4", "paneId": "v1",
+                          "passages": [{"id": "ann-0000000000000001", "state": "anchored", "startLine": 1, "endLine": 1, "extra": 1}]})),
+            ("m5", json!({"type": "viewer.anchor", "requestId": "m5", "paneId": "v1", "verdict": "approved"})),
+            ("", json!({"type": "viewer.review", "requestId": 5, "paneId": "v1"})),
+        ] {
+            if request["type"] == "viewer.anchor" {
+                reads.anchor(&request);
+            } else {
+                reads.review(&request);
+            }
+            let failed = answer(&mut rx).await;
+            assert_eq!(failed["code"], "invalid", "{request}");
+            assert_eq!(failed["requestId"], id, "{request}");
+        }
     }
 }

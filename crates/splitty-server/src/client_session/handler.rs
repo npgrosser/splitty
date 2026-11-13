@@ -70,7 +70,8 @@ pub(super) async fn run(
         .with_hub_decisions(hub.is_some()),
     );
 
-    // `viewer.read`, answered off this loop (`viewer-panes`).
+    // `viewer.read`, `viewer.anchor` and `viewer.review`, answered off this
+    // loop (`viewer-panes`, `mux-protocol`).
     let viewer_reads = super::viewer::Reads::new(client_state.mux_store.clone(), sender.clone());
 
     // Every foreign event uses the pending notification queue, including
@@ -193,6 +194,8 @@ pub(super) async fn run(
                                 Some("file.decline") => { offers.decline(&client_id, &value).await; continue; }
                                 Some("file.read") => { offers.read(&client_id, &value).await; continue; }
                                 Some(codec::MSG_VIEWER_READ) => { viewer_reads.read(&value); continue; }
+                                Some(codec::MSG_VIEWER_ANCHOR) => { viewer_reads.anchor(&value); continue; }
+                                Some(codec::MSG_VIEWER_REVIEW) => { viewer_reads.review(&value); continue; }
                                 _ => {}
                             }
                             if value["type"]=="mux.op" {

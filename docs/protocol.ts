@@ -1005,7 +1005,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1" and "scratchpad-versions-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1" and "viewer-reviews-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -2967,6 +2967,79 @@ export type ViewerServerMessage =
     };
 // Transient, connection-bound, no generic event ID. A malformed read is
 // answered `invalid` with its requestId when that is a string that fits, else "".
+
+// The anchors and the review of a viewer pane's annotations ("viewer-reviews-v1"
+// in mux.welcome; `mux-protocol`, Review Texts And Anchors). Sent over the
+// connection whose screen holds the pane, beside viewer.read and sharing its
+// four reads in flight; a hub relays them to a host unchanged. The server
+// takes the pane's record after the connection's earlier messages, reads the
+// whole document as viewer.read does, anchors every annotation in its source
+// and answers to the sender only; failures are viewer.failed with the codes
+// above (`unknown_pane`, `not_found`, `too_large`, `busy`, `invalid`, …).
+// Ranges count UTF-8 bytes of the source text: the document's bytes as UTF-8
+// with U+FFFD for invalid sequences, without a leading byte order mark, every
+// CRLF and lone CR as LF. Lines are 1-based; a passage ends on the line of its
+// last character. Transient, connection-bound, no generic event ID.
+export type ViewerReviewClientMessage =
+  | { type: "viewer.anchor"; requestId: string; paneId: string }
+  | {
+      type: "viewer.review";
+      requestId: string;
+      paneId: string;
+      /** The verdict of an answer to a waiting process; none for a review handed to a terminal. */
+      verdict?: "approved" | "changes_requested";
+      /** The window saw the document change while the process waited. */
+      changedDuringWait?: boolean;
+      /**
+       * At most 100: what the window found in its rendered view for
+       * annotations taken from it. Used only for annotations whose target's
+       * view is `rendered`; passages of annotations the pane does not hold
+       * are ignored.
+       */
+      passages?: RenderedPassage[];
+    };
+export interface RenderedPassage {
+  id: string;
+  state: "anchored" | "changed" | "lost";
+  /** 1 to 10,000,000, with anchored and changed only; startLine <= endLine. */
+  startLine?: number;
+  endLine?: number;
+  /** Where it starts in the window's rendered text, ordering passages of one line. */
+  offset?: number;
+  /** A page that names no source lines (a rendered HTML page): the review names none. */
+  unlined?: true;
+}
+export type ViewerReviewServerMessage =
+  | {
+      type: "viewer.anchored";
+      requestId: string;
+      paneId: string;
+      /** The document version anchored in (viewer.read's). */
+      version: string;
+      /** Every annotation, in the order of the pane's list. */
+      anchors: AnnotationAnchor[];
+    }
+  | {
+      type: "viewer.reviewed";
+      requestId: string;
+      paneId: string;
+      version: string;
+      /** The review's Markdown, ending with a line break. */
+      text: string;
+      /** How many annotations it holds. */
+      count: number;
+      /** The user's entries it holds that were not handed over, as mark_sent names them. */
+      entries: MarkSentOp["entries"];
+    };
+export interface AnnotationAnchor {
+  id: string;
+  state: "anchored" | "changed" | "lost" | "general";
+  /** Bytes of the source text and current lines; anchored and changed only. */
+  start?: number;
+  end?: number;
+  startLine?: number;
+  endLine?: number;
+}
 
 // Answers to a wait for a review (`reviewWait` in a viewer record, see
 // POST /api/viewer/review/wait): a window sends viewer.review_answer, and the

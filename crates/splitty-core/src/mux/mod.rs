@@ -13,6 +13,7 @@
 
 #![allow(clippy::collapsible_match)]
 
+mod anchoring;
 mod close_assessment;
 pub mod effect_runner;
 mod effects;
@@ -21,6 +22,7 @@ mod job_reducer;
 pub mod jobs;
 mod ops;
 mod reducer;
+mod review;
 mod state;
 mod store;
 mod templates;
@@ -30,6 +32,12 @@ pub use templates::{
     TEMPLATE_CAPABILITY, TEMPLATE_NAMES_CAPABILITY,
 };
 
+pub use anchoring::{anchor_annotations, viewer_source_text, Anchorer, Passage};
+pub use review::{
+    anchors_in_list_order, build_review, is_pending, review_safe_text, AnchorState,
+    AnnotationAnchor, RenderedPassage, Review, ReviewRequest, Verdict, RENDERED_PASSAGE_LIMIT,
+    VIEWER_REVIEWS_CAPABILITY,
+};
 pub use close_assessment::{
     assess_close, CloseAssessment, CloseLoss, CloseScope, CLOSE_ASSESSMENT_CAPABILITY,
     CLOSE_SCOPE_LIMIT,

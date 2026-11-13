@@ -497,3 +497,50 @@ async fn an_agents_reply_nudges_every_window() {
         "{thread}"
     );
 }
+
+/// mux-protocol, Review Texts And Anchors (A review on request); and
+/// viewer-annotations, The Review (Added just before the review): a window
+/// that saves a comment and asks for the review right after it, over the
+/// WebSocket and over a native carrier, gets a review that holds the comment
+/// with its number.
+#[tokio::test]
+async fn a_review_holds_the_comment_a_window_saved_just_before() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let served = serve(&host, dir.path()).await;
+    for (native, pane) in [(false, "v2"), (true, "v3")] {
+        let mut socket = served.open_local_for(native).await;
+        let welcome = message_type(&mut socket, "mux.welcome").await;
+        assert!(
+            welcome["capabilities"]
+                .as_array()
+                .is_some_and(|all| all.contains(&json!("viewer-reviews-v1"))),
+            "{welcome}"
+        );
+        for op in [
+            json!({"type": "open_viewer", "paneId": "p1", "newPaneId": pane, "placement": "tab",
+                   "source": {"kind": "text", "title": "Plan", "text": "one\nretry three times\n"}}),
+            json!({"type": "put_annotations", "paneId": pane, "annotations": [
+                {"id": "ann-00000000000000aa", "kind": "comment", "body": "Split it."},
+                {"id": "ann-00000000000000bb", "kind": "comment", "body": "Why three?",
+                 "target": {"view": "source", "quote": "retry three times", "prefix": "one\n", "suffix": "\n",
+                            "startLine": 1, "endLine": 1}},
+            ]}),
+        ] {
+            send(&mut socket, json!({"type": "mux.op", "screenId": "s1", "op": op})).await;
+        }
+        send(&mut socket, json!({"type": "viewer.anchor", "requestId": "a1", "paneId": pane})).await;
+        send(&mut socket, json!({"type": "viewer.review", "requestId": "r1", "paneId": pane})).await;
+        let [anchored, reviewed] = <[Value; 2]>::try_from(
+            messages(&mut socket, &["viewer.anchored", "viewer.reviewed"]).await,
+        )
+        .expect("both answers");
+        assert_eq!(anchored["anchors"][1]["startLine"], 2, "{anchored}");
+        assert_eq!(
+            reviewed["text"],
+            format!("# Review of Plan\n\n## General comments\n\n- #1 Split it.\n\n## #2 Line 2, comment\n> retry three times\n\nWhy three?\n\nReply in a thread: splitty comments reply {pane} <number> '<text>'\n"),
+            "native: {native}"
+        );
+        assert_eq!(reviewed["count"], 2);
+    }
+}

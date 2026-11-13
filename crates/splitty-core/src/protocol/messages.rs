@@ -54,6 +54,11 @@ pub const SCREEN_PLACEMENT_CAPABILITY: &str = "screen-placement-v1";
 
 /// One chunk of a viewer pane's document (`viewer-panes`, Reading A Document).
 pub const MSG_VIEWER_READ: &str = "viewer.read";
+/// The anchors of a viewer pane's annotations in its document's source
+/// (`mux-protocol`, Review Texts And Anchors).
+pub const MSG_VIEWER_ANCHOR: &str = "viewer.anchor";
+/// A viewer pane's review (`mux-protocol`, Review Texts And Anchors).
+pub const MSG_VIEWER_REVIEW: &str = "viewer.review";
 /// A window's answer to a process waiting for a review of a viewer pane
 /// (`mux-protocol`, Review Answers).
 pub const MSG_VIEWER_REVIEW_ANSWER: &str = "viewer.review_answer";
