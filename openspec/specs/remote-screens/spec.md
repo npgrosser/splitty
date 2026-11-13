@@ -315,7 +315,7 @@ While a host is connected, the native workspace SHALL report its stored director
 - **AND** an unconfirmed or refused terminate and a detach leave the screen listed
 
 ### Requirement: Screen Default Names Per Host
-The client SHALL assign new default screen names as `Screen N`, using the smallest unused positive integer independently for local screens and for each remote host. Known unopened screens on that same host SHALL reserve their names. Existing server, restored and user-selected names SHALL remain unchanged. A pending default name that collides with a newly discovered screen on its host SHALL be adjusted before creation; names on another host SHALL NOT affect it.
+A new screen SHALL get its default name `Screen N` from the server that holds it, using the smallest unused positive integer among that server's screens, so local screens and each remote host count independently and a host's screens the window does not show reserve their names. The window SHALL create a host's screen without a name when the host announces `screen-names-v1` (see `mux-protocol`, Server-Chosen Screen Names). Existing server, restored and user-selected names SHALL remain unchanged; names on another host SHALL NOT affect a host's choice.
 
 #### Scenario: Independent numbering
 - **WHEN** local screens already use Screen 1 through Screen 3 and a new screen is created on an otherwise empty remote host
@@ -323,11 +323,15 @@ The client SHALL assign new default screen names as `Screen N`, using the smalle
 
 #### Scenario: Existing unopened screen
 - **WHEN** a host already has an unopened Screen 1 and a new screen is created there
-- **THEN** the new screen takes the smallest available number on that host
+- **THEN** the host names the new screen Screen 2
 
 #### Scenario: Existing names survive
 - **WHEN** a workspace restores a screen named Default or a user-selected name
 - **THEN** that name is preserved
+
+#### Scenario: Older host
+- **WHEN** a new screen is created on a host whose `mux.welcome` lacks `screen-names-v1`
+- **THEN** the window sends `create_screen` named with the smallest `Screen N` that neither the host's screens it knows nor the window's screens of that host use at that moment, and does not rename the screen later
 
 ### Requirement: Host Group Order API
 `GET /api/remote/host-order` SHALL return `{version:1,order:[target,…]}`. `PUT` SHALL accept `{order:[target,…]}`, replace the stored order and return it, storing a repeated target once; an invalid target, a value that is not a list of strings, more than 256 targets or an unknown field SHALL be rejected without a change. Both SHALL require the ordinary API authentication and origin checks, SHALL NOT be on the control socket and SHALL NOT connect to a host.
