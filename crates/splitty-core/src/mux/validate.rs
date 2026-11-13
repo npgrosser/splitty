@@ -67,9 +67,9 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
             validate_move_float(state, floating_id)?;
             validate_float_bounds(bounds)
         }
-        ScreenOp::SetScratchpad { session_id, text } => {
-            validate_set_scratchpad(state, session_id, text)
-        }
+        ScreenOp::SetScratchpad {
+            session_id, text, ..
+        } => validate_set_scratchpad(state, session_id, text),
         ScreenOp::OpenViewer {
             pane_id,
             placement,
@@ -986,6 +986,7 @@ mod tests {
                 status: SessionStatus::Running,
                 exit_code: None,
                 scratchpad: String::new(),
+                scratchpad_version: 0,
             },
         );
         ScreenState {

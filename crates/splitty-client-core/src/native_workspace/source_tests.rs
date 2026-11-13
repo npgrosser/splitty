@@ -285,6 +285,7 @@ async fn close_assessment_reaches_the_window_with_the_scratchpad_of_an_idle_pane
             splitty_core::mux::ScreenOp::SetScratchpad {
                 session_id: route.session_id.as_str().into(),
                 text: "send after the build".into(),
+                if_version: None,
             },
         )
         .unwrap();

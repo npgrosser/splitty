@@ -214,7 +214,7 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
             get(get_server_settings).patch(patch_server_settings),
         )
         // Templates
-        .route("/api/templates", get(list_templates))
+        .route("/api/templates", get(list_templates).post(create_template))
         .route("/api/templates/extract/screen", post(extract_template))
         .route(
             "/api/templates/{slug}",
@@ -552,6 +552,12 @@ async fn save_template(
     Json(body): Json<Value>,
 ) -> Response {
     operations::save_template(&state.service, slug, body)
+        .await
+        .into_response()
+}
+
+async fn create_template(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
+    operations::create_template(&state.service, body)
         .await
         .into_response()
 }

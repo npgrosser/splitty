@@ -116,6 +116,8 @@ impl MuxHandler {
             capabilities.push(splitty_core::mux::CLOSE_ASSESSMENT_CAPABILITY.into());
             capabilities.push(splitty_core::protocol::notice::CAPABILITY.into());
             capabilities.push(splitty_core::mux::SCREEN_NAMES_CAPABILITY.into());
+            capabilities.push(splitty_core::template::NAMES_CAPABILITY.into());
+            capabilities.push(splitty_core::mux::SCRATCHPAD_VERSIONS_CAPABILITY.into());
         }
         self.send_event(&event).await;
     }
@@ -991,6 +993,57 @@ mod tests {
         assert!(
             others.lock().unwrap().is_empty(),
             "answers reach no other window"
+        );
+    }
+
+    /// session-scratchpad, Saving Through The Window (Save based on an older
+    /// version) and templates, Saved Template Names: the welcome announces
+    /// both, and a save based on an older version is refused to its window.
+    #[tokio::test]
+    async fn a_scratchpad_save_based_on_an_older_version_is_refused() {
+        let store = Arc::new(Store::new());
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("screen-1")),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        let session = store
+            .session_id_for_pane(&PaneId::from("p1"))
+            .expect("session");
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "window", &others);
+        handler.send_welcome().await;
+        let welcome = next_text(&mut sent);
+        for capability in ["template-names-v1", "scratchpad-versions-v1"] {
+            assert!(
+                welcome["capabilities"]
+                    .as_array()
+                    .is_some_and(|all| all.iter().any(|c| c == capability)),
+                "{capability}"
+            );
+        }
+        let save = |text: &str, version: u64| {
+            serde_json::json!({"type":"mux.op","screenId":"screen-1","op":{
+                "type":"set_scratchpad","sessionId":session.as_str(),"text":text,"ifVersion":version
+            }})
+            .to_string()
+        };
+        assert!(handler.try_handle(&save("first", 0)).await);
+        assert!(sent.try_recv().is_err(), "nothing for an accepted save");
+        assert!(handler.try_handle(&save("stale", 0)).await);
+        let refused = next_text(&mut sent);
+        assert_eq!(refused["type"], "mux.op_failed");
+        assert_eq!(refused["op"], "set_scratchpad");
+        let entry = &store
+            .get_screen(&ScreenId::from("screen-1"))
+            .unwrap()
+            .sessions[&session];
+        assert_eq!(
+            (entry.scratchpad.as_str(), entry.scratchpad_version),
+            ("first", 1)
         );
     }
 

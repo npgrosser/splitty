@@ -547,12 +547,20 @@ fn build_spec(
         generate_id()
     };
 
+    // A blank command is no command (`terminal-sessions`, Startup Command
+    // and Restore Mode).
+    let command = if opts.command.trim().is_empty() {
+        ""
+    } else {
+        opts.command.as_str()
+    };
+
     // Build restore-mode args. For a normal/replay start, preserve the
     // profile argv exactly as separate arguments.
     let (command_args, inject_command) = if argv.is_some() {
         (Vec::new(), false)
     } else {
-        build_command_args(&shell, &opts.shell_args, &opts.command, &opts.restore_mode)
+        build_command_args(&shell, &opts.shell_args, command, &opts.restore_mode)
     };
 
     // Determine working directory
@@ -583,7 +591,7 @@ fn build_spec(
             &shell,
             &command_args,
             integration_dir_str.as_deref(),
-            opts.command.is_empty() || matches!(opts.restore_mode.as_str(), "" | "replay"),
+            command.is_empty() || matches!(opts.restore_mode.as_str(), "" | "replay"),
         )
     };
 
@@ -701,7 +709,7 @@ fn build_spec(
         managed,
         buffer_size: scrollback_size(),
     };
-    let inject = (inject_command && !opts.command.is_empty()).then(|| opts.command.clone());
+    let inject = (inject_command && !command.is_empty()).then(|| command.to_owned());
     Ok((spec, inject))
 }
 
@@ -2781,6 +2789,21 @@ mod spec_tests {
         assert_eq!(env("SPLITTY_SOCK"), Some("/run/splitty/daemon.sock"));
         assert_eq!(env("SPLITTY_TOKEN"), None, "never a credential");
         assert!(spec.cwd.is_some(), "the home directory by default");
+    }
+
+    /// terminal-sessions, Startup Command and Restore Mode (Blank command):
+    /// whitespace starts the shell as no command does, in every mode.
+    #[test]
+    fn a_blank_command_starts_the_shell_as_no_command_does() {
+        let (plain, _) = build_spec(&opts(), None, None).expect("spec");
+        for mode in ["", "replay", "shell", "close"] {
+            let mut blank = opts();
+            blank.command = "  \t ".into();
+            blank.restore_mode = mode.into();
+            let (spec, inject) = build_spec(&blank, None, None).expect("spec");
+            assert_eq!(inject, None, "{mode}");
+            assert_eq!(spec.argv, plain.argv, "{mode}");
+        }
     }
 
     #[test]

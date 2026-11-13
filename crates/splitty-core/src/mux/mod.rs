@@ -44,7 +44,8 @@ pub use state::{
     SessionStatus, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState, WorkspaceState,
     ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
     ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, MARK_SENT_LIMIT, REPLY_COUNT_LIMIT,
-    REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
+    REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, SCRATCHPAD_VERSIONS_CAPABILITY, VIEWER_PATH_LIMIT,
+    VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
 pub use store::Store;
 
@@ -172,6 +173,9 @@ pub enum MuxError {
 
     #[error("a scratchpad holds at most {limit} bytes, got {got}")]
     ScratchpadTooLong { limit: usize, got: usize },
+
+    #[error("the scratchpad changed: version {current}, the save was based on {expected}")]
+    ScratchpadChanged { expected: u64, current: u64 },
 
     #[error(
         "a viewer's file path must be absolute and at most {} bytes long, and hold no leading //, backslash, . or .. segment, control character or invisible formatting character",

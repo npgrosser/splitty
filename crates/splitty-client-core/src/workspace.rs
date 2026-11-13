@@ -1256,6 +1256,7 @@ impl ScreenModel {
             &ScreenOp::SetScratchpad {
                 session_id: SessionId::from(session_id),
                 text,
+                if_version: None,
             },
         )
     }

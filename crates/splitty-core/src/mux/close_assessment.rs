@@ -265,6 +265,7 @@ mod tests {
             status,
             exit_code: None,
             scratchpad: String::new(),
+            scratchpad_version: 0,
         }
     }
 

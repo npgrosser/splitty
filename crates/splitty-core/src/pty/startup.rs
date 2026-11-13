@@ -11,8 +11,9 @@ use std::path::Path;
 /// - `argv` is the list of arguments to pass to the shell (empty for normal start)
 /// - `inject` indicates whether the command should be typed into the PTY after the
 ///   shell prompt appears
+/// A command that is empty or holds only whitespace is no command.
 pub fn build_startup(shell: &str, command: &str, restore_mode: &str) -> (Vec<String>, bool) {
-    if command.is_empty() {
+    if command.trim().is_empty() {
         return (Vec::new(), false);
     }
 
@@ -127,6 +128,16 @@ mod tests {
             argv,
             vec!["-i", "-c", "eval \"$1\"", "/usr/bin/bash", "make build",]
         );
+    }
+
+    #[test]
+    fn test_blank_command_is_no_command() {
+        for mode in ["", "replay", "shell", "close"] {
+            assert_eq!(
+                build_startup("/bin/bash", " \t ", mode),
+                (Vec::new(), false)
+            );
+        }
     }
 
     #[test]

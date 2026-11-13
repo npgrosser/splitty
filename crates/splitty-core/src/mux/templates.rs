@@ -177,7 +177,8 @@ pub(super) fn apply_template(
         let pane_id = request.pane_ids[&name].clone();
         let session_id = SessionId::with_prefix("sess");
         let present = |value: &str| (!value.is_empty()).then(|| value.to_owned());
-        let command = present(&pane.command);
+        // A blank command is no command (`templates`, Template Launch Data).
+        let command = (!pane.command.trim().is_empty()).then(|| pane.command.clone());
         let cwd = present(&template_directory(&pane.dir, &request.root));
         let shell_profile_id = present(&pane.shell_profile);
         let restore_mode = command.as_ref().map(|_| {
@@ -215,6 +216,7 @@ pub(super) fn apply_template(
                 status: SessionStatus::Starting,
                 exit_code: None,
                 scratchpad: String::new(),
+                scratchpad_version: 0,
             },
         );
         effects.push(Effect::SpawnSession {
@@ -538,6 +540,34 @@ mod tests {
         );
         assert_eq!(effects.len(), 3);
         assert_eq!(screen.sessions.len(), 3);
+    }
+
+    /// templates, Template Launch Data (Blank command): no command, no
+    /// restore mode, as for a pane without a command.
+    #[test]
+    fn a_blank_template_command_launches_no_command() {
+        let mut r = request();
+        r.template.panes.get_mut("a").unwrap().command = "   ".into();
+        let (state, effects) =
+            apply_template(WorkspaceState::default(), "screen".into(), r).unwrap();
+        let Some(Effect::SpawnSession {
+            command,
+            restore_mode,
+            ..
+        }) = effects.iter().find(
+            |effect| matches!(effect, Effect::SpawnSession { pane_id, .. } if pane_id.as_str() == "pane-a"),
+        )
+        else {
+            panic!("spawn of pane-a")
+        };
+        assert_eq!((command, restore_mode), (&None, &None));
+        let screen = &state.screens[&ScreenId::from("screen")];
+        let session = screen.panes[&PaneId::from("pane-a")]
+            .session_id
+            .as_ref()
+            .unwrap();
+        assert_eq!(screen.sessions[session].command, None);
+        assert_eq!(screen.sessions[session].restore_mode, None);
     }
 
     #[test]

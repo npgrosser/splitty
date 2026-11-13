@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use super::model::{validate, Summary, Template};
-use super::store::TemplateStore;
+use super::store::{Saved, TemplateStore};
 use super::TemplateError;
 
 /// File-system backed template store using YAML files.
@@ -33,6 +33,44 @@ impl FileStore {
             return Err(TemplateError::InvalidSlug(slug.into()));
         }
         Ok(())
+    }
+
+    /// Write `template` completely to a temporary file of its own beside
+    /// `<slug>.yaml`, which no listing reads.
+    fn write_temporary(&self, slug: &str, template: &Template) -> Result<PathBuf, TemplateError> {
+        crate::config::ensure_private_dir(&self.dir)?;
+        let data = serde_yaml::to_string(template)?;
+        let tmp = self
+            .dir
+            .join(format!(".{slug}.{}.tmp", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&tmp, data.as_bytes())?;
+        Ok(tmp)
+    }
+}
+
+/// Make the complete file `tmp` appear as `path` only when `path` does not
+/// exist; `Ok(false)` when it does. A file system without hard links gets an
+/// exclusive create of `path` instead.
+fn publish_if_absent(tmp: &std::path::Path, path: &std::path::Path) -> std::io::Result<bool> {
+    match std::fs::hard_link(tmp, path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => {
+            use std::io::Write;
+            let mut file = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Ok(false)
+                }
+                Err(error) => return Err(error),
+            };
+            file.write_all(&std::fs::read(tmp)?)?;
+            Ok(true)
+        }
     }
 }
 
@@ -91,15 +129,37 @@ impl TemplateStore for FileStore {
         Self::validate_slug(slug)?;
         validate(template)?;
 
-        crate::config::ensure_private_dir(&self.dir)?;
-
-        let data = serde_yaml::to_string(template)?;
+        let tmp = self.write_temporary(slug, template)?;
         let path = self.dir.join(format!("{slug}.yaml"));
-        let tmp = self.dir.join(format!("{slug}.yaml.tmp"));
-
-        std::fs::write(&tmp, data.as_bytes())?;
-        std::fs::rename(&tmp, &path)?;
+        std::fs::rename(&tmp, &path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })?;
         Ok(())
+    }
+
+    fn save_named(&self, template: &Template, overwrite: bool) -> Result<Saved, TemplateError> {
+        let slug = super::file_name(&template.name).ok_or(TemplateError::InvalidName)?;
+        Self::validate_slug(&slug)?;
+        validate(template)?;
+        let tmp = self.write_temporary(&slug, template)?;
+        let path = self.dir.join(format!("{slug}.yaml"));
+        let result = match publish_if_absent(&tmp, &path) {
+            Ok(true) => Ok(Saved {
+                slug,
+                replaced: false,
+            }),
+            Ok(false) if overwrite => std::fs::rename(&tmp, &path)
+                .map(|()| Saved {
+                    slug,
+                    replaced: true,
+                })
+                .map_err(TemplateError::from),
+            Ok(false) => Err(TemplateError::Exists(slug)),
+            Err(error) => Err(error.into()),
+        };
+        // Gone after a rename; the hard link or exclusive copy leaves it.
+        let _ = std::fs::remove_file(&tmp);
+        result
     }
 
     fn delete(&self, slug: &str) -> Result<(), TemplateError> {
@@ -152,6 +212,76 @@ mod tests {
             },
             floating: vec![],
         }
+    }
+
+    /// templates, Saved Template Names: saved if absent, refused when the
+    /// file exists, replaced with `overwrite`; no temporary file stays.
+    #[test]
+    fn a_save_by_name_refuses_an_existing_file_unless_it_overwrites() {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = FileStore::new(dir.path().join("templates"));
+        let mut template = make_test_template();
+        template.name = "v1.2".into();
+        assert_eq!(
+            store.save_named(&template, false).expect("saved"),
+            Saved {
+                slug: "v1-2".into(),
+                replaced: false
+            }
+        );
+        let mut other = make_test_template();
+        other.name = "V1 2".into();
+        assert!(matches!(
+            store.save_named(&other, false),
+            Err(TemplateError::Exists(slug)) if slug == "v1-2"
+        ));
+        assert_eq!(store.get("v1-2").expect("kept").name, "v1.2");
+        assert_eq!(
+            store.save_named(&other, true).expect("replaced"),
+            Saved {
+                slug: "v1-2".into(),
+                replaced: true
+            }
+        );
+        assert_eq!(store.get("v1-2").expect("replaced").name, "V1 2");
+        other.name = "...".into();
+        assert!(matches!(
+            store.save_named(&other, true),
+            Err(TemplateError::InvalidName)
+        ));
+        let files: Vec<_> = std::fs::read_dir(dir.path().join("templates"))
+            .expect("dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert_eq!(files, ["v1-2.yaml"]);
+    }
+
+    /// templates, Concurrent saves of a new name: exactly one wins.
+    #[test]
+    fn concurrent_saves_of_a_new_name_save_once() {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = std::sync::Arc::new(FileStore::new(dir.path().to_path_buf()));
+        let threads: Vec<_> = (0..8)
+            .map(|index| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    let mut template = make_test_template();
+                    template.name = "Race".into();
+                    template.panes.get_mut("main").expect("pane").command = format!("echo {index}");
+                    store.save_named(&template, false)
+                })
+            })
+            .collect();
+        let results: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().expect("thread"))
+            .collect();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .all(|error| matches!(error, TemplateError::Exists(slug) if slug == "race")));
+        assert_eq!(store.list().expect("list").len(), 1);
     }
 
     #[test]

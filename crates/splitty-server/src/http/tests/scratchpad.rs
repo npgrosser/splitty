@@ -28,6 +28,7 @@ fn with_scratchpad(state: &AppState) -> String {
             ScreenOp::SetScratchpad {
                 session_id: session.clone(),
                 text: "ask why the test is skipped".into(),
+                if_version: None,
             },
         )
         .expect("save");
@@ -57,12 +58,20 @@ async fn the_control_api_neither_shows_nor_sets_a_scratchpad() {
         let record = &workspace["screens"]["s1"]["sessions"][session.as_str()];
         assert!(record.is_object(), "{channel}: {workspace}");
         assert!(record.get("scratchpad").is_none(), "{channel}: {record}");
+        assert!(
+            record.get("scratchpadVersion").is_none(),
+            "{channel}: {record}"
+        );
 
         let (code, screen) = exchange(&app, api("GET", "/api/mux/screen/s1", None)).await;
         assert_eq!(code, StatusCode::OK, "{channel}: {screen}");
         let record = &screen["sessions"][session.as_str()];
         assert!(record.is_object(), "{channel}: {screen}");
         assert!(record.get("scratchpad").is_none(), "{channel}: {record}");
+        assert!(
+            record.get("scratchpadVersion").is_none(),
+            "{channel}: {record}"
+        );
 
         let op = json!({"screenId": "s1", "op": {"type": "set_scratchpad", "sessionId": session, "text": "from a pane"}});
         let (code, body) = exchange(&app, api("POST", "/api/mux/op", Some(&op))).await;

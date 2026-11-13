@@ -93,6 +93,7 @@ impl State {
             Operation::TemplateList => op::list_templates(self).await,
             Operation::TemplateGet => op::get_template(self, slug).await,
             Operation::TemplateSave => op::save_template(self, slug, body).await,
+            Operation::TemplateCreate => op::create_template(self, body).await,
             Operation::TemplateDelete => op::delete_template(self, slug).await,
             Operation::BuildGet => op::get_build(self).await.into_reply(),
             Operation::StatsGet => op::get_stats(self).await.into_reply(),

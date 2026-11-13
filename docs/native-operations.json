@@ -146,6 +146,18 @@
       "deadlineMs": 30000
     },
     {
+      "operation": "template.create",
+      "method": "POST",
+      "path": "/api/templates",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
       "operation": "template.delete",
       "method": "DELETE",
       "path": "/api/templates/{slug}",

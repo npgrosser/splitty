@@ -1037,6 +1037,7 @@ async fn native_mutations_are_visible_to_cli_without_exposing_scratchpads() {
             ScreenOp::SetScratchpad {
                 session_id: session.clone(),
                 text: "private draft".into(),
+                if_version: None,
             },
         )
         .expect("scratchpad");
@@ -1874,4 +1875,95 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
     }
     peer.shutdown().await;
     task.await.unwrap().unwrap();
+}
+
+/// templates, Saved Template Names (Same name from both windows, Confirmed
+/// overwrite, Name without letters or digits): `POST /api/templates` and
+/// native `template.create` answer alike, and the server names the file.
+#[tokio::test]
+async fn a_save_by_name_answers_alike_over_http_and_native() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let browser = crate::http::build_router(state.clone());
+    let template = |name: &str| json!({"name": name, "panes": {"shell": {"command": "make"}}, "layout": {"slot": "shell"}});
+    let save =
+        |name: &str, overwrite: bool| json!({"template": template(name), "overwrite": overwrite});
+    assert_eq!(
+        exchange(
+            &browser,
+            api("POST", "/api/templates", Some(&save("v1.2", false)))
+        )
+        .await,
+        (StatusCode::OK, json!({"slug": "v1-2", "replaced": false}))
+    );
+    let taken = (
+        StatusCode::CONFLICT,
+        json!({"error": "template exists", "slug": "v1-2"}),
+    );
+    assert_eq!(
+        native(
+            &state,
+            Operation::TemplateCreate,
+            json!({"body": save("V1 2", false)})
+        )
+        .await,
+        taken
+    );
+    assert_eq!(
+        exchange(
+            &browser,
+            api("POST", "/api/templates", Some(&save("V1 2", false)))
+        )
+        .await,
+        taken
+    );
+    assert_eq!(
+        exchange(&browser, api("GET", "/api/templates/v1-2", None))
+            .await
+            .1["name"],
+        "v1.2",
+        "a refused save changes nothing"
+    );
+    for (channel, answer) in [
+        (
+            "native",
+            native(
+                &state,
+                Operation::TemplateCreate,
+                json!({"body": save("V1 2", true)}),
+            )
+            .await,
+        ),
+        (
+            "HTTP",
+            exchange(
+                &browser,
+                api("POST", "/api/templates", Some(&save("V1 2", true))),
+            )
+            .await,
+        ),
+    ] {
+        assert_eq!(
+            answer,
+            (StatusCode::OK, json!({"slug": "v1-2", "replaced": true})),
+            "{channel}"
+        );
+    }
+    let unnamed = native(
+        &state,
+        Operation::TemplateCreate,
+        json!({"body": save("...", false)}),
+    )
+    .await;
+    assert_eq!(unnamed.0, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        unnamed,
+        exchange(
+            &browser,
+            api("POST", "/api/templates", Some(&save("...", false)))
+        )
+        .await
+    );
+    let (_, list) = exchange(&browser, api("GET", "/api/templates", None)).await;
+    assert_eq!(list, json!([{"slug": "v1-2", "displayName": "V1 2"}]));
 }

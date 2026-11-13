@@ -120,6 +120,7 @@ operations! {
     TemplateList, "template.list", "GET", "/api/templates", Backend, [], MAX_API_BODY, Read, Ordinary;
     TemplateGet, "template.get", "GET", "/api/templates/{slug}", Backend, ["slug"], MAX_API_BODY, Read, Ordinary;
     TemplateSave, "template.save", "POST", "/api/templates/{slug}", Backend, ["slug", "body"], MAX_API_BODY, Mutation, Ordinary;
+    TemplateCreate, "template.create", "POST", "/api/templates", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary;
     TemplateDelete, "template.delete", "DELETE", "/api/templates/{slug}", Backend, ["slug"], MAX_API_BODY, Mutation, Ordinary;
     BuildGet, "build.get", "GET", "/api/build", Backend, [], MAX_API_BODY, Read, Ordinary;
     StatsGet, "stats.get", "GET", "/api/stats", Backend, [], MAX_API_BODY, Read, Ordinary;

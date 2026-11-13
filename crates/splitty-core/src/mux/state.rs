@@ -568,7 +568,20 @@ pub struct SessionEntry {
     /// hands it out.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub scratchpad: String,
+    /// Raised by every accepted save of the scratchpad, so a window can tell
+    /// a snapshot from before its save from one after it
+    /// (`session-scratchpad`, Saving Through The Window).
+    #[serde(default, skip_serializing_if = "is_zero_version")]
+    pub scratchpad_version: u64,
 }
+
+fn is_zero_version(version: &u64) -> bool {
+    *version == 0
+}
+
+/// The server keeps a version per scratchpad and takes `ifVersion` on
+/// `set_scratchpad` (`session-scratchpad`, Concurrent Edits).
+pub const SCRATCHPAD_VERSIONS_CAPABILITY: &str = "scratchpad-versions-v1";
 
 /// The longest scratchpad, in bytes of UTF-8.
 pub const SCRATCHPAD_LIMIT: usize = 64 * 1024;

@@ -257,9 +257,15 @@ pub enum ScreenOp {
     },
 
     /// Replace a session's scratchpad; an empty text clears it. Only a
-    /// window's mux connection sends it (`session-scratchpad`).
+    /// window's mux connection sends it (`session-scratchpad`). With
+    /// `if_version`, only while the scratchpad still has that version.
     #[serde(rename_all = "camelCase")]
-    SetScratchpad { session_id: SessionId, text: String },
+    SetScratchpad {
+        session_id: SessionId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_version: Option<u64>,
+    },
 
     /// Show a document in a viewer pane next to `pane_id`, or around the root
     /// layout without it; no session, no effect (`viewer-panes`). Without

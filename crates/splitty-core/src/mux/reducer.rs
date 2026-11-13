@@ -212,6 +212,7 @@ pub fn reduce_workspace(
                     status: SessionStatus::Starting,
                     exit_code: None,
                     scratchpad: String::new(),
+                    scratchpad_version: 0,
                 },
             );
             screen.root = LayoutNode::new_slot(NodeId::with_prefix("root"), vec![pane_id.clone()]);
@@ -653,13 +654,25 @@ pub fn reduce_screen(
             bounds,
         } => reduce_move_float(state, floating_id, bounds)?,
 
-        ScreenOp::SetScratchpad { session_id, text } => {
+        ScreenOp::SetScratchpad {
+            session_id,
+            text,
+            if_version,
+        } => {
             let mut state = state;
-            state
+            let session = state
                 .sessions
                 .get_mut(&session_id)
-                .ok_or(MuxError::SessionNotFound(session_id))?
-                .scratchpad = text;
+                .ok_or(MuxError::SessionNotFound(session_id))?;
+            // Compare-and-set (`session-scratchpad`, Saving Through The Window).
+            if let Some(expected) = if_version.filter(|v| *v != session.scratchpad_version) {
+                return Err(MuxError::ScratchpadChanged {
+                    expected,
+                    current: session.scratchpad_version,
+                });
+            }
+            session.scratchpad = text;
+            session.scratchpad_version += 1;
             (state, vec![])
         }
 
@@ -782,6 +795,7 @@ fn create_terminal_pane(
             status: SessionStatus::Starting,
             exit_code: None,
             scratchpad: String::new(),
+            scratchpad_version: 0,
         },
     );
 
@@ -2061,6 +2075,7 @@ mod tests {
                 status: SessionStatus::Running,
                 exit_code: None,
                 scratchpad: String::new(),
+                scratchpad_version: 0,
             },
         );
         ScreenState {
@@ -2124,6 +2139,7 @@ mod tests {
                 status: SessionStatus::Running,
                 exit_code: None,
                 scratchpad: String::new(),
+                scratchpad_version: 0,
             },
         );
         sessions.insert(
@@ -2142,6 +2158,7 @@ mod tests {
                 status: SessionStatus::Running,
                 exit_code: None,
                 scratchpad: String::new(),
+                scratchpad_version: 0,
             },
         );
 
@@ -3392,6 +3409,7 @@ mod tests {
                 status: SessionStatus::Running,
                 exit_code: None,
                 scratchpad: String::new(),
+                scratchpad_version: 0,
             },
         );
         state.screens.insert(screen_id.clone(), screen);
@@ -3453,6 +3471,7 @@ mod tests {
             op: ScreenOp::SetScratchpad {
                 session_id: session.clone(),
                 text: text.into(),
+                if_version: None,
             },
         }
     }
@@ -3558,9 +3577,73 @@ mod tests {
         .expect("wire op");
         assert!(matches!(
             op,
-            ScreenOp::SetScratchpad { ref session_id, ref text }
+            ScreenOp::SetScratchpad { ref session_id, ref text, if_version: None }
                 if session_id == &SessionId::from("s1") && text == "hi"
         ));
+        let op: ScreenOp = serde_json::from_value(serde_json::json!({
+            "type": "set_scratchpad", "sessionId": "s1", "text": "hi", "ifVersion": 3
+        }))
+        .expect("wire op");
+        assert!(matches!(
+            op,
+            ScreenOp::SetScratchpad {
+                if_version: Some(3),
+                ..
+            }
+        ));
+    }
+
+    /// session-scratchpad, Saving Through The Window (Save based on an older
+    /// version, Accepted save): every accepted save raises the version, also
+    /// an emptying one; `ifVersion` is compare-and-set.
+    #[test]
+    fn a_scratchpad_save_with_if_version_is_compare_and_set() {
+        let store = two_screen_store();
+        let session = session_of(&store.get_workspace_state(), "scr1", "p1").expect("session");
+        let version = |store: &crate::mux::Store| {
+            store.get_workspace_state().screens[&ScreenId::from("scr1")].sessions[&session]
+                .scratchpad_version
+        };
+        let save = |text: &str, if_version: Option<u64>| Op::ModifyScreen {
+            screen_id: ScreenId::from("scr1"),
+            op: ScreenOp::SetScratchpad {
+                session_id: session.clone(),
+                text: text.into(),
+                if_version,
+            },
+        };
+        assert_eq!(version(&store), 0);
+        let wire = serde_json::to_value(
+            &store.get_workspace_state().screens[&ScreenId::from("scr1")].sessions[&session],
+        )
+        .expect("record");
+        assert!(wire.get("scratchpadVersion").is_none(), "{wire}");
+        store.dispatch(save("first", None)).expect("unconditional");
+        store.dispatch(save("second", Some(1))).expect("current");
+        store.dispatch(save("", Some(2))).expect("emptying");
+        assert_eq!(version(&store), 3);
+        let before = serde_json::to_value(store.get_workspace_state()).expect("state");
+        assert!(matches!(
+            store.dispatch(save("stale", Some(2))),
+            Err(MuxError::ScratchpadChanged {
+                expected: 2,
+                current: 3
+            })
+        ));
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).expect("state"),
+            before,
+            "a refused save changes nothing"
+        );
+        store.dispatch(save("kept", Some(3))).expect("current");
+        let record =
+            &store.get_workspace_state().screens[&ScreenId::from("scr1")].sessions[&session];
+        assert_eq!(
+            (record.scratchpad.as_str(), record.scratchpad_version),
+            ("kept", 4)
+        );
+        let wire = serde_json::to_value(record).expect("record");
+        assert_eq!(wire["scratchpadVersion"], 4);
     }
 
     // ── arrange_panes and move_pane (workspace-model, Arranging the Panes of a

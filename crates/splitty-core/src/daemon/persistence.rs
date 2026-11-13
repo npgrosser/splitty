@@ -205,6 +205,7 @@ mod tests {
                     ScreenOp::SetScratchpad {
                         session_id: session.clone(),
                         text: text.into(),
+                        if_version: None,
                     },
                 )
                 .expect("save");
@@ -224,6 +225,10 @@ mod tests {
         let sessions = &restored.screens[&screen_id].sessions;
         assert_eq!(sessions[&respawned].scratchpad, "send after the build");
         assert_eq!(sessions[&adopted].scratchpad, "check the diff");
+        assert_eq!(
+            sessions[&respawned].scratchpad_version, 1,
+            "the version persists"
+        );
     }
 
     /// server-modes, Workspace Persistence In Daemon Mode (Viewer panes

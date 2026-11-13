@@ -572,6 +572,51 @@ pub(crate) async fn save_template(state: &ServiceState, slug: String, body: Valu
     }
 }
 
+/// A save by name (`templates`, Saved Template Names): the server derives the
+/// file name and checks and saves in one step.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateTemplateRequest {
+    template: splitty_core::template::Template,
+    #[serde(default)]
+    overwrite: bool,
+}
+
+pub(crate) async fn create_template(state: &ServiceState, body: Value) -> Reply {
+    use splitty_core::template::TemplateError;
+    let request: CreateTemplateRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Payload(json!({"error": e.to_string()})),
+            )
+                .into_reply()
+        }
+    };
+    match state
+        .template_store
+        .save_named(&request.template, request.overwrite)
+    {
+        Ok(saved) => Payload(json!({"slug": saved.slug, "replaced": saved.replaced})).into_reply(),
+        Err(TemplateError::Exists(slug)) => (
+            StatusCode::CONFLICT,
+            Payload(json!({"error": "template exists", "slug": slug})),
+        )
+            .into_reply(),
+        Err(e @ (TemplateError::Io(_) | TemplateError::Yaml(_))) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Payload(json!({"error": e.to_string()})),
+        )
+            .into_reply(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Payload(json!({"error": e.to_string()})),
+        )
+            .into_reply(),
+    }
+}
+
 pub(crate) async fn delete_template(state: &ServiceState, slug: String) -> Reply {
     match state.template_store.delete(&slug) {
         Ok(()) => StatusCode::NO_CONTENT.into_reply(),
@@ -636,6 +681,7 @@ pub(crate) async fn post_command(
 pub(crate) fn without_scratchpads(screen: &mut mux::ScreenState) {
     for session in screen.sessions.values_mut() {
         session.scratchpad.clear();
+        session.scratchpad_version = 0;
     }
 }
 

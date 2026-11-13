@@ -137,6 +137,7 @@ pub(super) fn reduce_create_job(
                         status: SessionStatus::Starting,
                         exit_code: None,
                         scratchpad: String::new(),
+                        scratchpad_version: 0,
                     },
                 );
                 screen.revision += 1;
