@@ -126,7 +126,7 @@ pub(super) async fn run(
                 }
             } => {
                 if changed.is_err() { hub_changes = None; }
-                else if sender.try_send_json(&serde_json::json!({"type":"hub.changed"})).is_err() { break; }
+                else if sender.try_send_json(&splitty_core::protocol::session::SessionMessage::HubChanged).is_err() { break; }
             },
             changed = async {
                 match prompt_changes.as_mut() {

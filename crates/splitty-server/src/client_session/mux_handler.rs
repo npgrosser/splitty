@@ -14,6 +14,7 @@ use serde_json::Value;
 use splitty_core::ids::*;
 use splitty_core::mux::effect_runner::{EffectRunner, EnvContext};
 use splitty_core::mux::{Effect, MuxError, Op, ScreenOp, Store};
+use splitty_core::protocol::session::SessionMessage;
 use splitty_core::protocol::ServerEvent;
 
 use super::codec;
@@ -119,13 +120,14 @@ impl MuxHandler {
                     name.into(),
                     root,
                 );
-                let response = match result {
-                    Ok(template) => {
-                        serde_json::json!({"type":"mux.template_extracted", "requestId":request_id, "template":template})
-                    }
-                    Err(error) => {
-                        serde_json::json!({"type":"mux.template_extracted", "requestId":request_id, "error":error.to_string()})
-                    }
+                let (template, error) = match result {
+                    Ok(template) => (Some(template), None),
+                    Err(error) => (None, Some(error.to_string())),
+                };
+                let response = SessionMessage::TemplateExtracted {
+                    request_id: request_id.into(),
+                    template,
+                    error,
                 };
                 if let Err(error) = self.sender.try_send_json(&response) {
                     tracing::debug!(%error, "template extraction response not queued");
@@ -148,13 +150,14 @@ impl MuxHandler {
                             .assess_close(&scope)
                             .map_err(|error| error.to_string())
                     });
-                let response = match result {
-                    Ok(assessment) => serde_json::json!({
-                        "type":"mux.close_assessed", "requestId":request_id, "assessment":assessment
-                    }),
-                    Err(error) => serde_json::json!({
-                        "type":"mux.close_assessed", "requestId":request_id, "error":error
-                    }),
+                let (assessment, error) = match result {
+                    Ok(assessment) => (Some(assessment), None),
+                    Err(error) => (None, Some(error)),
+                };
+                let response = SessionMessage::CloseAssessed {
+                    request_id: request_id.into(),
+                    assessment,
+                    error,
                 };
                 if let Err(error) = self.sender.try_send_json(&response) {
                     tracing::debug!(%error, "close assessment response not queued");

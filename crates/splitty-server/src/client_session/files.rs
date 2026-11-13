@@ -12,7 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
+use splitty_core::protocol::session::{FileClosedReason, SessionMessage};
 use splitty_transport::budget::Lease;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
@@ -49,14 +50,15 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The `reason` of the `file.closed` that tells clients to drop the offer.
-    fn reason(self) -> &'static str {
+    /// The `reason` of the `file.closed` that tells clients to drop the
+    /// offer; a saved offer needs none.
+    fn reason(self) -> Option<FileClosedReason> {
         match self {
-            Outcome::Saved => "saved",
-            Outcome::Declined => "declined",
-            Outcome::Expired => "expired",
-            Outcome::Disconnected => "disconnected",
-            Outcome::Failed => "failed",
+            Outcome::Saved => None,
+            Outcome::Declined => Some(FileClosedReason::Declined),
+            Outcome::Expired => Some(FileClosedReason::Expired),
+            Outcome::Disconnected => Some(FileClosedReason::Disconnected),
+            Outcome::Failed => Some(FileClosedReason::Failed),
         }
     }
 }
@@ -163,8 +165,11 @@ impl Registry {
         let Some(mut offer) = self.offers.remove(id) else {
             return;
         };
-        if outcome != Outcome::Saved {
-            let closed = json!({"type":"file.closed","offerId":id,"reason":outcome.reason()});
+        if let Some(reason) = outcome.reason() {
+            let closed = SessionMessage::FileClosed {
+                offer_id: id.into(),
+                reason,
+            };
             for client in &offer.recipients {
                 if let Some(c) = self.clients.get(client) {
                     let _ = c.sender.try_send_json(&closed);
@@ -278,7 +283,10 @@ impl FileOffers {
         offer.deadline = Instant::now() + READ_IDLE;
         let others: Vec<_> = offer.recipients.drain().filter(|c| c != client).collect();
         offer.recipients.insert(client.into());
-        let taken = json!({"type":"file.closed","offerId":id,"reason":"taken"});
+        let taken = SessionMessage::FileClosed {
+            offer_id: id.into(),
+            reason: FileClosedReason::Taken,
+        };
         for other in others {
             if let Some(c) = registry.clients.get(&other) {
                 let _ = c.sender.try_send_json(&taken);
@@ -460,19 +468,21 @@ impl FileOffers {
             ));
         }
         let id = hex::encode(rand::random::<[u8; 16]>());
-        let expires_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            + ACCEPT_WITHIN.as_millis();
-        let event = json!({
-            "type":"file.offer",
-            "offerId":id,
-            "sessionId":input.session_id,
-            "name":file.name,
-            "size":file.size,
-            "expiresAt":expires_at,
-        });
+        let expires_at = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                + ACCEPT_WITHIN.as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        let event = SessionMessage::FileOffer {
+            offer_id: id.clone(),
+            session_id: input.session_id.clone(),
+            name: file.name.clone(),
+            size: file.size,
+            expires_at,
+        };
         let mut reached = HashSet::new();
         for recipient in recipients {
             if let Some(c) = registry.clients.get(&recipient) {
@@ -574,6 +584,7 @@ pub(super) fn read_at(file: &std::fs::File, offset: u64, len: u64) -> io::Result
 mod tests {
     use super::*;
     use crate::client_session::Message;
+    use serde_json::json;
     use splitty_transport::queue::Receiver;
 
     async fn client(offers: &FileOffers, id: &str, sessions: &[&str]) -> Receiver<Message> {

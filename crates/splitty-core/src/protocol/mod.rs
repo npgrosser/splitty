@@ -1,7 +1,8 @@
 //! WebSocket protocol layer: message types, request dispatching, and notifications.
 //!
 //! The capabilities a server announces in `mux.welcome` are named in
-//! `capability`.
+//! `capability`; the messages for one connection that are not events
+//! (answers, editor requests, file offers) are `session::SessionMessage`.
 //!
 //! Defines the transport-agnostic `Request`/`Response` types, message type constants
 //! for both plain terminal and mux protocols, the `Dispatcher` that routes requests
@@ -17,6 +18,7 @@ mod messages;
 pub mod notice;
 pub mod notify;
 pub mod paste;
+pub mod session;
 pub mod sizing;
 pub mod upload;
 

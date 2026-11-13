@@ -13,8 +13,8 @@
 
 ## 3. Ad hoc server messages
 
-- [ ] 3.1 Unit (splitty-core): golden tests of `hub.changed`, `mux.template_extracted`, `mux.close_assessed`, `editor.request`, `editor.cancelled`, `file.offer` and `file.closed` against the `json!` they were built with.
-- [ ] 3.2 Build them from the types in the server.
+- [x] 3.1 Unit (splitty-core): golden tests of `hub.changed`, `mux.template_extracted`, `mux.close_assessed`, `editor.request`, `editor.cancelled`, `file.offer` and `file.closed` against the `json!` they were built with.
+- [x] 3.2 Build them from the types in the server.
 
 ## 4. Typed decoding in client-core
 

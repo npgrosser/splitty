@@ -1309,9 +1309,9 @@ pub(crate) async fn post_editor_open(
         }
     };
     let kind = if metadata.is_dir() {
-        "folder"
+        crate::client_session::editor::PathKind::Folder
     } else if metadata.is_file() {
-        "file"
+        crate::client_session::editor::PathKind::File
     } else {
         return error((
             400,

@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -13,12 +13,8 @@ use super::sender::ClientSender;
 
 const LIFETIME: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Editor {
-    Vscode,
-    Zed,
-}
+use splitty_core::protocol::session::SessionMessage;
+pub use splitty_core::protocol::session::{Editor, PathKind};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -88,7 +84,9 @@ impl Drop for RequestGuard {
             if let Some(client) = registry.clients.get(&pending.client) {
                 let _ = client
                     .sender
-                    .try_send_json(&json!({"type":"editor.cancelled","requestId":self.id}));
+                    .try_send_json(&SessionMessage::EditorCancelled {
+                        request_id: self.id.clone(),
+                    });
             }
         }
     }
@@ -129,7 +127,9 @@ impl EditorRequests {
                 if let Some(client) = registry.clients.get(id) {
                     let _ = client
                         .sender
-                        .try_send_json(&json!({"type":"editor.cancelled","requestId":key}));
+                        .try_send_json(&SessionMessage::EditorCancelled {
+                            request_id: key.clone(),
+                        });
                 }
                 let _ = p.answer.send(Outcome::Disconnected);
             }
@@ -170,7 +170,11 @@ impl EditorRequests {
         }
     }
 
-    pub async fn request(self: &Arc<Self>, input: OpenRequest, kind: &str) -> Result<(), Failure> {
+    pub async fn request(
+        self: &Arc<Self>,
+        input: OpenRequest,
+        kind: PathKind,
+    ) -> Result<(), Failure> {
         let (id, answer) = self.admit(&input, kind).await?;
         let _guard = RequestGuard {
             requests: self.clone(),
@@ -205,7 +209,7 @@ impl EditorRequests {
     async fn admit(
         &self,
         input: &OpenRequest,
-        kind: &str,
+        kind: PathKind,
     ) -> Result<(String, oneshot::Receiver<Outcome>), Failure> {
         let mut registry = self.registry.lock().expect("registration registry");
         let recipients: Vec<_> = registry
@@ -245,12 +249,22 @@ impl EditorRequests {
         let id = hex::encode(rand::random::<[u8; 16]>());
         let (answer, rx) = oneshot::channel();
         let deadline = Instant::now() + LIFETIME;
-        let expires_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            + LIFETIME.as_millis();
-        let event = json!({"type":"editor.request","requestId":id,"sessionId":input.session_id,"path":input.path,"kind":kind,"editor":input.editor,"expiresAt":expires_at});
+        let expires_at = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                + LIFETIME.as_millis(),
+        )
+        .unwrap_or(u64::MAX);
+        let event = SessionMessage::EditorRequest {
+            request_id: id.clone(),
+            session_id: input.session_id.clone(),
+            path: input.path.clone(),
+            kind,
+            editor: input.editor,
+            expires_at,
+        };
         client
             .sender
             .try_send_json(&event)
@@ -272,6 +286,7 @@ impl EditorRequests {
 mod tests {
     use super::*;
     use crate::client_session::Message;
+    use serde_json::json;
     use splitty_transport::queue::Receiver;
 
     async fn client(requests: &EditorRequests, id: &str, sessions: &[&str]) -> Receiver<Message> {
@@ -304,7 +319,7 @@ mod tests {
         let requests = Arc::new(EditorRequests::default());
         let mut client = client(&requests, "one", &["s1"]).await;
         let work = requests.clone();
-        let task = tokio::spawn(async move { work.request(input(), "file").await });
+        let task = tokio::spawn(async move { work.request(input(), PathKind::File).await });
         let offered = event(&mut client).await;
         task.abort();
         let _ = task.await;
@@ -318,12 +333,19 @@ mod tests {
     async fn routes_only_to_sole_attached_client_and_checks_reply_identity() {
         let requests = EditorRequests::default();
         assert_eq!(
-            requests.admit(&input(), "file").await.expect_err("error").1,
+            requests
+                .admit(&input(), PathKind::File)
+                .await
+                .expect_err("error")
+                .1,
             "no_client"
         );
         let mut a = client(&requests, "a", &["s1"]).await;
         let mut b = client(&requests, "b", &["other"]).await;
-        let (id, mut answer) = requests.admit(&input(), "file").await.expect("admit");
+        let (id, mut answer) = requests
+            .admit(&input(), PathKind::File)
+            .await
+            .expect("admit");
         let message = event(&mut a).await;
         assert_eq!(message["path"], input().path);
         assert_eq!(message["kind"], "file");
@@ -358,7 +380,7 @@ mod tests {
         let _b = client(&requests, "b", &["s1"]).await;
         assert_eq!(
             requests
-                .admit(&input(), "file")
+                .admit(&input(), PathKind::File)
                 .await
                 .expect_err("ambiguous")
                 .1,
@@ -368,11 +390,15 @@ mod tests {
         requests.disconnect("b").await;
         let worker = {
             let r = requests.clone();
-            tokio::spawn(async move { r.request(input(), "file").await })
+            tokio::spawn(async move { r.request(input(), PathKind::File).await })
         };
         let message = event(&mut a).await;
         assert_eq!(
-            requests.admit(&input(), "file").await.expect_err("busy").0,
+            requests
+                .admit(&input(), PathKind::File)
+                .await
+                .expect_err("busy")
+                .0,
             429
         );
         requests
@@ -383,13 +409,17 @@ mod tests {
             .await;
         assert!(worker.await.expect("worker").is_ok());
         assert_eq!(
-            requests.admit(&input(), "file").await.expect_err("rate").0,
+            requests
+                .admit(&input(), PathKind::File)
+                .await
+                .expect_err("rate")
+                .0,
             429
         );
         tokio::time::advance(Duration::from_secs(2)).await;
         let worker = {
             let r = requests.clone();
-            tokio::spawn(async move { r.request(input(), "file").await })
+            tokio::spawn(async move { r.request(input(), PathKind::File).await })
         };
         event(&mut a).await;
         tokio::time::advance(LIFETIME).await;
@@ -405,7 +435,10 @@ mod tests {
         for disconnect in [false, true] {
             let requests = EditorRequests::default();
             let mut a = client(&requests, "a", &["s1"]).await;
-            let (_, answer) = requests.admit(&input(), "folder").await.expect("admit");
+            let (_, answer) = requests
+                .admit(&input(), PathKind::Folder)
+                .await
+                .expect("admit");
             event(&mut a).await;
             if disconnect {
                 requests.disconnect("a").await;
@@ -452,7 +485,7 @@ mod tests {
             receivers.push(client(&requests, &id, &[&session]).await);
             let mut request = input();
             request.session_id = session;
-            let result = requests.admit(&request, "file").await;
+            let result = requests.admit(&request, PathKind::File).await;
             if n < 32 {
                 answers.push(result.expect("admitted"));
             } else {
