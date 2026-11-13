@@ -751,24 +751,43 @@ Native search SHALL distinguish incomplete indexing from completed results. Exce
 - **AND** indexing progress is not reported as completed prematurely
 
 ### Requirement: Deliberate Native Terminal Links
-The native terminal SHALL request the system browser to open an absolute HTTP(S) target only after a deliberate Ctrl/Cmd-left-click without Shift. Retained OSC 8 targets SHALL take precedence over detected text, including when that target is rejected. Output, hover and ordinary selection SHALL NOT open a target. Generic link activation SHALL NOT dispatch file, editor or other URI schemes.
+The native terminal SHALL request the system browser to open an absolute HTTP(S) target only after a left click on it: a single plain click while the program does not request mouse button reports, or a Ctrl/Cmd-left-click without Shift. Retained OSC 8 targets SHALL take precedence over detected text, even when rejected. Output, hover and selection gestures SHALL NOT open a target. Link activation SHALL NOT dispatch file, editor or other URI schemes.
+
+#### Scenario: Plain click opens a link
+- **WHEN** the program in the pane does not request mouse button reports and the user presses and releases the left button without a modifier on a link, without moving away
+- **THEN** the link is underlined with a pointing cursor while hovered, and its target opens once the double-click interval has passed without another press
+- **AND** the click that focuses an unfocused pane opens its link the same way
+
+#### Scenario: Selection gestures do not open
+- **WHEN** a left press on a link drags to select text, belongs to a double or triple click, or holds Shift
+- **THEN** no target opens and the selection behaves as it does on text without a link
+
+#### Scenario: Program takes the mouse
+- **WHEN** the program in the pane requests mouse button reports
+- **THEN** a plain click on a link reaches the program and opens nothing, and the link shows no hover feedback without a modifier
+- **AND** Ctrl/Cmd-click without Shift opens the link at once and sends the program neither mouse bytes nor link text
 
 #### Scenario: Explicit target differs from visible text
 - **WHEN** a terminal cell has an allowed OSC 8 target different from its visible label
-- **THEN** link feedback and deliberate activation use the actual target
+- **THEN** link feedback and activation use the actual target
 - **AND** an invalid or disallowed retained explicit target does not fall back to a URL in its label
 
 #### Scenario: Detected text in retained output
 - **WHEN** a complete absolute HTTP(S) URL occurs in retained terminal text across a soft wrap, including Unicode or wide characters
-- **THEN** deliberate activation opens that complete detected target
+- **THEN** activation opens that complete detected target and hover feedback covers its visible cells
 - **AND** hard line boundaries and adjacent punctuation do not become part of the target
 
 ### Requirement: Current And Bounded Native Link Activation
-Native link resolution SHALL bound inspected output and target storage, reject malformed or incomplete targets and never open a truncated prefix. Activation SHALL validate the current target again at gesture completion. Dragging, release outside the captured cell, changed target, changed view geometry or session, and lifecycle cancellation SHALL prevent opening. An admitted link gesture SHALL remain local to the UI throughout its lifetime.
+Native link resolution SHALL bound inspected output and target storage, reject malformed or incomplete targets and never open a truncated prefix. Activation SHALL validate the current target again at gesture completion. Dragging, release outside the captured cell, changed target, changed view geometry or session, and lifecycle cancellation SHALL prevent opening, also of a click held for the double-click interval. An admitted link gesture SHALL remain local to the UI throughout its lifetime.
 
 #### Scenario: Target changes during a gesture
 - **WHEN** output changes the pressed target before release, or the view scrolls, resizes, hides or loses focus
 - **THEN** release opens nothing and no part of the captured link gesture reaches the session
+
+#### Scenario: Waiting click is revoked
+- **WHEN** a plain click on a link has been released and, before the double-click interval passes, another press arrives, the user types into the terminal, or the view scrolls, resizes, hides, loses focus or shows another session
+- **THEN** the target does not open
+- **AND** output arriving or the pointer leaving the pane in that time does not revoke the click
 
 #### Scenario: Excessive or malformed target
 - **WHEN** a retained explicit target is malformed or exceeds activation limits, or a detected logical line cannot be completely inspected within its limits
@@ -778,7 +797,7 @@ Native link resolution SHALL bound inspected output and target storage, reject m
 #### Scenario: Existing mouse and selection behavior
 - **WHEN** the user performs an ordinary click or Shift selection while a terminal application requests mouse input
 - **THEN** existing application mouse and local selection routes remain available
-- **AND** deliberate link activation sends neither mouse bytes nor link text to the session
+- **AND** Ctrl/Cmd link activation sends neither mouse bytes nor link text to the session
 
 #### Scenario: Oversized terminal control sequence is discarded
 - **WHEN** a hyperlink control sequence exceeds the terminal parser's capture limit and is discarded before creating cell metadata
