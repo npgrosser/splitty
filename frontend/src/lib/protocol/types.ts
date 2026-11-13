@@ -11,8 +11,7 @@
 export type RestoreMode = "replay" | "shell" | "close";
 
 export interface TemplatePane {
-  type?: "terminal" | "webview";
-  url?: string;
+  type?: "terminal";
   command?: string;
   dir?: string;
   restore_mode?: RestoreMode;
@@ -352,7 +351,7 @@ export interface PaneState {
   sessionId?: string;
   title?: string;
   cwd?: string;
-  role?: "terminal" | "webview" | "viewer";
+  role?: "terminal" | "viewer";
   /** A viewer pane's record (`viewer-panes`); absent for other panes and for a malformed record. */
   viewer?: ViewerRecord;
 }

@@ -18,15 +18,9 @@ describe("template intent", () => {
     expect(screen.root.sizes).toEqual([.75, .25]);
     expect(screen.floating[0]).toMatchObject({ id: "template-floating-0", bounds: template.floating![0].bounds });
   });
-  it("skips legacy web panes, collapses their branches and rejects empty or invalid layouts", () => {
-    const mixed = structuredClone(template);
-    mixed.panes.b = { type: "webview", url: "https://example.invalid" };
-    const projected = templateIntent(mixed, "s");
-    expect(projected.skippedWeb).toBe(true);
-    expect(projected.screen.root.type).toBe("slot");
-    expect(Object.keys(projected.op.paneIds)).toEqual(["a", "c"]);
-    mixed.panes.a = mixed.panes.b;
-    expect(() => templateIntent(mixed, "s")).toThrow("no tiled terminals");
+  it("rejects invalid layouts", () => {
+    expect(() => templateIntent({ ...template, layout: { slot: [] } }, "s")).toThrow("Empty template slot");
+    expect(() => templateIntent({ ...template, layout: { split: "horizontal", children: [{ slot: "a" }] } }, "s")).toThrow("Invalid template split");
     expect(() => templateIntent({ ...template, layout: { slot: ["a", "a"] } }, "s")).toThrow();
     expect(() => templateIntent({ ...template, layout: { slot: ["a"] } }, "s")).toThrow("unused");
   });

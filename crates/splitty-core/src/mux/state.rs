@@ -38,9 +38,13 @@ pub enum SessionStatus {
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum PaneRole {
+    /// Also the removed role `webview`, which a host of an earlier release
+    /// may still send (`server-modes`, Workspace Restore On Daemon Start:
+    /// Older host's web pane); a daemon closes such panes when it restores
+    /// `state.json`.
     #[default]
+    #[serde(alias = "webview")]
     Terminal,
-    Webview,
     Viewer,
 }
 

@@ -39,8 +39,8 @@ Line numbers refer to the tree at commit `b495e1c`.
   `connection-scoped-frontend`; before that change the group header's buttons sent no op at all.
 - **Ordinary session status never leaves `starting` in the model** (managed jobs added by `cli-control` do track their lifecycle), and ordinary pane title/cwd/role are never updated after
   creation. The daemon's respawn check for exited sessions (`daemon/mod.rs:108`) therefore never sees live data.
-- The pane role `webview` exists in the model, but no op creates it (`viewer` panes come from `open_viewer` since
-  `splitty-open`).
+- **Fixed in `remove-protocol-leftovers` (2026-11-13): the pane role `webview` existed in the model, but no op
+  created it.** A restored `state.json` closes such panes; a window reads the role from an older host as `terminal`.
 - A job pane placed as a tab does not become its slot's active pane, unlike `new_tab` and `open_viewer` with `tab`
   (found on 2026-11-06).
 

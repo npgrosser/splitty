@@ -3,8 +3,9 @@
 //! A `Template` contains named panes and a recursive `LayoutNode` tree (split/slot).
 //! `SlotPanes` supports both scalar and array deserialization from YAML.
 //! `validate` ensures referential integrity between panes and layout nodes.
+//! Reading a template drops the panes of the removed type `webview`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -12,6 +13,7 @@ use super::TemplateError;
 
 /// A named layout definition with pane commands.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(from = "StoredTemplate")]
 pub struct Template {
     pub name: String,
     pub panes: HashMap<String, Pane>,
@@ -33,13 +35,102 @@ impl Template {
     }
 }
 
+/// A template as it is read, from its file, a request or a host's answer.
+#[derive(Deserialize)]
+struct StoredTemplate {
+    name: String,
+    panes: HashMap<String, Pane>,
+    layout: LayoutNode,
+    #[serde(default)]
+    floating: Vec<FloatingEntry>,
+}
+
+/// The type of the web panes templates held before they were removed.
+const LEGACY_WEB_PANE: &str = "webview";
+
+impl From<StoredTemplate> for Template {
+    /// Drop legacy web panes with their layout references (`templates`,
+    /// Template Validation): an emptied slot goes, and a split left with one
+    /// child is that child in the split's place.
+    fn from(stored: StoredTemplate) -> Self {
+        let StoredTemplate {
+            name,
+            mut panes,
+            layout,
+            floating,
+        } = stored;
+        let web: HashSet<String> = panes
+            .iter()
+            .filter(|(_, pane)| pane.pane_type == LEGACY_WEB_PANE)
+            .map(|(name, _)| name.clone())
+            .collect();
+        if web.is_empty() {
+            return Self {
+                name,
+                panes,
+                layout,
+                floating,
+            };
+        }
+        panes.retain(|name, _| !web.contains(name));
+        Self {
+            name,
+            panes,
+            // Nothing left: an empty node, which validation refuses.
+            layout: without_panes(layout, &web).unwrap_or_default(),
+            floating: floating
+                .into_iter()
+                .filter_map(|entry| {
+                    Some(FloatingEntry {
+                        layout: without_panes(entry.layout, &web)?,
+                        bounds: entry.bounds,
+                    })
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `node` without references to `names`; `None` when nothing is left.
+fn without_panes(node: LayoutNode, names: &HashSet<String>) -> Option<LayoutNode> {
+    if let Some(SlotPanes(slot)) = node.slot {
+        let kept: Vec<_> = slot
+            .into_iter()
+            .filter(|name| !names.contains(name))
+            .collect();
+        if kept.is_empty() {
+            return None;
+        }
+        return Some(LayoutNode {
+            slot: Some(SlotPanes(kept)),
+            ..node
+        });
+    }
+    let before = node.children.len();
+    let mut children: Vec<_> = node
+        .children
+        .into_iter()
+        .filter_map(|child| without_panes(child, names))
+        .collect();
+    if children.len() == before {
+        return Some(LayoutNode { children, ..node });
+    }
+    match children.len() {
+        0 => None,
+        1 => children.pop().map(|child| LayoutNode {
+            ratio: node.ratio,
+            ..child
+        }),
+        _ => Some(LayoutNode { children, ..node }),
+    }
+}
+
 /// Defines a terminal pane's command and working directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pane {
+    /// Empty or `terminal`; reading a template drops `webview` panes.
     #[serde(default, skip_serializing_if = "String::is_empty", rename = "type")]
     pub pane_type: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -54,7 +145,7 @@ pub struct Pane {
 ///
 /// A leaf has a `slot` (list of pane references).
 /// A branch has `split` ("horizontal" or "vertical") and `children`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct LayoutNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<SlotPanes>,
@@ -139,16 +230,10 @@ pub fn validate(template: &Template) -> Result<(), TemplateError> {
         ));
     }
     for (name, pane) in &template.panes {
-        if !pane.pane_type.is_empty() && pane.pane_type != "terminal" && pane.pane_type != "webview"
-        {
+        if !pane.pane_type.is_empty() && pane.pane_type != "terminal" {
             return Err(TemplateError::Validation(format!(
                 "pane {name:?} has invalid type {:?}",
                 pane.pane_type
-            )));
-        }
-        if pane.pane_type == "webview" && pane.url.is_empty() {
-            return Err(TemplateError::Validation(format!(
-                "webview pane {name:?} must have a url"
             )));
         }
         if !pane.restore_mode.is_empty()
@@ -296,7 +381,6 @@ layout:
                     "editor".into(),
                     Pane {
                         pane_type: "terminal".into(),
-                        url: String::new(),
                         command: "vim".into(),
                         dir: String::new(),
                         restore_mode: String::new(),
@@ -307,7 +391,6 @@ layout:
                     "term".into(),
                     Pane {
                         pane_type: String::new(),
-                        url: String::new(),
                         command: "bash".into(),
                         dir: String::new(),
                         restore_mode: "replay".into(),
@@ -379,21 +462,64 @@ layout:
         assert!(validate(&t).is_err());
     }
 
+    /// templates, Template Validation (Saved template with a web pane): a
+    /// file of an earlier release reads without its web pane, whose slot
+    /// goes and whose split becomes the remaining terminal's slot.
     #[test]
-    fn test_validate_webview_no_url() {
-        let mut t = make_valid_template();
-        t.panes.insert(
-            "web".into(),
-            Pane {
-                pane_type: "webview".into(),
-                url: String::new(),
-                command: String::new(),
-                dir: String::new(),
-                restore_mode: String::new(),
-                shell_profile: String::new(),
-            },
+    fn reading_drops_legacy_web_panes_and_collapses_their_layout() {
+        let yaml = "\
+name: Mixed
+panes:
+  a:
+    command: vim
+  b:
+    type: webview
+    url: https://example.invalid
+  c: {}
+  d:
+    type: webview
+    url: https://example.invalid
+layout:
+  split: horizontal
+  ratio: 2
+  children:
+    - slot: a
+      ratio: 3
+    - split: vertical
+      ratio: 1
+      children:
+        - slot: [b, c]
+        - slot: d
+floating:
+  - layout:
+      slot: d
+    bounds: {x: 0.1, y: 0.1, w: 0.5, h: 0.5}
+";
+        let template: Template = serde_yaml::from_str(yaml).unwrap();
+        let mut names: Vec<_> = template.panes.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["a", "c"]);
+        validate(&template).unwrap();
+        let layout = serde_json::to_value(&template.layout).unwrap();
+        assert_eq!(
+            layout,
+            serde_json::json!({"split": "horizontal", "ratio": 2.0, "children": [
+                {"slot": "a", "ratio": 3.0}, {"slot": "c", "ratio": 1.0}]})
         );
-        assert!(validate(&t).is_err());
+        assert!(template.floating.is_empty());
+        let saved = serde_yaml::to_string(&template).unwrap();
+        assert!(
+            !saved.contains("webview") && !saved.contains("url"),
+            "{saved}"
+        );
+        // Only web panes: nothing to apply.
+        let web_only: Template = serde_json::from_value(serde_json::json!({
+            "name": "Web", "panes": {"w": {"type": "webview", "url": "https://example.invalid"}},
+            "layout": {"slot": "w"}
+        }))
+        .unwrap();
+        assert!(web_only.panes.is_empty());
+        assert!(validate(&web_only).is_err());
     }
 
     #[test]

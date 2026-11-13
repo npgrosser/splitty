@@ -661,7 +661,6 @@ impl Workspace {
             match result {
                 Ok(plan) => {
                     direct_layout = plan.replacement_impact().is_none()
-                        && plan.projection().skipped_web_count == 0
                         && plan.projection().pane_names.iter().all(|name| {
                             plan.draft()
                                 .template()
@@ -993,23 +992,13 @@ impl Workspace {
                     root,
                     target,
                 } => {
-                    let terminals = draft
-                        .template()
-                        .panes
-                        .values()
-                        .filter(|pane| pane.pane_type != "webview")
-                        .count();
+                    let terminals = draft.template().panes.len();
                     let direct_layout = *target == TargetChoice::NewScreen
                         && draft
                             .template()
                             .panes
                             .values()
-                            .all(|pane| pane.command.trim().is_empty())
-                        && draft
-                            .template()
-                            .panes
-                            .values()
-                            .all(|pane| pane.pane_type != "webview");
+                            .all(|pane| pane.command.trim().is_empty());
                     body = body.child(format!("{} · {terminals} terminal panes", draft.name()));
                     let current = *target == TargetChoice::CurrentScreen;
                     body = body
@@ -1083,12 +1072,6 @@ impl Workspace {
                         };
                         body = body.child(format!(
                             "Replacing this Screen ends all its terminal sessions (including hidden and floating). {ends}{loading} Layout only also ends them.",
-                        ));
-                    }
-                    if plan.projection().skipped_web_count != 0 {
-                        body = body.child(format!(
-                            "{} web panes will be skipped",
-                            plan.projection().skipped_web_count
                         ));
                     }
                     let commands: Vec<_> = plan

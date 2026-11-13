@@ -112,7 +112,8 @@ function table<T>(value: unknown, entry: (id: string, raw: Raw) => T): Record<st
 }
 
 function paneState(id: string, raw: Raw): PaneState {
-  const role = raw.role === "webview" || raw.role === "viewer" ? raw.role : "terminal";
+  // Every other role, also the removed "webview" an older host may send, is a terminal.
+  const role = raw.role === "viewer" ? "viewer" : "terminal";
   const viewer = role === "viewer" ? viewerRecord(raw.viewer) : undefined;
   return {
     id,

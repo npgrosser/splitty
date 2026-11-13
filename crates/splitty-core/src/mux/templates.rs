@@ -50,7 +50,6 @@ pub struct TemplateProjection {
     pub floating: Vec<FloatingEntry>,
     /// Retained terminal names in the authoritative launch order.
     pub pane_names: Vec<String>,
-    pub skipped_web_count: usize,
 }
 
 impl TemplateProjection {
@@ -104,26 +103,17 @@ pub fn project_template(request: &ApplyTemplate) -> Result<TemplateProjection, M
             });
         }
     }
-    for (name, pane) in &request.template.panes {
-        if pane.pane_type != "webview" && !names.contains(name) {
+    for name in request.template.panes.keys() {
+        if !names.contains(name) {
             return Err(invalid(format!("unused terminal {name}")));
         }
     }
-    let mut pane_names: Vec<_> = names
-        .into_iter()
-        .filter(|name| request.template.panes[name].pane_type != "webview")
-        .collect();
+    let mut pane_names: Vec<_> = names.into_iter().collect();
     pane_names.sort();
     let projection = TemplateProjection {
         root,
         floating,
         pane_names,
-        skipped_web_count: request
-            .template
-            .panes
-            .values()
-            .filter(|pane| pane.pane_type == "webview")
-            .count(),
     };
     let mut unique = HashSet::new();
     for pane_id in projection.pane_ids() {
@@ -246,13 +236,11 @@ pub(super) fn apply_template(
 
 /// Fill omitted IDs once, so the complete operation has stable identities throughout conversion.
 pub(super) fn assign_template_ids(mut request: ApplyTemplate) -> ApplyTemplate {
-    for (name, pane) in &request.template.panes {
-        if pane.pane_type != "webview" {
-            request
-                .pane_ids
-                .entry(name.clone())
-                .or_insert_with(|| PaneId::with_prefix("pane"));
-        }
+    for name in request.template.panes.keys() {
+        request
+            .pane_ids
+            .entry(name.clone())
+            .or_insert_with(|| PaneId::with_prefix("pane"));
     }
     request
 }
@@ -281,15 +269,13 @@ fn project_node(
             if !seen.insert(name.clone()) {
                 return Err(invalid(format!("duplicate pane {name}")));
             }
-            if request.template.panes[name].pane_type != "webview" {
-                panes.push(
-                    request
-                        .pane_ids
-                        .get(name)
-                        .ok_or_else(|| invalid(format!("missing pane ID for {name}")))?
-                        .clone(),
-                );
-            }
+            panes.push(
+                request
+                    .pane_ids
+                    .get(name)
+                    .ok_or_else(|| invalid(format!("missing pane ID for {name}")))?
+                    .clone(),
+            );
         }
         return Ok((!panes.is_empty()).then(|| LayoutNode::Slot {
             id: node_id,
@@ -338,7 +324,7 @@ pub fn extract_template(
 ) -> Result<Template, MuxError> {
     let mut panes = HashMap::new();
     for (id, pane) in &screen.panes {
-        if pane.role == Some(PaneRole::Viewer) || pane.role == Some(PaneRole::Webview) {
+        if pane.role == Some(PaneRole::Viewer) {
             continue;
         }
         let session = pane
@@ -371,7 +357,6 @@ pub fn extract_template(
             id.to_string(),
             template::Pane {
                 pane_type: String::new(),
-                url: String::new(),
                 restore_mode: if command.is_empty() {
                     String::new()
                 } else {
@@ -494,25 +479,17 @@ mod tests {
 
     #[test]
     fn pending_projection_matches_authoritative_layout_without_mutating_the_intent() {
-        let mut r = request();
-        r.template.panes.insert(
-            "web".into(),
-            serde_json::from_value(json!({
-                "type": "webview", "url": "https://example.invalid"
-            }))
-            .unwrap(),
-        );
-        r.template.layout.children[0]
-            .slot
-            .as_mut()
-            .unwrap()
-            .0
-            .push("web".into());
-        // Legacy web panes are pruned and do not need client IDs.
+        let mut intent = serde_json::to_value(request()).unwrap();
+        intent["template"]["panes"]["web"] =
+            json!({"type": "webview", "url": "https://example.invalid"});
+        intent["template"]["layout"]["children"][0]["slot"] = json!(["a", "web"]);
+        // A request's legacy web panes are dropped as it is read and need no
+        // client IDs (`templates`, Template Validation).
+        let r: ApplyTemplate = serde_json::from_value(intent).unwrap();
+        assert!(!r.template.panes.contains_key("web"));
         let before = serde_json::to_value(&r).unwrap();
         let preview = project_template(&r).unwrap();
         assert_eq!(preview.pane_names, ["a", "b", "c"]);
-        assert_eq!(preview.skipped_web_count, 1);
         assert_eq!(
             preview
                 .pane_ids()
@@ -836,9 +813,15 @@ mod tests {
 
     #[test]
     fn template_skips_web_panes_and_extraction_prunes_viewers_with_normalized_sizes() {
-        let mut r = request();
-        r.template.panes.get_mut("b").unwrap().pane_type = "webview".into();
-        r.template.panes.get_mut("b").unwrap().url = "https://example.invalid".into();
+        let web = |names: &[&str]| -> ApplyTemplate {
+            let mut intent = serde_json::to_value(request()).unwrap();
+            for name in names {
+                intent["template"]["panes"][name] =
+                    json!({"type": "webview", "url": "https://example.invalid"});
+            }
+            serde_json::from_value(intent).unwrap()
+        };
+        let r = web(&["b"]);
         let (state, effects) = apply_template(
             WorkspaceState::default(),
             "screen".into(),
@@ -850,12 +833,10 @@ mod tests {
             state.screens[&ScreenId::from("screen")].root,
             LayoutNode::Slot { .. }
         ));
-        r.template.panes.get_mut("a").unwrap().pane_type = "webview".into();
-        r.template.panes.get_mut("a").unwrap().url = "https://example.invalid".into();
         assert!(apply_template(
             WorkspaceState::default(),
             "screen".into(),
-            assign_template_ids(r)
+            assign_template_ids(web(&["a", "b"]))
         )
         .is_err());
         let (mut state, _) =

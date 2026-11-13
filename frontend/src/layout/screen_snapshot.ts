@@ -32,8 +32,8 @@ type Direction = "left" | "right" | "above" | "below";
  * A pane of the role `viewer` is a viewer pane, also from a server without
  * viewer panes or with a missing record: it then says that it cannot be shown,
  * and no terminal session is ever started for it (`viewer-panes`, Viewer
- * Capability). Every other pane is a terminal, whatever role it names: a
- * persisted or legacy mux state may still carry the role "webview", and
+ * Capability). Every other pane is a terminal, whatever role it names: a host
+ * of an earlier release may still send the removed role "webview", and
  * honouring it would rebuild an iframe pane (security review SR-01). A
  * terminal is the fail-safe direction; dockview has no "webview" component.
  */

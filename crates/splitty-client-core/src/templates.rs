@@ -153,12 +153,11 @@ pub(crate) fn validate(template: &Template) -> io::Result<()> {
     {
         return Err(invalid("Template exceeds native presentation limits"));
     }
-    // Use the shared projector for complete applicability, including nested floats
-    // and pruned legacy web panes. Validation IDs are never installed as routes.
+    // Use the shared projector for complete applicability, including nested
+    // floats. Validation IDs are never installed as routes.
     let pane_ids = template
         .panes
         .iter()
-        .filter(|(_, p)| p.pane_type != "webview")
         .enumerate()
         .map(|(i, (name, _))| {
             (

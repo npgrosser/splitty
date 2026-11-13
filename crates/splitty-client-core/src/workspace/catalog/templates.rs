@@ -87,9 +87,6 @@ impl PendingTemplateProjection {
     pub fn floating(&self) -> &[FloatingEntry] {
         &self.plan.projection.floating
     }
-    pub fn skipped_web_count(&self) -> usize {
-        self.plan.projection.skipped_web_count
-    }
     pub fn pane_name(&self, id: &str) -> Option<&str> {
         self.plan.pane_name(id)
     }
@@ -251,9 +248,8 @@ impl SourceWorkspace {
         let pane_ids = draft
             .template()
             .panes
-            .iter()
-            .filter(|(_, pane)| pane.pane_type != "webview")
-            .map(|(name, _)| (name.clone(), PaneId::from(Uuid::new_v4().to_string())))
+            .keys()
+            .map(|name| (name.clone(), PaneId::from(Uuid::new_v4().to_string())))
             .collect();
         let request = mux::ApplyTemplate {
             template: draft.template().clone(),

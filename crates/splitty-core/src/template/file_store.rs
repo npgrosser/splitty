@@ -197,7 +197,6 @@ mod tests {
                 "main".into(),
                 Pane {
                     pane_type: String::new(),
-                    url: String::new(),
                     command: "bash".into(),
                     dir: String::new(),
                     restore_mode: String::new(),

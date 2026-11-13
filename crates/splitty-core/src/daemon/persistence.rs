@@ -5,7 +5,8 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::config::config_dir;
-use crate::mux::WorkspaceState;
+use crate::ids::{PaneId, ScreenId};
+use crate::mux::{Op, ScreenOp, WorkspaceState};
 
 /// Path to the persisted workspace state file.
 pub fn state_path() -> PathBuf {
@@ -58,12 +59,55 @@ fn without_review_waits(state: &WorkspaceState) -> Option<WorkspaceState> {
     Some(state)
 }
 
-/// Load workspace state from disk as it was written. Returns `None` if the
-/// file is missing or corrupt. A starting daemon applies
-/// [`super::restore_jobs`] once it knows which keepers it adopted.
+/// Load workspace state from disk as it was written, without the panes of
+/// the removed role `webview`. Returns `None` if the file is missing or
+/// corrupt. A starting daemon applies [`super::restore_jobs`] once it knows
+/// which keepers it adopted.
 pub fn load_state() -> Option<WorkspaceState> {
-    let data = fs::read_to_string(state_path()).ok()?;
-    serde_json::from_str(&data).ok()
+    parse_state(&fs::read_to_string(state_path()).ok()?)
+}
+
+/// The workspace `data` holds. A pane of the removed role `webview` reads as
+/// a terminal and is then closed like a closed pane: its layout goes and a
+/// Screen left without panes goes with it (`server-modes`, Workspace Restore
+/// On Daemon Start).
+fn parse_state(data: &str) -> Option<WorkspaceState> {
+    let mut state: WorkspaceState = serde_json::from_str(data).ok()?;
+    if !data.contains("\"webview\"") {
+        return Some(state);
+    }
+    let value: serde_json::Value = serde_json::from_str(data).ok()?;
+    let mut legacy = Vec::new();
+    for (screen_id, screen) in value["screens"].as_object().into_iter().flatten() {
+        for (pane_id, pane) in screen["panes"].as_object().into_iter().flatten() {
+            if pane["role"] == "webview" {
+                legacy.push((
+                    ScreenId::from(screen_id.as_str()),
+                    PaneId::from(pane_id.as_str()),
+                ));
+            }
+        }
+    }
+    for (screen_id, pane_id) in legacy {
+        let close = Op::ModifyScreen {
+            screen_id: screen_id.clone(),
+            op: ScreenOp::ClosePane {
+                pane_id: pane_id.clone(),
+                resulting_sizes: None,
+            },
+        };
+        // The effects are not run: a web pane has no session.
+        match crate::mux::reduce_workspace(state.clone(), close) {
+            Ok((closed, _effects)) => state = closed,
+            // A pane the layout does not hold.
+            Err(_) => {
+                if let Some(screen) = state.screens.get_mut(&screen_id) {
+                    screen.panes.remove(&pane_id);
+                }
+            }
+        }
+    }
+    Some(state)
 }
 
 #[cfg(test)]
@@ -305,6 +349,98 @@ mod tests {
                 format: None,
             })
         );
+    }
+
+    /// server-modes, Workspace Restore On Daemon Start (Legacy web pane): a
+    /// `state.json` of an earlier release with `webview` panes restores
+    /// without them, keeping the terminal beside one with its identifiers and
+    /// session; a Screen that held only a web pane goes.
+    #[test]
+    fn restoring_closes_legacy_web_panes_and_keeps_the_terminal_layout() {
+        use crate::ids::{PaneId, ScreenId};
+        use crate::mux::{LayoutNode, ScreenOp};
+
+        let store = Store::new();
+        for (screen, pane) in [("s1", "p1"), ("s2", "w2")] {
+            store
+                .dispatch(Op::CreateScreen {
+                    name: Some(screen.into()),
+                    screen_id: Some(ScreenId::from(screen)),
+                    new_pane_id: Some(PaneId::from(pane)),
+                    shell_profile_id: None,
+                })
+                .expect("screen");
+        }
+        let split: ScreenOp = serde_json::from_value(serde_json::json!({
+            "type": "split_pane", "paneId": "p1", "axis": "horizontal", "newPaneId": "w1",
+        }))
+        .expect("wire op");
+        store
+            .dispatch_screen(&ScreenId::from("s1"), split)
+            .expect("split");
+        // What an earlier release wrote for its web panes: the role, a URL
+        // and no session.
+        let mut written = serde_json::to_value(store.get_workspace_state()).expect("JSON");
+        let session = written["screens"]["s1"]["panes"]["p1"]["sessionId"].clone();
+        for (screen, pane) in [("s1", "w1"), ("s2", "w2")] {
+            let entry = &mut written["screens"][screen];
+            let web_session = entry["panes"][pane]["sessionId"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            entry["sessions"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&web_session);
+            entry["panes"][pane] = serde_json::json!({"id": pane, "role": "webview", "url": "https://example.invalid"});
+        }
+
+        let restored = parse_state(&written.to_string()).expect("readable state");
+        assert!(!restored.screens.contains_key(&ScreenId::from("s2")));
+        let screen = &restored.screens[&ScreenId::from("s1")];
+        assert_eq!(
+            screen.panes.keys().cloned().collect::<Vec<_>>(),
+            [PaneId::from("p1")]
+        );
+        assert_eq!(
+            serde_json::to_value(&screen.panes[&PaneId::from("p1")].session_id).unwrap(),
+            session
+        );
+        assert_eq!(screen.sessions.len(), 1);
+        assert!(
+            matches!(&screen.root, LayoutNode::Slot { pane_ids, .. } if pane_ids == &[PaneId::from("p1")]),
+            "{:?}",
+            screen.root
+        );
+        assert_eq!(restored.screen_order, [ScreenId::from("s1")]);
+        // A file without web panes reads as it was written.
+        let plain = serde_json::to_string(&store.get_workspace_state()).unwrap();
+        assert_eq!(
+            serde_json::to_value(parse_state(&plain).unwrap()).unwrap(),
+            serde_json::to_value(store.get_workspace_state()).unwrap()
+        );
+    }
+
+    /// server-modes, Workspace Restore On Daemon Start (Older host's web pane
+    /// in a window): a snapshot naming the removed role reads as a terminal
+    /// pane in its place.
+    #[test]
+    fn a_snapshot_with_a_web_pane_reads_it_as_a_terminal() {
+        use crate::mux::{PaneRole, ScreenState};
+        let screen: ScreenState = serde_json::from_value(serde_json::json!({
+            "id": "s", "revision": 3,
+            "root": {"type": "split", "id": "n0", "axis": "horizontal", "sizes": [0.5, 0.5], "children": [
+                {"type": "slot", "id": "n1", "paneIds": ["p1"], "activePaneId": "p1"},
+                {"type": "slot", "id": "n2", "paneIds": ["w1"], "activePaneId": "w1"}]},
+            "panes": {"p1": {"id": "p1", "role": "terminal"}, "w1": {"id": "w1", "role": "webview"}},
+            "sessions": {},
+        }))
+        .expect("older host's snapshot");
+        assert_eq!(
+            screen.panes[&crate::ids::PaneId::from("w1")].role,
+            Some(PaneRole::Terminal)
+        );
+        assert_eq!(screen.root.collect_pane_ids().len(), 2);
     }
 
     /// server-modes, Workspace Persistence In Daemon Mode (Annotations

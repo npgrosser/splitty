@@ -111,7 +111,8 @@ interface PaneState {
   sessionId?: string;
   title?: string;
   cwd?: string;
-  role?: "terminal" | "webview" | "viewer";
+  /** A host of an earlier release may still send the removed "webview"; windows read it as "terminal". */
+  role?: "terminal" | "viewer";
   /** Only on a pane of the role "viewer", which has no sessionId. */
   viewer?: ViewerState;
 }
@@ -580,7 +581,8 @@ interface MuxConnect {
 /** Saved YAML/JSON template format (unchanged). Web panes are skipped, never rendered. */
 interface Template {
   name: string;
-  panes: Record<string, { type?: "terminal" | "webview"; url?: string; command?: string; dir?: string; restore_mode?: "replay" | "shell" | "close"; shell_profile?: string }>;
+  /** Reading a template drops panes of the removed type "webview" (with their "url"). */
+  panes: Record<string, { type?: "terminal"; command?: string; dir?: string; restore_mode?: "replay" | "shell" | "close"; shell_profile?: string }>;
   layout: TemplateLayout;
   floating?: { layout: TemplateLayout; bounds: { x: number; y: number; w: number; h: number } }[];
 }

@@ -643,7 +643,6 @@
         // Replacing is sent only after the replacement was agreed to
         // (templates, Confirmed Screen Replacement).
         if (!inNewScreen) intent.op.replaceConfirmed = true;
-        if (intent.skippedWeb) toast.warning("Skipped web panes: open their URLs in your browser instead.");
         if (inNewScreen) {
           if (conn.key === "local") startup.expect(wireId);
           else remoteSyncs.get(conn.key)?.adopt(wireId, approved.name);

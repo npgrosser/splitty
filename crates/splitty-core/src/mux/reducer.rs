@@ -1118,7 +1118,6 @@ fn viewer_origin(state: &ScreenState, anchor: &PaneId) -> Option<PaneId> {
     match pane.role.clone().unwrap_or_default() {
         PaneRole::Terminal => Some(anchor.clone()),
         PaneRole::Viewer => pane.viewer.as_ref()?.origin_pane_id.clone(),
-        PaneRole::Webview => None,
     }
 }
 

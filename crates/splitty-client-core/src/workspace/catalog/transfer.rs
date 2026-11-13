@@ -106,15 +106,11 @@ impl SourceWorkspace {
             .shown()
             .and_then(ScreenModel::snapshot)
             .ok_or_else(|| invalid("Screen snapshot not loaded"))?;
-        let pane = screen
+        screen
             .panes
             .get(&PaneId::from(source.pane_id.as_str()))
             .ok_or_else(|| invalid("terminal pane is gone"))?;
-        if find_slot(screen, &source.pane_id).is_none()
-            || pane.role.as_ref().is_some_and(|role| {
-                !matches!(role, mux::PaneRole::Terminal | mux::PaneRole::Viewer)
-            })
-        {
+        if find_slot(screen, &source.pane_id).is_none() {
             return Err(invalid("Tab action requires a canonical terminal pane"));
         }
         Ok(())
