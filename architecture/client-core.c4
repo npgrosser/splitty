@@ -42,7 +42,6 @@ model {
     local_service -> splitty.core.native_api 'Use shared home settings, metadata and theme operation authority'
     appearance -> api_stream 'Read the existing appearance contracts on either platform'
     appearance -> splitty.core.native_api 'Use fixed typed home operations'
-    appearance -> splitty.server.embed 'Read the bundled terminal font from the embedded frontend assets'
     client_shell_profiles -> api_stream 'Read bounded profile snapshots on either platform'
     client_shell_profiles -> splitty.core.native_api 'Use the existing profiles operation'
     client_templates -> api_stream 'Perform identified template jobs on either platform'
