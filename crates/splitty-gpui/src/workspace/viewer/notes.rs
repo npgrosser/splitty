@@ -1,15 +1,21 @@
 //! Annotations of a viewer pane in the window: the list beside the document
 //! with its threads, a field for a comment on the selected passage or for a
 //! reply, the marks in the document, and the review handed to a terminal or
-//! to a waiting process.
+//! to a waiting process. The pane's service anchors the annotations and
+//! writes the review (`viewer.anchor`, `viewer.review`); the window maps the
+//! anchors into its views and hands the review over.
 use super::*;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use splitty_client_core::annotations::{
-    self, Anchor, AnnotationKind, AnnotationReply, AnnotationStatus, ReplyAuthor, Review,
-    ReviewDelivery, ReviewDocument, ReviewForm, SentEntry, Verdict, ViewerAnnotation,
+    self, Anchor, AnnotationKind, AnnotationReply, AnnotationStatus, AnnotationTarget, ReplyAuthor,
+    Review, ReviewDelivery, ReviewForm, SentEntry, Verdict, ViewerAnnotation,
 };
-use splitty_client_core::native_workspace::{AnnotationOp, ReviewAnswered};
+use splitty_client_core::native_workspace::{
+    AnnotationOp, ReviewAnswered, ViewerAnchors, ViewerReviewed,
+};
 use splitty_client_core::workspace::ViewerState;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const NOTES_WIDTH: f32 = 300.;
 const NOTE_TEXT: f32 = 12.;
@@ -28,23 +34,98 @@ fn is_marked(entry: &super::ViewerPane, annotation: &ViewerAnnotation) -> bool {
 
 /// How a review leaves the window.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Handover {
+pub(super) enum Handover {
     Paste,
     File,
     Scratchpad,
 }
 
-/// The passages of a pane's annotations in the document version shown.
+/// The passages of a pane's annotations in the document version shown, and
+/// the order of the list.
 pub(super) struct AnchorCache {
     version: Option<String>,
     annotations: Vec<ViewerAnnotation>,
     pub(super) anchors: Vec<Anchor>,
+    order: Vec<usize>,
 }
+
+/// The service's anchors for one version of the document: by annotation,
+/// with the target each was asked for, and the list's order.
+pub(super) struct Answered {
+    version: String,
+    by_id: HashMap<String, (Option<AnnotationTarget>, Anchor)>,
+    order: Vec<String>,
+}
+
+/// What anchors were last asked for: a version and the annotations' targets.
+#[derive(Clone, PartialEq)]
+pub(super) struct Asked {
+    version: String,
+    targets: Vec<(String, Option<AnnotationTarget>)>,
+}
+
+/// What a review asked of the service is to do once it comes.
+pub(super) enum ReviewPurpose {
+    Copy,
+    Send {
+        target: Option<PaneKey>,
+        how: Handover,
+    },
+    Answer {
+        verdict: Verdict,
+        wait_id: String,
+    },
+}
+
+/// Tokens of the reviews asked for, unique in the window.
+static NEXT_REVIEW: AtomicU64 = AtomicU64::new(1);
 
 /// The entries of a review that wait for the service to accept its verdict.
 pub(super) struct Answering {
     wait_id: String,
     entries: Vec<SentEntry>,
+}
+
+/// The passages of `annotations` as the service's anchors for the version
+/// shown place them: an annotation whose target the service has not anchored
+/// in this version yet is pending, and is listed after the others.
+fn anchor_cache(entry: &super::ViewerPane, annotations: Vec<ViewerAnnotation>) -> AnchorCache {
+    let answered = entry
+        .answered
+        .as_ref()
+        .filter(|answered| Some(&answered.version) == entry.version.as_ref());
+    let anchors: Vec<Anchor> = annotations
+        .iter()
+        .map(|annotation| match (&entry.text, answered) {
+            _ if annotation.target.is_none() => Anchor::General,
+            (None, _) => Anchor::NotFound,
+            (Some(_), Some(answered)) => answered
+                .by_id
+                .get(&annotation.id)
+                .filter(|(target, _)| *target == annotation.target)
+                .map_or(Anchor::Pending, |(_, anchor)| anchor.clone()),
+            (Some(_), None) => Anchor::Pending,
+        })
+        .collect();
+    let place = |index: usize| {
+        answered
+            .filter(|_| anchors[index] != Anchor::Pending)
+            .and_then(|answered| {
+                answered
+                    .order
+                    .iter()
+                    .position(|id| *id == annotations[index].id)
+            })
+            .unwrap_or(usize::MAX)
+    };
+    let mut order: Vec<usize> = (0..annotations.len()).collect();
+    order.sort_by_key(|index| (place(*index), *index));
+    AnchorCache {
+        version: entry.version.clone(),
+        annotations,
+        anchors,
+        order,
+    }
 }
 
 fn excerpt(text: &str, limit: usize) -> String {
@@ -84,9 +165,10 @@ impl Workspace {
     /// Anchor a pane's annotations again when its document or they changed,
     /// and mark the open ones in the rendered view once it is laid out.
     pub(super) fn refresh_viewer_notes(&mut self, key: &PaneKey, cx: &mut Context<Self>) {
-        let Some((_, _, record)) = self.viewer_record(key) else {
+        let Some((_, source, record)) = self.viewer_record(key) else {
             return;
         };
+        let supported = self.viewer_reviews_supported(key);
         let wait = self.viewer_wait(key).map(|(id, _)| id);
         let Some(entry) = self.viewers.get_mut(key) else {
             return;
@@ -99,24 +181,46 @@ impl Workspace {
             Some(_) => {}
             None => entry.wait_seen = None,
         }
+        // The service anchors this version's annotations once for their
+        // targets; an edit of a remark or a reply asks for nothing.
+        let ask = match (&entry.version, &entry.text) {
+            (Some(version), Some(_)) if supported => {
+                let wanted = Asked {
+                    version: version.clone(),
+                    targets: record
+                        .annotations
+                        .iter()
+                        .map(|annotation| (annotation.id.clone(), annotation.target.clone()))
+                        .collect(),
+                };
+                (entry.asked.as_ref() != Some(&wanted)).then_some(wanted)
+            }
+            _ => None,
+        };
+        if let Some(wanted) = ask {
+            if self
+                .commands
+                .try_send(WorkerCommand::new(
+                    source,
+                    Command::AnchorViewer {
+                        pane: key.pane_id().to_owned(),
+                    },
+                ))
+                .is_ok()
+            {
+                if let Some(entry) = self.viewers.get_mut(key) {
+                    entry.asked = Some(wanted);
+                }
+            }
+        }
+        let Some(entry) = self.viewers.get_mut(key) else {
+            return;
+        };
         let stale = entry.anchors.as_ref().is_none_or(|cache| {
             cache.version != entry.version || cache.annotations != record.annotations
         });
         if stale {
-            let text = entry.text.clone();
-            entry.anchors = Some(AnchorCache {
-                version: entry.version.clone(),
-                anchors: record
-                    .annotations
-                    .iter()
-                    .map(|annotation| match &text {
-                        Some(text) => annotations::anchor(text, annotation.target.as_ref()),
-                        None if annotation.target.is_none() => Anchor::General,
-                        None => Anchor::NotFound,
-                    })
-                    .collect(),
-                annotations: record.annotations,
-            });
+            entry.anchors = Some(anchor_cache(entry, record.annotations));
             entry.marks_dirty = true;
             cx.notify();
         }
@@ -637,57 +741,203 @@ impl Workspace {
             .is_some_and(|(entry, (_, version))| *version != entry.version)
     }
 
-    fn viewer_review(&self, key: &PaneKey, verdict: Option<Verdict>) -> Option<Review> {
-        let (_, _, record) = self.viewer_record(key)?;
-        let cache = self.viewers.get(key)?.anchors.as_ref()?;
-        if cache.annotations != record.annotations {
-            return None;
-        }
-        let document = match &record.source {
-            ViewerSource::File { path } => ReviewDocument::File(path),
-            ViewerSource::Text { title, .. } => ReviewDocument::Text(title),
+    /// Whether the pane's service anchors annotations and writes reviews.
+    pub(super) fn viewer_reviews_supported(&self, key: &PaneKey) -> bool {
+        self.model_for_source(key.source_id())
+            .is_some_and(|model| model.reviews_supported())
+    }
+
+    /// The service's anchors for a version of a pane's document arrived;
+    /// they stand for the targets they were asked for.
+    pub(in crate::workspace) fn viewer_anchors(
+        &mut self,
+        update: ViewerAnchors,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self
+            .model_for_source(update.source.source_id())
+            .filter(|model| model.source_token() == update.source)
+            .map(|model| model.pane_key(&update.pane))
+        else {
+            return;
         };
-        Some(annotations::review(
-            document,
-            key.pane_id(),
-            &record.annotations,
-            &cache.anchors,
+        let Some(entry) = self
+            .viewers
+            .get_mut(&key)
+            .filter(|entry| entry.source == update.source)
+        else {
+            return;
+        };
+        // Anchors of another version wait for the window's own read of it.
+        let (Some(text), Some(asked)) = (entry.text.clone(), entry.asked.as_ref()) else {
+            return;
+        };
+        if entry.version.as_deref() != Some(update.version.as_str())
+            || asked.version != update.version
+        {
+            return;
+        }
+        let targets: HashMap<&str, &Option<AnnotationTarget>> = asked
+            .targets
+            .iter()
+            .map(|(id, target)| (id.as_str(), target))
+            .collect();
+        let mut by_id = HashMap::new();
+        let mut order = Vec::new();
+        for anchor in &update.anchors {
+            let Some(target) = targets.get(anchor.id.as_str()) else {
+                continue;
+            };
+            order.push(anchor.id.clone());
+            by_id.insert(
+                anchor.id.clone(),
+                ((*target).clone(), Anchor::from_wire(anchor, &text)),
+            );
+        }
+        entry.answered = Some(Answered {
+            version: update.version,
+            by_id,
+            order,
+        });
+        entry.anchors = None;
+        self.refresh_viewer_notes(&key, cx);
+        cx.notify();
+    }
+
+    /// Ask the pane's service for its review, to do `purpose` with it.
+    fn viewer_ask_review(&mut self, key: &PaneKey, purpose: ReviewPurpose, cx: &mut Context<Self>) {
+        let Some((_, source, _)) = self.viewer_record(key) else {
+            return;
+        };
+        if !self.viewer_reviews_supported(key) {
+            self.status = "Reviews need a newer Splitty on this host".into();
+            cx.notify();
+            return;
+        }
+        let verdict = match &purpose {
+            ReviewPurpose::Answer { verdict, .. } => Some(*verdict),
+            _ => None,
+        };
+        let changed_during_wait = verdict.is_some() && self.viewer_changed_during_wait(key);
+        let token = NEXT_REVIEW.fetch_add(1, Ordering::Relaxed);
+        if let Some(entry) = self.viewers.get_mut(key) {
+            if let ReviewPurpose::Answer { wait_id, .. } = &purpose {
+                // The banner says the answer is on its way meanwhile.
+                entry.answering = Some(Answering {
+                    wait_id: wait_id.clone(),
+                    entries: Vec::new(),
+                });
+            }
+            entry.reviewing = Some((token, purpose));
+        }
+        let command = Command::ReviewViewer {
+            pane: key.pane_id().to_owned(),
+            token,
             verdict,
-            verdict.is_some() && self.viewer_changed_during_wait(key),
-        ))
+            changed_during_wait,
+        };
+        self.send_captured(source, command, cx);
+    }
+
+    /// The service wrote a review asked for: do with it what it was asked for.
+    pub(in crate::workspace) fn viewer_reviewed(
+        &mut self,
+        reviewed: ViewerReviewed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self
+            .model_for_source(reviewed.source.source_id())
+            .filter(|model| model.source_token() == reviewed.source)
+            .map(|model| model.pane_key(&reviewed.pane))
+        else {
+            return;
+        };
+        let Some(entry) = self
+            .viewers
+            .get_mut(&key)
+            .filter(|entry| entry.source == reviewed.source)
+        else {
+            return;
+        };
+        if entry
+            .reviewing
+            .as_ref()
+            .is_none_or(|(token, _)| *token != reviewed.token)
+        {
+            return;
+        }
+        let Some((_, purpose)) = entry.reviewing.take() else {
+            return;
+        };
+        let review = match reviewed.review {
+            Ok(review) => review,
+            Err(error) => {
+                if matches!(purpose, ReviewPurpose::Answer { .. }) {
+                    entry.answering = None;
+                }
+                self.status = format!(
+                    "The review could not be written: {}",
+                    super::hosts::display(&error)
+                );
+                cx.notify();
+                return;
+            }
+        };
+        match purpose {
+            ReviewPurpose::Copy => {
+                if review.count > 0 {
+                    cx.write_to_clipboard(ClipboardItem::new_string(review.text));
+                    self.status = "Review copied".into();
+                    cx.notify();
+                }
+            }
+            ReviewPurpose::Send { target, how } => {
+                self.viewer_deliver_review(&key, review, target, how, window, cx);
+            }
+            ReviewPurpose::Answer { verdict, wait_id } => {
+                self.viewer_deliver_answer(&key, review, verdict, wait_id, cx);
+            }
+        }
     }
 
     fn viewer_copy_review(&mut self, key: &PaneKey, cx: &mut Context<Self>) {
-        if let Some(review) = self
-            .viewer_review(key, None)
-            .filter(|review| review.count > 0)
-        {
-            cx.write_to_clipboard(ClipboardItem::new_string(review.text));
-            self.status = "Review copied".into();
-            cx.notify();
-        }
+        self.viewer_ask_review(key, ReviewPurpose::Copy, cx);
     }
 
     /// Hand the review to a terminal of the Screen, by default the one the
-    /// viewer came from: pasted, stored as a file whose path is inserted, or
-    /// appended to the terminal's scratchpad. A paste of several lines into
-    /// a program without bracketed paste goes as a file. The review's
-    /// entries are handed over once it went out; a file only once it is
-    /// stored and its path inserted.
+    /// viewer came from, once the service wrote it.
     fn viewer_send_review(
         &mut self,
         key: &PaneKey,
         target: Option<PaneKey>,
         how: Handover,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(entry) = self.viewers.get_mut(key) {
+            entry.sending = false;
+        }
+        self.viewer_ask_review(key, ReviewPurpose::Send { target, how }, cx);
+    }
+
+    /// Hand `review` to a terminal of the Screen: pasted, stored as a file
+    /// whose path is inserted, or appended to the terminal's scratchpad. A
+    /// paste of several lines into a program without bracketed paste goes as
+    /// a file. The review's entries are handed over once it went out; a file
+    /// only once it is stored and its path inserted.
+    fn viewer_deliver_review(
+        &mut self,
+        key: &PaneKey,
+        review: Review,
+        target: Option<PaneKey>,
+        how: Handover,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(review) = self
-            .viewer_review(key, None)
-            .filter(|review| review.count > 0)
-        else {
+        if review.count == 0 {
             return;
-        };
+        }
         let target = target
             .filter(|pane| self.panes.contains_key(pane))
             .or_else(|| {
@@ -701,9 +951,6 @@ impl Workspace {
             cx.notify();
             return;
         };
-        if let Some(entry) = self.viewers.get_mut(key) {
-            entry.sending = false;
-        }
         let terminal = self.panes[&target].terminal.clone();
         let form = match how {
             Handover::Paste => ReviewForm::Paste,
@@ -785,21 +1032,37 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Answer the process that waits for this pane's review.
+    /// Answer the process that waits for this pane's review: the service
+    /// writes the review with the verdict, and it goes to the process.
     fn viewer_answer_review(&mut self, key: &PaneKey, verdict: Verdict, cx: &mut Context<Self>) {
-        let Some((screen, source, record)) = self.viewer_record(key) else {
-            return;
-        };
-        let _ = record;
         let Some((wait_id, _)) = self.viewer_wait(key) else {
             return;
         };
-        let Some(review) = self.viewer_review(key, Some(verdict)) else {
+        self.viewer_ask_review(key, ReviewPurpose::Answer { verdict, wait_id }, cx);
+    }
+
+    fn viewer_deliver_answer(
+        &mut self,
+        key: &PaneKey,
+        review: Review,
+        verdict: Verdict,
+        wait_id: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((screen, source, _)) = self.viewer_record(key) else {
             return;
         };
+        // The process stopped waiting meanwhile, or another wait began.
+        if self.viewer_wait(key).is_none_or(|(id, _)| id != wait_id) {
+            if let Some(entry) = self.viewers.get_mut(key) {
+                entry.answering = None;
+            }
+            cx.notify();
+            return;
+        }
         // An approval without anything pending carries no review.
         let text =
-            (verdict == Verdict::ChangesRequested || review.count > 0).then(|| review.text.clone());
+            (verdict == Verdict::ChangesRequested || review.count > 0).then_some(review.text);
         let command = Command::AnswerReview {
             screen,
             pane: key.pane_id().to_owned(),
@@ -814,6 +1077,7 @@ impl Workspace {
                 entries: review.entries,
             });
         }
+        cx.notify();
     }
 
     /// The service took or refused a verdict: an accepted review's entries
@@ -898,6 +1162,26 @@ impl Workspace {
             .text_size(chrome_rems(NOTE_TEXT))
             .text_color(rgb(colors.text));
         let _ = &record;
+        // An older host neither anchors annotations nor writes the review:
+        // nothing to annotate or answer there until it is updated.
+        if !self.viewer_reviews_supported(key) {
+            return panel
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(chrome_rems(6.))
+                        .p(chrome_rems(10.))
+                        .child("Annotations need a newer Splitty on this host.")
+                        .child(
+                            div()
+                                .text_size(chrome_rems(NOTE_META))
+                                .text_color(rgb(colors.muted))
+                                .child("Update the host on the Hosts page to annotate this document and answer reviews."),
+                        ),
+                )
+                .into_any_element();
+        }
         if let Some((_, title)) = self.viewer_wait(key) {
             let (approve, request) = (key.clone(), key.clone());
             let pending = entry.answering.is_some();
@@ -1076,7 +1360,7 @@ impl Workspace {
             .overflow_y_scroll();
         let mut total = 0;
         if let Some(cache) = cache {
-            let order = annotations::list_order(&cache.annotations, &cache.anchors);
+            let order = &cache.order;
             // The open threads first, the resolved ones after them.
             for open in [true, false] {
                 for index in order
@@ -1106,6 +1390,16 @@ impl Workspace {
                             }
                         }
                         Anchor::NotFound => "Passage not found".to_owned(),
+                        // Until the service anchored it: the lines it was taken from.
+                        Anchor::Pending => match &annotation.target {
+                            Some(target) if target.start_line == target.end_line => {
+                                format!("Line {}", target.start_line)
+                            }
+                            Some(target) => {
+                                format!("Lines {}-{}", target.start_line, target.end_line)
+                            }
+                            None => "General".to_owned(),
+                        },
                     };
                     let mut meta = format!("#{} · {place}", annotation.number);
                     if !open {

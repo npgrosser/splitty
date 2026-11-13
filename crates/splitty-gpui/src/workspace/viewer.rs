@@ -68,6 +68,12 @@ pub(super) struct ViewerPane {
     /// The passage last selected in the rendered view.
     passage: Option<splitty_client_core::annotations::AnnotationTarget>,
     anchors: Option<notes::AnchorCache>,
+    /// The service's anchors for a version of the document, and what they
+    /// were last asked for.
+    answered: Option<notes::Answered>,
+    asked: Option<notes::Asked>,
+    /// A review asked of the service, for what it is to do.
+    reviewing: Option<(u64, notes::ReviewPurpose)>,
     marks_dirty: bool,
     /// The marks in the document are off, but for the chosen thread.
     marks_hidden: bool,
@@ -107,6 +113,9 @@ impl ViewerPane {
             lines: None,
             passage: None,
             anchors: None,
+            answered: None,
+            asked: None,
+            reviewing: None,
             marks_dirty: false,
             marks_hidden: false,
             resolved_marks: false,
@@ -351,7 +360,9 @@ impl Workspace {
                 };
                 entry.version = Some(version);
                 entry.failure = None;
-                let text = || String::from_utf8_lossy(&bytes).into_owned();
+                // The text the service anchors annotations in: its ranges
+                // index this text.
+                let text = || splitty_client_core::annotations::viewer_source_text(&bytes);
                 entry.lines = None;
                 entry.passage = None;
                 entry.text = None;

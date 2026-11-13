@@ -55,7 +55,9 @@ use std::{
     thread,
 };
 use tokio::sync::mpsc;
-pub use viewers::{AnnotationOp, ReviewAnswered, ViewerContent, ViewerUpdate};
+pub use viewers::{
+    AnnotationOp, ReviewAnswered, ViewerAnchors, ViewerContent, ViewerReviewed, ViewerUpdate,
+};
 
 /// One immutable intent captured on its assigned source connection.
 pub struct Command {
@@ -172,6 +174,18 @@ pub enum CommandKind {
     ReadViewer {
         pane: String,
         if_version: Option<String>,
+    },
+    /// Ask the pane's server for the anchors of its annotations.
+    AnchorViewer {
+        pane: String,
+    },
+    /// Ask the pane's server for its review, answered under `token`; with a
+    /// verdict, as the answer to a waiting process.
+    ReviewViewer {
+        pane: String,
+        token: u64,
+        verdict: Option<crate::annotations::Verdict>,
+        changed_during_wait: bool,
     },
     CancelForwardOpen {
         request_id: uuid::Uuid,
@@ -442,6 +456,10 @@ pub enum Update {
     Viewer(ViewerUpdate),
     /// The answer to an `AnswerReview`.
     ReviewAnswered(ReviewAnswered),
+    /// The answer to an `AnchorViewer`.
+    ViewerAnchors(ViewerAnchors),
+    /// The answer to a `ReviewViewer`.
+    ViewerReview(ViewerReviewed),
     /// A pane's process asks to open a path in the user's editor.
     Editor(EditorUpdate),
     /// A host reconnected at start did not come up; its Screens stay remembered.

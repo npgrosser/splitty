@@ -4218,6 +4218,8 @@ impl Workspace {
                 }
                 Update::Viewer(update) => self.viewer_update(update, cx),
                 Update::ReviewAnswered(answer) => self.review_answered(answer, cx),
+                Update::ViewerAnchors(update) => self.viewer_anchors(update, cx),
+                Update::ViewerReview(update) => self.viewer_reviewed(update, window, cx),
                 Update::Editor(update) => self.editor_update(update, cx),
                 Update::Shares(list) => {
                     self.shares = Some(list);

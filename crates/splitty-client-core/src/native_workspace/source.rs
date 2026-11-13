@@ -163,6 +163,23 @@ impl SourceRuntime {
             reason: "Connection lost before close completion was confirmed; its outcome is uncertain".into(),
         })
     }
+    /// Whether `pane` is a viewer pane of this connection's Screens.
+    fn viewer_known(&self, window: &WindowWorkspace, pane: &str) -> bool {
+        window.source(self.id()).is_some_and(|model| {
+            model.is_ready()
+                && model
+                    .screen_for(pane)
+                    .and_then(|screen| model.screen(screen))
+                    .and_then(|screen| screen.snapshot())
+                    .is_some_and(|screen| {
+                        screen
+                            .panes
+                            .values()
+                            .any(|entry| entry.id.as_str() == pane && entry.viewer.is_some())
+                    })
+        })
+    }
+
     pub fn command(
         &mut self,
         window: &mut WindowWorkspace,
@@ -307,21 +324,48 @@ impl SourceRuntime {
                 }
                 return Ok(out);
             }
+            CommandKind::AnchorViewer { pane } => {
+                let result = if self.viewer_known(window, pane) {
+                    self.viewers.ask_anchors(&self.client, pane)
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = result {
+                    out.push(Update::Status(error.to_string()));
+                }
+                return Ok(out);
+            }
+            CommandKind::ReviewViewer {
+                pane,
+                token,
+                verdict,
+                changed_during_wait,
+            } => {
+                let result = if self.viewer_known(window, pane) {
+                    self.viewers.ask_review(
+                        &self.client,
+                        pane,
+                        *token,
+                        *verdict,
+                        *changed_during_wait,
+                    )
+                } else {
+                    Err(crate::connection::invalid(
+                        "The document is no longer on its Screen",
+                    ))
+                };
+                if let Err(error) = result {
+                    out.push(Update::ViewerReview(viewers::ViewerReviewed {
+                        source: self.owner,
+                        pane: pane.clone(),
+                        token: *token,
+                        review: Err(error.to_string()),
+                    }));
+                }
+                return Ok(out);
+            }
             CommandKind::ReadViewer { pane, if_version } => {
-                // Only a pane of this connection's Screens with a viewer record.
-                let known = window.source(self.id()).is_some_and(|model| {
-                    model.is_ready()
-                        && model
-                            .screen_for(pane)
-                            .and_then(|screen| model.screen(screen))
-                            .and_then(|screen| screen.snapshot())
-                            .is_some_and(|screen| {
-                                screen.panes.values().any(|entry| {
-                                    entry.id.as_str() == pane && entry.viewer.is_some()
-                                })
-                            })
-                });
-                if known {
+                if self.viewer_known(window, pane) {
                     self.viewers.read(
                         &self.client,
                         self.owner,
@@ -976,6 +1020,8 @@ impl SourceRuntime {
             | CommandKind::AnswerEditorRequest { .. }
             | CommandKind::ResizePane { .. }
             | CommandKind::ReadViewer { .. }
+            | CommandKind::AnchorViewer { .. }
+            | CommandKind::ReviewViewer { .. }
             | CommandKind::TakeOverSize { .. }
             | CommandKind::Visible { .. } => {
                 unreachable!("read-only controls handled before model mutation")
@@ -1039,6 +1085,13 @@ impl SourceRuntime {
                         json["capabilities"]
                             .as_array()
                             .is_some_and(|caps| caps.iter().any(|cap| cap == "viewer-v1")),
+                    );
+                    workspace.set_reviews_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter().any(|cap| cap == mux::VIEWER_REVIEWS_CAPABILITY)
+                        }) && json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter().any(|cap| cap == "viewer-annotations-v1")
+                        }),
                     );
                     workspace.set_close_assessments_supported(
                         json["capabilities"].as_array().is_some_and(|caps| {

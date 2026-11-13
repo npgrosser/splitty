@@ -170,6 +170,14 @@ impl SourceWorkspace {
     pub(crate) fn set_viewers_supported(&mut self, value: bool) {
         self.viewers_supported = value;
     }
+    /// Whether this connection's service keeps annotations and anchors and
+    /// reviews them (`viewer-annotations-v1` and `viewer-reviews-v1`).
+    pub fn reviews_supported(&self) -> bool {
+        self.reviews_supported
+    }
+    pub(crate) fn set_reviews_supported(&mut self, value: bool) {
+        self.reviews_supported = value;
+    }
     pub fn template_apply_pending(&self) -> bool {
         self.pending_template.is_some()
     }

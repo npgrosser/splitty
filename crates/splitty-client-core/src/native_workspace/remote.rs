@@ -683,6 +683,8 @@ impl<'a> Remotes<'a> {
                 | CommandKind::PlaceTab { .. }
                 | CommandKind::SetMaximized { .. }
                 | CommandKind::ReadViewer { .. }
+                | CommandKind::AnchorViewer { .. }
+                | CommandKind::ReviewViewer { .. }
                 | CommandKind::OpenTextViewer { .. }
                 | CommandKind::Annotate { .. }
                 | CommandKind::AnswerReview { .. }

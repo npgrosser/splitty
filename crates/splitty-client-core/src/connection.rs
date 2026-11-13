@@ -656,6 +656,40 @@ impl Client {
         })
     }
 
+    /// Ask for the anchors of a viewer pane's annotations in its document
+    /// (`viewer.anchor`); the answer names the returned request ID.
+    pub fn ask_viewer_anchors(&self, pane_id: &str) -> io::Result<String> {
+        identifier(pane_id)?;
+        let request_id = Uuid::new_v4().to_string();
+        self.command(
+            0,
+            || json!({"type":"viewer.anchor", "requestId":request_id, "paneId":pane_id}),
+        )?;
+        Ok(request_id)
+    }
+
+    /// Ask for a viewer pane's review (`viewer.review`), as the answer to a
+    /// waiting process with `verdict`; the answer names the returned request ID.
+    pub fn ask_viewer_review(
+        &self,
+        pane_id: &str,
+        verdict: Option<crate::annotations::Verdict>,
+        changed_during_wait: bool,
+    ) -> io::Result<String> {
+        identifier(pane_id)?;
+        let request_id = Uuid::new_v4().to_string();
+        self.command(0, || {
+            let mut message =
+                json!({"type":"viewer.review", "requestId":request_id, "paneId":pane_id});
+            if let Some(verdict) = verdict {
+                message["verdict"] = json!(verdict.outcome());
+                message["changedDuringWait"] = json!(changed_during_wait);
+            }
+            message
+        })?;
+        Ok(request_id)
+    }
+
     /// A plain text in a viewer pane to the right of `anchor_pane_id`
     /// (`viewer-panes`, Terminal Selection In A Viewer).
     pub fn open_text_viewer(
