@@ -9,7 +9,7 @@
  */
 
 import type {
-  FloatingEntry, LayoutNode, PaneState, ReviewWait, ScreenInfo, ScreenState, SessionState, ViewerRecord, ViewerSource,
+  CloseAssessment, CloseLoss, FloatingEntry, LayoutNode, PaneState, ReviewWait, ScreenInfo, ScreenState, SessionState, ViewerRecord, ViewerSource,
 } from "../protocol/types.ts";
 import { MAX_NAME, MAX_TITLE, MAX_VALUE, optionalBounded, optionalText, plainText } from "../protocol/untrusted.ts";
 import { SCRATCHPAD_LIMIT } from "../scratchpad.ts";
@@ -201,4 +201,43 @@ function jobState(value: unknown): "starting" | "running" | "stopping" | "exited
     case "starting": case "running": case "stopping": case "exited": case "failed": return value;
     default: return "interrupted";
   }
+}
+
+/** At most this many entries of a close assessment are kept. */
+const MAX_CLOSE_ENTRIES = 1024;
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * The `assessment` of a `mux.close_assessed`; null when it is not one. A
+ * malformed answer never reads as "nothing to lose": the caller then asks
+ * generically.
+ */
+export function closeAssessment(value: unknown): CloseAssessment | null {
+  if (!isRecord(value) || typeof value.confirm !== "boolean" || !Array.isArray(value.entries)) return null;
+  const entries: CloseLoss[] = [];
+  for (const entry of value.entries.slice(0, MAX_CLOSE_ENTRIES)) {
+    if (!isRecord(entry) || typeof entry.screenId !== "string") continue;
+    entries.push({
+      screenId: entry.screenId,
+      paneId: optionalString(entry.paneId),
+      sessionId: optionalString(entry.sessionId),
+      title: optionalText(entry.title, MAX_TITLE),
+      running: entry.running === true,
+      starting: entry.starting === true,
+      scratchpad: entry.scratchpad === true,
+      annotations: count(entry.annotations),
+    });
+  }
+  return {
+    // Any entry that loses something asks, whatever the flag says.
+    confirm: value.confirm || entries.length > 0,
+    running: count(value.running),
+    starting: count(value.starting),
+    scratchpads: count(value.scratchpads),
+    annotations: count(value.annotations),
+    entries,
+  };
 }

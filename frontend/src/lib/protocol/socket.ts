@@ -34,7 +34,7 @@ export interface ConnSocket {
  * connection only, so a socket never queues them for a reconnect.
  */
 export function belongsToConnection(msg: IncomingMessage): boolean {
-  return msg.type === "mux.extract_template" || msg.type === "save_image" || msg.type === "upload" || msg.type === "upload_cancel"
+  return msg.type === "mux.extract_template" || msg.type === "mux.assess_close" || msg.type === "save_image" || msg.type === "upload" || msg.type === "upload_cancel"
     || msg.type.startsWith("file.") || msg.type.startsWith("editor.") || msg.type.startsWith("viewer.");
 }
 

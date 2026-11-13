@@ -11,14 +11,23 @@
     scratchpads?: number;
     /** How many annotations the closing viewer panes hold. */
     annotations?: number;
+    /** How many closing terminals are still starting. */
+    starting?: number;
+    /** The server did not say what closing ends. */
+    unknown?: boolean;
+    /** Closing panes, or replacing the screen by a template. */
+    action?: "close" | "replace";
     onConfirm: () => void;
     onCancel: () => void;
   }
 
-  let { open, processName, applicationTitle, scratchpads = 0, annotations = 0, onConfirm, onCancel }: Props = $props();
+  let { open, processName, applicationTitle, scratchpads = 0, annotations = 0, starting = 0, unknown = false, action = "close", onConfirm, onCancel }: Props = $props();
 
   const title = $derived(
-    processName ? "Close running process?"
+    action === "replace" ? "Replace this screen?"
+    : unknown ? "Close?"
+    : processName ? "Close running process?"
+    : starting > 0 ? "Close a starting terminal?"
     : scratchpads > 0 && annotations > 0 ? "Close and lose scratchpad text and annotations?"
     : annotations > 0 ? "Close and lose annotations?"
     : "Close and lose scratchpad text?",
@@ -49,6 +58,14 @@
     <div class="dialog-panel">
       <h2 class="dialog-title">{title}</h2>
 
+      {#if action === "replace"}
+        <p class="dialog-text">Applying the template ends the screen's terminals and viewers.</p>
+      {/if}
+      {#if unknown}
+        <p class="dialog-text">
+          This server does not say what {action === "replace" ? "replacing" : "closing"} ends: running programs, scratchpad text and annotations may be lost.
+        </p>
+      {/if}
       {#if processName}
         <p class="dialog-text">
           {#if applicationTitle}
@@ -58,6 +75,11 @@
             <strong>{processName}</strong>
             is still running. Close it?
           {/if}
+        </p>
+      {/if}
+      {#if starting > 0}
+        <p class="dialog-text">
+          {starting === 1 ? "A terminal is still starting." : `${starting} terminals are still starting.`}
         </p>
       {/if}
       {#if scratchpads > 0}
@@ -83,7 +105,7 @@
           onclick={onConfirm}
           class="dialog-btn-danger"
         >
-          Close
+          {action === "replace" ? "Replace" : "Close"}
         </button>
       </div>
     </div>

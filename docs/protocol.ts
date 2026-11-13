@@ -588,12 +588,50 @@ interface ApplyTemplateOp {
   paneIds?: Record<string, string>; // windows always supply every terminal's ID
   root?: string;
   createScreen?: boolean; // default false; true requires a new screen ID
+  /** Required when the screen exists and holds panes or sessions; without it
+   * the op fails with mux.op_failed (servers with "close-assessment-v1"). A
+   * window sets it only after the user agreed to the replacement. */
+  replaceConfirmed?: true;
 }
 /** Same read as POST /api/templates/extract/screen and native template.extract.
  * API body omits type/requestId; response is Template (404 missing, 400 empty).
  * Session form keeps browser hub extraction on the screen's own connection. */
 interface ExtractTemplate { type: "mux.extract_template"; requestId: string; screenId: string; name?: string; root?: string }
 interface TemplateExtracted { type: "mux.template_extracted"; requestId: string; template?: Template; error?: string }
+
+/**
+ * What a close would end ("close-assessment-v1", see `mux-protocol`, Close
+ * Assessment). Read-only, answered on the same connection after the messages
+ * sent before it; a hub relays it to a host unchanged. Screens and panes the
+ * server does not have add nothing; a scope naming more than 512 items or of
+ * an unknown kind is answered with `error`.
+ */
+interface AssessClose { type: "mux.assess_close"; requestId: string; scope: CloseScope }
+type CloseScope =
+  | { kind: "panes"; screenId: string; paneIds: string[] }
+  | { kind: "screens"; screenIds: string[] } // also a screen a template replaces
+  | { kind: "workspace" }; // every screen, as the end of an embedded server ends them
+interface CloseAssessed { type: "mux.close_assessed"; requestId: string; assessment?: CloseAssessment; error?: string }
+interface CloseAssessment {
+  /** Whether the window asks first: some entry loses something. */
+  confirm: boolean;
+  running: number; // terminals whose program runs (managed job panes do not count)
+  starting: number; // terminals whose session has not started yet
+  scratchpads: number; // sessions whose scratchpad holds text
+  annotations: number; // annotations of viewer panes, resolved ones included
+  /** Only panes, and sessions of a named screen without a pane, that lose
+   * something: tiled, then floating, then other panes, screen by screen. */
+  entries: {
+    screenId: string;
+    paneId?: string;
+    sessionId?: string;
+    title?: string; // display title, else command, else the pane's title
+    running: boolean;
+    starting: boolean;
+    scratchpad: boolean;
+    annotations: number;
+  }[];
+}
 
 /**
  * Fire-and-forget layout operation. Client has already applied the
@@ -670,6 +708,7 @@ type ClientMessage =
   | MuxDetach
   | MuxOp
   | ExtractTemplate
+  | AssessClose
   | MuxResync
   | MuxWorkspaceResync;
 
@@ -906,7 +945,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1" and "program-status-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1" and "close-assessment-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1121,6 +1160,7 @@ type ServerMessage =
   // Mux
   | MuxWelcome
   | TemplateExtracted
+  | CloseAssessed
   | MuxPaneSpawned
   | MuxOpFailed
   | MuxScreenSnapshot

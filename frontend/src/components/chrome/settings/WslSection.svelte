@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invokeTauri as invoke } from "../../../lib/tauri_invoke.ts";
-  import { runningOnQuit } from "../../../lib/close_guard.ts";
+  import { quitImpact } from "../../../lib/close_guard.ts";
   import SettingsSection from "./SettingsSection.svelte";
   import SettingRow from "./SettingRow.svelte";
 
@@ -47,10 +47,13 @@
     const target = distributions.find((item) => item.name === name);
     if (!target?.supported) return;
 
-    const running = runningOnQuit().length;
-    const warning = running
-      ? `Switch to ${name}? ${running} running process${running === 1 ? "" : "es"} will be stopped when Splitty restarts.`
-      : `Switch to ${name}? Splitty will restart.`;
+    const impact = await quitImpact();
+    const running = impact?.processes.length ?? 0;
+    const warning = impact?.unknown
+      ? `Switch to ${name}? Splitty restarts and ends its local sessions.`
+      : running
+        ? `Switch to ${name}? ${running} running process${running === 1 ? "" : "es"} will be stopped when Splitty restarts.`
+        : `Switch to ${name}? Splitty will restart.`;
     if (!window.confirm(warning)) return;
 
     error = "";

@@ -16,11 +16,11 @@
  */
 
 import type { ConnSocket } from "../protocol/socket.ts";
-import type { MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement, Template } from "../protocol/types.ts";
+import type { CloseAssessment, CloseScope, MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement, Template } from "../protocol/types.ts";
 import { plainText, MAX_TEXT } from "../protocol/untrusted.ts";
 import { ANNOTATIONS_CAPABILITY, ANNOTATION_OPS } from "../viewer/annotations.ts";
 import { VIEWER_CAPABILITY } from "../viewer/limits.ts";
-import { screenList, screenState } from "./incoming.ts";
+import { closeAssessment, screenList, screenState } from "./incoming.ts";
 
 export interface MuxHandlers {
   onWelcome?: (clientId: string, screens: ScreenInfo[]) => void;
@@ -58,6 +58,8 @@ export class PaneSpawnRejectedError extends Error {
   }
 }
 
+export const CLOSE_ASSESSMENT_CAPABILITY = "close-assessment-v1";
+
 export class MuxClient {
   /** From the last `mux.welcome`. */
   clientId: string | undefined;
@@ -75,10 +77,14 @@ export class MuxClient {
   /** Whether the server keeps annotations on viewer panes (`viewer-annotations`, Annotations Capability); without it the window offers none. */
   annotations = false;
   templates = false;
+  /** Whether the server says what a close would end (`mux-protocol`, Close Assessment). */
+  closeAssessments = false;
   private readonly earlySpawns = new Map<string, string | Error>();
   private readonly templatePanes = new Map<string, readonly string[]>();
   private readonly extractions = new Map<string, { resolve: (template: Template) => void; reject: (error: Error) => void }>();
   private extractionCounter = 0;
+  private readonly assessments = new Map<string, { resolve: (assessment: CloseAssessment) => void; reject: (error: Error) => void }>();
+  private assessmentCounter = 0;
 
   // mux-protocol, Client Resynchronization: no `create_screen` before the
   // current connection's `mux.welcome`. Sent earlier, it reaches the server ahead
@@ -101,6 +107,8 @@ export class MuxClient {
         this.earlySpawns.clear();
         this.templatePanes.clear();
         for (const request of this.extractions.values()) request.reject(new Error("Connection ended during template extraction"));
+        this.closeAssessments = false;
+        for (const request of this.assessments.values()) request.reject(new Error("Connection ended during the close assessment"));
         this.disconnectedOnce = true;
         this.heldCreateScreens.length = 0;
         for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection ended before pane creation was confirmed; its outcome is unknown."));
@@ -141,6 +149,26 @@ export class MuxClient {
         reject: error => settle(() => reject(error)),
       });
       this.socket.send({ type: "mux.extract_template", requestId, screenId, name, root });
+    });
+  }
+
+  /**
+   * What closing `scope` would end, from the server (`mux-protocol`, Close
+   * Assessment). Rejects without the capability, on disconnect, on an error
+   * answer and after `timeoutMs`; a caller then asks generically.
+   */
+  assessClose(scope: CloseScope, timeoutMs = 5000): Promise<CloseAssessment> {
+    if (!this.welcomed || !this.closeAssessments) return Promise.reject(Error("This server does not assess closes"));
+    if (this.assessments.size >= 16) return Promise.reject(Error("Too many close assessments"));
+    const requestId = `close-${++this.assessmentCounter}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => settle(() => reject(Error("Close assessment timed out"))), timeoutMs);
+      const settle = (done: () => void) => { clearTimeout(timer); this.assessments.delete(requestId); done(); };
+      this.assessments.set(requestId, {
+        resolve: assessment => settle(() => resolve(assessment)),
+        reject: error => settle(() => reject(error)),
+      });
+      this.socket.send({ type: "mux.assess_close", requestId, scope });
     });
   }
 
@@ -194,6 +222,7 @@ export class MuxClient {
     this.earlySpawns.clear();
     this.templatePanes.clear();
     for (const request of this.extractions.values()) request.reject(Error("Connection disposed"));
+    for (const request of this.assessments.values()) request.reject(Error("Connection disposed"));
     for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection disposed before pane creation was confirmed."));
     this.heldCreateScreens.length = 0;
   }
@@ -212,6 +241,7 @@ export class MuxClient {
         this.viewers = Array.isArray(msg.capabilities) && msg.capabilities.includes(VIEWER_CAPABILITY);
         this.templates = Array.isArray(msg.capabilities) && msg.capabilities.includes("server-templates-v1");
         this.annotations = Array.isArray(msg.capabilities) && msg.capabilities.includes(ANNOTATIONS_CAPABILITY);
+        this.closeAssessments = Array.isArray(msg.capabilities) && msg.capabilities.includes(CLOSE_ASSESSMENT_CAPABILITY);
         this.welcomed = true;
         this.handlers.onWelcome?.(this.clientId ?? "", screens);
         for (const { screenId, op } of this.heldCreateScreens.splice(0)) {
@@ -238,6 +268,15 @@ export class MuxClient {
         if (typeof msg.error === "string") request?.reject(Error(plainText(msg.error, MAX_TEXT)));
         else if (msg.template && typeof msg.template === "object") request?.resolve(msg.template);
         else request?.reject(Error("Invalid extracted template"));
+        break;
+      }
+
+      case "mux.close_assessed": {
+        const request = this.assessments.get(msg.requestId);
+        const assessment = closeAssessment(msg.assessment);
+        if (typeof msg.error === "string") request?.reject(Error(plainText(msg.error, MAX_TEXT)));
+        else if (assessment) request?.resolve(assessment);
+        else request?.reject(Error("Invalid close assessment"));
         break;
       }
 

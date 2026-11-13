@@ -3,7 +3,7 @@
   import { getAuthState, getAuthError, getConnectionError, getConnectionRetryLabel, retryConnection, handleTokenSubmit, initAuth } from "./stores/auth.svelte.ts";
   import { settings } from "./stores/settings.svelte.ts";
   import { getTheme, subscribeTheme } from "./lib/theme.ts";
-  import { onCloseRequest, runningOnQuit, scratchpadsOnQuit, annotationsOnQuit, hostScreensOpen, type CloseRequest, type RunningProcess } from "./lib/close_guard.ts";
+  import { onCloseRequest, quitImpact, hostScreensOpen, type CloseRequest, type QuitImpact } from "./lib/close_guard.ts";
   import { onTemplateApprovalRequest, type TemplateApprovalRequest } from "./lib/template_guard.ts";
   import { warmup } from "./lib/terminal/terminal_mount.ts";
   import { forEachConnection, localConnection } from "./lib/connection/registry.ts";
@@ -30,7 +30,7 @@
   let theme = $state(getTheme());
   let closeRequest = $state<CloseRequest | null>(null);
   /** Quitting while processes run in local panes, which end with the app. */
-  let quitRequest = $state<{ processes: RunningProcess[]; scratchpads: number; annotations: number; hostScreens: boolean; quit: () => void } | null>(null);
+  let quitRequest = $state<(QuitImpact & { hostScreens: boolean; quit: () => void }) | null>(null);
   let templateRequest = $state<TemplateApprovalRequest | null>(null);
   let windowTitle = $state("Splitty");
   let maximized = $state(false);
@@ -90,25 +90,17 @@
       import("@tauri-apps/api/window").then((mod) => {
         const win = mod.getCurrentWindow();
         win.onCloseRequested(async (event) => {
-          const processes = runningOnQuit();
-          const scratchpads = scratchpadsOnQuit();
-          const annotations = annotationsOnQuit();
-          if (processes.length > 0 || scratchpads > 0 || annotations > 0) {
+          // The local server says what its end would end (`mux-protocol`, Close Assessment).
+          const impact = await quitImpact();
+          if (impact) {
             event.preventDefault();
-            quitRequest = { processes, scratchpads, annotations, hostScreens: hostScreensOpen(), quit: () => { win.destroy(); } };
+            quitRequest = { ...impact, hostScreens: hostScreensOpen(), quit: () => { win.destroy(); } };
           }
         }).then((fn) => { quitCleanup = fn; });
       });
-    } else {
-      // Web / PWA: use native beforeunload dialog
-      const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-        if (runningOnQuit().length > 0 || scratchpadsOnQuit() > 0 || annotationsOnQuit() > 0) {
-          e.preventDefault();
-        }
-      };
-      window.addEventListener("beforeunload", handleBeforeUnload);
-      quitCleanup = () => window.removeEventListener("beforeunload", handleBeforeUnload);
     }
+    // A browser tab that closes ends no session: the server keeps running,
+    // and a reload attaches again. It does not ask on beforeunload.
 
     return () => {
       unsubTheme();
@@ -146,8 +138,11 @@
     open={closeRequest !== null}
     processName={closeRequest?.processName ?? ""}
     applicationTitle={closeRequest?.applicationTitle}
+    starting={closeRequest?.starting ?? 0}
     scratchpads={closeRequest?.scratchpads ?? 0}
     annotations={closeRequest?.annotations ?? 0}
+    unknown={closeRequest?.unknown ?? false}
+    action={closeRequest?.action ?? "close"}
     onConfirm={() => {
       closeRequest?.close();
       closeRequest = null;
@@ -159,8 +154,10 @@
     open={quitRequest !== null}
     processes={quitRequest?.processes ?? []}
     hostScreens={quitRequest?.hostScreens ?? false}
+    starting={quitRequest?.starting ?? 0}
     scratchpads={quitRequest?.scratchpads ?? 0}
     annotations={quitRequest?.annotations ?? 0}
+    unknown={quitRequest?.unknown ?? false}
     onConfirm={() => {
       quitRequest?.quit();
       quitRequest = null;

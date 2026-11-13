@@ -5,7 +5,7 @@
   import { subscribeTheme, getTheme } from "../../lib/theme.ts";
   import { getSplittyTheme } from "../../layout/dockview_theme.ts";
   import { updateAllTerminalThemes, applyAllTerminalSettings } from "../../lib/terminal/terminal_mount.ts";
-  import { guardedClose, guardedCloseMultiple } from "../../lib/close_guard.ts";
+  import { guardedClose, guardedCloseMultiple, guardedReplace } from "../../lib/close_guard.ts";
   import {
     toggleDrawer, getDrawerState, setDrawerState, isDrawerPinned, isDrawerDragging, getDrawerLiveWidth,
     isShortcutsOpen, setShortcutsOpen, isCommandPaletteOpen, setCommandPaletteOpen,
@@ -642,13 +642,20 @@
       if (conn.kind === "remote") askUpdate(conn.key);
       return;
     }
-    const admitted = guardedApplyTemplate(template, approved => {
+    const consent = () => {
+      const admitted = guardedApplyTemplate(template, apply);
+      if (!admitted) toast.error("Could not show template command approval. Apply the template again.");
+    };
+    const apply = (approved: Template) => {
       try {
         if (!conn.mux.templates || connectionFor(source.conn) !== conn || !getScreens().some(screen => screen.id === source.id)) {
           throw Error("The template’s target connection changed; apply it again.");
         }
         const wireId = inNewScreen ? newScreenId() : source.wireId;
         const intent = templateIntent(approved, wireId, root, inNewScreen);
+        // Replacing is sent only after the replacement was agreed to
+        // (templates, Confirmed Screen Replacement).
+        if (!inNewScreen) intent.op.replaceConfirmed = true;
         if (intent.skippedWeb) toast.warning("Skipped web panes: open their URLs in your browser instead.");
         if (inNewScreen) {
           if (conn.key === "local") startup.expect(wireId);
@@ -662,8 +669,16 @@
         views.snapshot(conn.key, screen.id, intent.screen);
         conn.mux.sendOp(wireId, intent.op);
       } catch (error) { toast.error(String(error)); }
+    };
+    if (inNewScreen) {
+      consent();
+      return;
+    }
+    // What the replacement ends comes from the screen's server; it asks
+    // first when something would be lost, then the commands are reviewed.
+    void guardedReplace(conn, source.wireId, consent).then((shown) => {
+      if (!shown) toast.error("Could not ask before replacing the screen. Apply the template again.");
     });
-    if (!admitted) toast.error("Could not show template command approval. Apply the template again.");
   }
 
   function handleApplyTemplate(template: Template, root?: string) {

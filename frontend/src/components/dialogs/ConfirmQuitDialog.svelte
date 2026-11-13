@@ -18,11 +18,15 @@
     scratchpads?: number;
     /** How many annotations the local viewer panes hold, which end too. */
     annotations?: number;
+    /** How many local terminals are still starting. */
+    starting?: number;
+    /** The local server did not say what quitting ends. */
+    unknown?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
   }
 
-  let { open, processes, hostScreens, scratchpads = 0, annotations = 0, onConfirm, onCancel }: Props = $props();
+  let { open, processes, hostScreens, scratchpads = 0, annotations = 0, starting = 0, unknown = false, onConfirm, onCancel }: Props = $props();
   const theme = $derived(getTheme());
   const SHOWN = 3;
   const shown = $derived(processes.slice(0, SHOWN));
@@ -62,6 +66,14 @@
           {#if more > 0}<li>and {more} more</li>{/if}
         </ul>
       {/if}
+      {#if unknown}
+        <p class="dialog-text">The local sessions end with Splitty, with their programs, scratchpads and annotations.</p>
+      {/if}
+      {#if starting > 0}
+        <p class="dialog-text">
+          {starting === 1 ? "A terminal that is still starting ends" : `${starting} terminals that are still starting end`} with Splitty.
+        </p>
+      {/if}
       {#if scratchpads > 0}
         <p class="dialog-text">
           {scratchpads === 1 ? "A scratchpad holds text, which ends" : `${scratchpads} scratchpads hold text, which end`} with Splitty.
@@ -78,7 +90,7 @@
       <div class="dialog-actions">
         <button onclick={onCancel} class="dialog-btn">Cancel</button>
         <button onclick={onConfirm} class="dialog-btn-danger">
-          {processes.length + scratchpads + annotations === 1 ? "Quit and end it" : "Quit and end them"}
+          {!unknown && processes.length + starting + scratchpads + annotations === 1 ? "Quit and end it" : "Quit and end them"}
         </button>
       </div>
     </div>

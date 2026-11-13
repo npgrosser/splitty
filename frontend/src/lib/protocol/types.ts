@@ -68,6 +68,7 @@ export interface EditorRequest {
 export type IncomingMessage =
   | { type: "hub.catalog.observe"; target: string; screens: readonly {id: string; name?: string; panes: number}[] }
   | { type: "mux.extract_template"; requestId: string; screenId: string; name: string; root?: string }
+  | { type: "mux.assess_close"; requestId: string; scope: CloseScope }
   | { type: "editor.register" }
   | { type: "editor.result"; requestId: string; outcome: EditorOutcome }
   | { type: "create"; shell?: string; shellProfileId?: string; cols?: number; rows?: number; command?: string; dir?: string; root?: string; restoreMode?: RestoreMode; paneId?: string; screenId?: string }
@@ -260,6 +261,7 @@ export type OutgoingMessage =
   | NotificationMessage
   // Mux
   | { type: "mux.template_extracted"; requestId: string; template?: Template; error?: string }
+  | { type: "mux.close_assessed"; requestId: string; assessment?: CloseAssessment; error?: string }
   | MuxWelcome
   | MuxScreenSnapshot
   | MuxNudge
@@ -480,7 +482,33 @@ export interface JobControlError {
   code: string; error: string; requestId?: string; jobId?: string; screenId?: string; paneId?: string; sessionId?: string;
 }
 
-export interface ApplyTemplateOp { type: "apply_template"; template: Template; paneIds: Record<string, string>; root?: string; createScreen?: boolean }
+export interface ApplyTemplateOp { type: "apply_template"; template: Template; paneIds: Record<string, string>; root?: string; createScreen?: boolean; replaceConfirmed?: true }
+
+/** What a close would end (`mux-protocol`, Close Assessment; docs/protocol.ts). */
+export type CloseScope =
+  | { kind: "panes"; screenId: string; paneIds: string[] }
+  | { kind: "screens"; screenIds: string[] }
+  | { kind: "workspace" };
+
+export interface CloseLoss {
+  screenId: string;
+  paneId?: string;
+  sessionId?: string;
+  title?: string;
+  running: boolean;
+  starting: boolean;
+  scratchpad: boolean;
+  annotations: number;
+}
+
+export interface CloseAssessment {
+  confirm: boolean;
+  running: number;
+  starting: number;
+  scratchpads: number;
+  annotations: number;
+  entries: CloseLoss[];
+}
 
 export type MuxOperation =
   | ApplyTemplateOp

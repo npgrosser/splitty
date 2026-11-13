@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MuxClient, PaneSpawnRejectedError, PaneSpawnedTimeoutError, createScreenOp, openViewerOp, splitOp } from "./mux_client.ts";
 import { FakeSocket } from "../testing/fake_server.ts";
-import type { ScreenInfo, ScreenState } from "../protocol/types.ts";
+import type { CloseScope, ScreenInfo, ScreenState } from "../protocol/types.ts";
 
 let socket: FakeSocket;
 let mux: MuxClient;
@@ -403,4 +403,41 @@ it("extracts on its connection and propagates errors and disconnects", async () 
   const second = mux.extractTemplate("s", "Saved");
   socket.drop();
   await expect(second).rejects.toThrow("Connection ended");
+});
+// mux-protocol, Close Assessment
+it("assesses closes on its connection, keeps a malformed answer from reading as nothing lost, and fails on disconnect", async () => {
+  socket.message({ type: "mux.welcome", capabilities: [], screens: [] });
+  await expect(mux.assessClose({ kind: "workspace" })).rejects.toThrow("does not assess");
+  expect(socket.sentOfType("mux.assess_close")).toEqual([]);
+
+  socket.message({ type: "mux.welcome", capabilities: ["close-assessment-v1"], screens: [] });
+  const scope: CloseScope = { kind: "panes", screenId: "s", paneIds: ["p1"] };
+  const first = mux.assessClose(scope);
+  const request = socket.sentOfType("mux.assess_close")[0];
+  expect(request).toMatchObject({ scope });
+  socket.message({ type: "mux.close_assessed", requestId: request.requestId, assessment: {
+    confirm: true, running: 1, starting: 0, scratchpads: 0, annotations: 0,
+    entries: [{ screenId: "s", paneId: "p1", sessionId: "sess", title: "vim\u0007", running: true, starting: false, scratchpad: false, annotations: 0 }],
+  } });
+  await expect(first).resolves.toMatchObject({ confirm: true, running: 1, entries: [{ paneId: "p1", title: "vim", running: true }] });
+
+  const flagless = mux.assessClose(scope);
+  const second = socket.sentOfType("mux.assess_close")[1];
+  socket.message({ type: "mux.close_assessed", requestId: second.requestId, assessment: {
+    confirm: false, entries: [{ screenId: "s", paneId: "p1", scratchpad: true }],
+  } });
+  await expect(flagless).resolves.toMatchObject({ confirm: true });
+
+  const broken = mux.assessClose(scope);
+  socket.message({ type: "mux.close_assessed", requestId: socket.sentOfType("mux.assess_close")[2].requestId, assessment: { entries: "no" } });
+  await expect(broken).rejects.toThrow("Invalid close assessment");
+
+  const refused = mux.assessClose(scope);
+  socket.message({ type: "mux.close_assessed", requestId: socket.sentOfType("mux.assess_close")[3].requestId, error: "invalid scope" });
+  await expect(refused).rejects.toThrow("invalid scope");
+
+  const pending = mux.assessClose(scope);
+  socket.drop();
+  await expect(pending).rejects.toThrow("Connection ended");
+  expect(mux.closeAssessments).toBe(false);
 });
