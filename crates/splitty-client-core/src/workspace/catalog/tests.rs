@@ -657,7 +657,7 @@ mod service {
         if !splitty_core::pty::testing::pty_available() {
             return;
         }
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut client = service.connect().await.unwrap();
         loop {
             let event = client.next_event().await.unwrap().unwrap();
@@ -883,7 +883,7 @@ mod service {
         if !splitty_core::pty::testing::pty_available() {
             return;
         }
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut client = service.connect().await.unwrap();
         loop {
             if client

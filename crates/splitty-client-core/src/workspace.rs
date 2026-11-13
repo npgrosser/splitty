@@ -2108,7 +2108,7 @@ mod tests {
         if !splitty_core::pty::testing::pty_available() {
             return;
         }
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut client = service.connect().await.expect("embedded connection");
         loop {
             let event = tokio::time::timeout(Duration::from_secs(10), client.next_event())

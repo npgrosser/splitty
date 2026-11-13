@@ -1226,6 +1226,24 @@ impl Worker {
         scheme: ColorScheme,
         backend: crate::owned_service::LocalBackend,
     ) -> Self {
+        Self::spawn(commands, updates, scheme, Origin::Backend(backend))
+    }
+
+    /// A worker on a service of its own that touches no user configuration.
+    #[cfg(test)]
+    pub(crate) fn start_isolated(
+        commands: mpsc::Receiver<Command>,
+        updates: mpsc::Sender<Update>,
+    ) -> Self {
+        Self::spawn(commands, updates, ColorScheme::Dark, Origin::Isolated)
+    }
+
+    fn spawn(
+        commands: mpsc::Receiver<Command>,
+        updates: mpsc::Sender<Update>,
+        scheme: ColorScheme,
+        origin: Origin,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let cleanup_complete = Arc::new(AtomicBool::new(false));
@@ -1254,7 +1272,7 @@ impl Worker {
                     stopping,
                     completed,
                     scheme,
-                    backend,
+                    origin,
                 )
                 .await;
                 if let Err(error) = &result {
@@ -1297,14 +1315,39 @@ async fn publish(
     }
 }
 
+/// The service a worker owns.
+enum Origin {
+    Backend(crate::owned_service::LocalBackend),
+    #[cfg(test)]
+    Isolated,
+}
+impl Origin {
+    /// The backend to start, or a test service that is running already.
+    fn into_backend(
+        self,
+    ) -> Result<crate::owned_service::LocalBackend, Box<crate::owned_service::OwnedService>> {
+        match self {
+            Self::Backend(backend) => Ok(backend),
+            #[cfg(test)]
+            Self::Isolated => Err(Box::new(crate::EmbeddedService::isolated().into())),
+        }
+    }
+}
+
 async fn run(
     commands: mpsc::Receiver<Command>,
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
     scheme: ColorScheme,
-    backend: crate::owned_service::LocalBackend,
+    origin: Origin,
 ) -> anyhow::Result<()> {
+    let backend = match origin.into_backend() {
+        Ok(backend) => backend,
+        Err(service) => {
+            return run_service(*service, commands, updates, stop, cleanup_complete, scheme).await
+        }
+    };
     use crate::owned_service::{LocalBackend, Prepared, StartupPhase};
     // A window closed while the target is prepared: no service exists, so
     // there is nothing left to clean up and the stop is no failure.
@@ -2383,7 +2426,7 @@ mod close_tests {
         }
         let (commands, receiver) = mpsc::channel(32);
         let (sender, mut updates) = mpsc::channel(64);
-        let service = crate::EmbeddedService::start();
+        let service = crate::EmbeddedService::isolated();
         let mut other = service.connect().await.unwrap();
         session_kind(&mut other, "mux.welcome").await;
         // Register the competing client before the worker. Its later size
@@ -2651,7 +2694,7 @@ mod close_tests {
 
     #[tokio::test]
     async fn early_run_failure_still_awaits_real_owned_service_cleanup() {
-        let service = crate::EmbeddedService::start();
+        let service = crate::EmbeddedService::isolated();
         let completed = AtomicBool::new(false);
         let stop = AtomicBool::new(false);
         let error = finish_owned_run(
@@ -2674,7 +2717,7 @@ mod close_tests {
     async fn rejected_close_keeps_worker_available_for_new_approved_close() {
         let (commands, receiver) = mpsc::channel(16);
         let (sender, mut updates) = mpsc::channel(64);
-        let worker = Worker::start(receiver, sender);
+        let worker = Worker::start_isolated(receiver, sender);
         let model = stable_model(&mut updates).await;
         let scope = model.source_token();
         commands
@@ -2773,7 +2816,7 @@ mod close_tests {
     async fn stale_close_request_cannot_lower_worker_high_water() {
         let (commands, receiver) = mpsc::channel(16);
         let (sender, mut updates) = mpsc::channel(64);
-        let worker = Worker::start(receiver, sender);
+        let worker = Worker::start_isolated(receiver, sender);
         let model = loop {
             if let Update::Workspace(model) = next_update(&mut updates).await {
                 let model = local_projection(&model);
@@ -2813,7 +2856,7 @@ mod close_tests {
     async fn approved_window_close_completes_owned_service_cleanup() {
         let (commands, receiver) = mpsc::channel(16);
         let (sender, mut updates) = mpsc::channel(64);
-        let worker = Worker::start(receiver, sender);
+        let worker = Worker::start_isolated(receiver, sender);
         let model = stable_model(&mut updates).await;
         let scope = model.source_token();
         let plan = model.assess_close(1, CloseTarget::Window).unwrap();
@@ -2999,7 +3042,7 @@ mod windows_startup_tests {
     fn missing_explicit_backend_finishes_but_does_not_claim_successful_cleanup() {
         let (_commands, receiver) = mpsc::channel(4);
         let (updates, _receiver) = mpsc::channel(4);
-        let worker = Worker::start(receiver, updates);
+        let worker = Worker::start_isolated(receiver, updates);
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !worker.finished.load(Ordering::Acquire) {
             assert!(std::time::Instant::now() < deadline);

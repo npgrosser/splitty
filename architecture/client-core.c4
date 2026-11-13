@@ -284,5 +284,11 @@ model {
     embedded -> splitty.server.service 'Build and close the embedded service runtime'
     embedded -> splitty.core.pty 'Use local PTY terminals for the embedded service'
     embedded -> splitty.transport.wire 'Assert connection byte ceilings in embedded probe tests'
+    embedded -> splitty.server.hub 'Give isolated test services a connector that reaches no host'
+    embedded -> splitty.remote.bridge 'Type the offline test connector'
+    embedded -> splitty.remote.handshake 'Type the offline test connector'
+    embedded -> splitty.remote.install 'Type the offline test connector'
+    embedded -> splitty.remote.tunnel 'Type the offline test connector'
+    embedded -> splitty.transport.admission 'Type the offline test connector'
   }
 }

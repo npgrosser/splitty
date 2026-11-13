@@ -25,6 +25,8 @@ pub struct State {
     pub mux_store: Arc<splitty_core::mux::Store>,
     pub client_state: Arc<crate::client_session::ClientState>,
     pub config: Arc<RwLock<splitty_core::config::HomeConfig>>,
+    /// The settings file that settings writes replace.
+    pub config_path: PathBuf,
     pub shell_profiles: Arc<RwLock<splitty_core::shell_profiles::ShellProfilesState>>,
     pub server_config: Arc<RwLock<splitty_core::config::ServerConfig>>,
     pub template_store: Arc<splitty_core::template::FileStore>,

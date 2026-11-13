@@ -6901,7 +6901,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn divider_drag_keeps_its_origin_while_split_structure_survives() {
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
         let mut model = SourceWorkspace::new(connection);

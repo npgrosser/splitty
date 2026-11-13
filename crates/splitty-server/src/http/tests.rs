@@ -104,6 +104,7 @@ fn state_on(
             mux_store,
             client_state,
             config: Arc::new(RwLock::new(splitty_core::config::HomeConfig::default())),
+            config_path: dir.join("config.toml"),
             shell_profiles,
             server_config: Arc::new(RwLock::new(splitty_core::config::ServerConfig::default())),
             template_store: Arc::new(splitty_core::template::FileStore::new(

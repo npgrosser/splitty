@@ -33,6 +33,10 @@ cef = { version = "=156.3.0", default-features = false, features = ["sandbox"], 
 percent-encoding = { version = "2", optional = true }
 tempfile = { version = "3", optional = true }
 
+# Tests start their services in private directories (`EmbeddedService::isolated`).
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
+splitty-client-core = { path = "../splitty-client-core", features = ["ui-test-support"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # Verifies the WSL backend archive that ships beside the executable.
 sha2 = "0.10"

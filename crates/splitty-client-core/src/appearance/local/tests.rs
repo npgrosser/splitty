@@ -49,9 +49,23 @@ pub(crate) fn fixture_with_workspace(
     fixture_with(Box::new(SshConnector), Store::with_state(workspace))
 }
 
+/// A service whose settings writes replace `config_path`, for a test that
+/// runs in a child process with a private configuration directory.
+pub(crate) fn fixture_writing_to(config_path: PathBuf) -> (Runtime, PathBuf) {
+    fixture_with_path(Box::new(SshConnector), Store::new(), Some(config_path))
+}
+
 fn fixture_with(
     connector: Box<dyn splitty_server::hub::Connector>,
     store: Store,
+) -> (Runtime, PathBuf) {
+    fixture_with_path(connector, store, None)
+}
+
+fn fixture_with_path(
+    connector: Box<dyn splitty_server::hub::Connector>,
+    store: Store,
+    config_path: Option<PathBuf>,
 ) -> (Runtime, PathBuf) {
     let path = std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4()));
     let mut config = HomeConfig::default();
@@ -87,6 +101,7 @@ fn fixture_with(
         mux_store: store,
         client_state: clients,
         config: Arc::new(RwLock::new(config)),
+        config_path: config_path.unwrap_or_else(|| path.join("config.toml")),
         shell_profiles: profiles,
         server_config: Arc::new(RwLock::new(ServerConfig::default())),
         template_store: Arc::new(splitty_core::template::FileStore::new(

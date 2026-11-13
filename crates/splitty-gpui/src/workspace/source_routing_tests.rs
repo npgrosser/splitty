@@ -47,7 +47,7 @@ mod callbacks {
         TerminalToken,
         ScreenKey,
     ) {
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut first = service.connect().await.unwrap();
         let mut first_model = ready_model(&mut first).await;
         let first_ids = first_model.create_screen(&first, "First").unwrap();

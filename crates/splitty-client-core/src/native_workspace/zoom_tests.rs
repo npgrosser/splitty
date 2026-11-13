@@ -40,7 +40,8 @@ async fn real_service() {
     if !splitty_core::pty::testing::pty_available() {
         return;
     }
-    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let (runtime, path) =
+        crate::appearance::local::tests::fixture_writing_to(splitty_core::config::config_path());
     let state = runtime.state.clone();
     state.config.write().unwrap().appearance.zoom_scope = "terminals".into();
     let config = state.config.read().unwrap().clone();

@@ -2,7 +2,7 @@
 use crate::client_session;
 use splitty_core::{mux::Store, protocol::notify::NotificationEngine};
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -20,16 +20,9 @@ pub fn build(
     terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
     control_socket: &Path,
 ) -> Runtime {
-    if let Ok(program) = std::env::current_exe() {
-        splitty_remote::askpass::enable(program);
-    }
     let config = splitty_core::config::load();
-    let shell_profiles = Arc::new(RwLock::new(
-        splitty_core::shell_profiles::state_from_settings(&config.shells),
-    ));
     let server_config = splitty_core::config::load_server();
     let themes_dir = splitty_core::config::themes_dir();
-
     let template_store = match splitty_core::template::FileStore::new_default() {
         Ok(store) => Arc::new(store),
         Err(e) => {
@@ -39,6 +32,92 @@ pub fn build(
             ))
         }
     };
+    assemble(
+        server_mode,
+        initial_state,
+        terminals,
+        control_socket,
+        Stores {
+            config,
+            config_path: splitty_core::config::config_path(),
+            server_config,
+            themes_dir,
+            template_store,
+            hub: crate::hub::Hub::system(),
+        },
+    )
+}
+
+/// Where a service of its own keeps its settings, templates, themes and
+/// host metadata, and how its hub reaches hosts.
+pub struct Home {
+    pub config_dir: PathBuf,
+    /// The SSH configuration whose hosts the directory lists, if any.
+    pub ssh_dir: Option<PathBuf>,
+    pub connector: Box<dyn crate::hub::Connector>,
+}
+
+/// A service that reads and writes only below `home.config_dir`, for
+/// callers that must not touch the user's configuration. Unlike `build`, it
+/// does not rewrite the settings file at start.
+pub fn build_in(
+    server_mode: &str,
+    initial_state: Option<splitty_core::mux::WorkspaceState>,
+    terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
+    control_socket: &Path,
+    home: Home,
+) -> Runtime {
+    let dir = home.config_dir;
+    let config_path = dir.join("config.toml");
+    assemble(
+        server_mode,
+        initial_state,
+        terminals,
+        control_socket,
+        Stores {
+            config: splitty_core::config::load_from(&config_path),
+            config_path,
+            server_config: splitty_core::config::load_server_from(&dir.join("server.toml")),
+            themes_dir: dir.join("themes"),
+            template_store: Arc::new(splitty_core::template::FileStore::new(
+                dir.join("templates"),
+            )),
+            hub: crate::hub::Hub::new(home.connector, dir, home.ssh_dir),
+        },
+    )
+}
+
+/// What a service reads its settings from and keeps its metadata in.
+struct Stores {
+    config: splitty_core::config::HomeConfig,
+    config_path: PathBuf,
+    server_config: splitty_core::config::ServerConfig,
+    themes_dir: PathBuf,
+    template_store: Arc<splitty_core::template::FileStore>,
+    hub: crate::hub::Hub,
+}
+
+fn assemble(
+    server_mode: &str,
+    initial_state: Option<splitty_core::mux::WorkspaceState>,
+    terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
+    control_socket: &Path,
+    stores: Stores,
+) -> Runtime {
+    if let Ok(program) = std::env::current_exe() {
+        splitty_remote::askpass::enable(program);
+    }
+    let Stores {
+        config,
+        config_path,
+        server_config,
+        themes_dir,
+        template_store,
+        hub,
+    } = stores;
+    let shell_profiles = Arc::new(RwLock::new(
+        splitty_core::shell_profiles::state_from_settings(&config.shells),
+    ));
 
     // Create PTY backend and protocol dispatcher
     let pty_manager = Arc::new(splitty_core::pty::manager::Manager::with_terminals(
@@ -106,7 +185,7 @@ pub fn build(
     ));
     let env = dispatcher.env.clone();
 
-    let hub = Arc::new(crate::hub::Hub::system());
+    let hub = Arc::new(hub);
     let client_state = Arc::new(
         client_session::ClientState::new(
             mux_store.clone(),
@@ -127,6 +206,7 @@ pub fn build(
         mux_store,
         client_state,
         config: Arc::new(RwLock::new(config)),
+        config_path,
         shell_profiles,
         server_config: Arc::new(RwLock::new(server_config)),
         template_store,

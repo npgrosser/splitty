@@ -1116,7 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn nonselected_tab_context_stays_valid_only_on_its_captured_source_and_screen() {
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
         let mut model = SourceWorkspace::new(connection);

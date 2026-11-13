@@ -10,6 +10,8 @@ pub struct EmbeddedService {
     runtime: Option<service::runtime::Runtime>,
     control: Option<control::ControlChannel>,
     connector: Connector,
+    /// The private directory of an isolated service, removed after it.
+    scratch: Option<std::path::PathBuf>,
 }
 
 impl EmbeddedService {
@@ -19,6 +21,38 @@ impl EmbeddedService {
             runtime: Some(runtime),
             control: None,
             connector: Connector::default(),
+            scratch: None,
+        }
+    }
+
+    /// A service for tests that keeps its settings, metadata and control
+    /// socket in a new private directory instead of the user's, and whose
+    /// hub never reaches a host. Call inside a Tokio runtime, as `start`.
+    #[cfg(any(test, feature = "ui-test-support"))]
+    #[doc(hidden)]
+    pub fn isolated() -> Self {
+        let scratch =
+            std::env::temp_dir().join(format!("splitty-test-{}", Uuid::new_v4().simple()));
+        let config_dir = scratch.join("config");
+        std::fs::create_dir_all(&config_dir).expect("isolated service directory");
+        let path = scratch.join("control.sock");
+        let runtime = service::runtime::build_in(
+            "embedded",
+            None,
+            Arc::new(splitty_core::pty::terminal::LocalTerminals),
+            &path,
+            service::runtime::Home {
+                config_dir,
+                ssh_dir: None,
+                connector: Box::new(offline::NoHosts),
+            },
+        );
+        let control = control::spawn_service(runtime.state.clone(), path);
+        Self {
+            runtime: Some(runtime),
+            control: Some(control),
+            connector: Connector::default(),
+            scratch: Some(scratch),
         }
     }
 
@@ -76,6 +110,7 @@ impl EmbeddedService {
             runtime: Some(runtime),
             control: Some(control),
             connector: Connector::default(),
+            scratch: None,
         }
     }
 
@@ -119,7 +154,8 @@ impl EmbeddedService {
     pub async fn close(mut self) -> io::Result<()> {
         let runtime = self.runtime.take();
         let control = self.control.take();
-        tokio::spawn(async move { shutdown(runtime, control).await })
+        let scratch = self.scratch.take();
+        tokio::spawn(async move { shutdown(runtime, control, scratch).await })
             .await
             .map_err(io::Error::other)?
     }
@@ -128,6 +164,7 @@ impl EmbeddedService {
 async fn shutdown(
     runtime: Option<service::runtime::Runtime>,
     control: Option<control::ControlChannel>,
+    scratch: Option<std::path::PathBuf>,
 ) -> io::Result<()> {
     let result = if let Some(runtime) = runtime {
         for client in runtime
@@ -147,6 +184,9 @@ async fn shutdown(
     if let Some(control) = control {
         control.shutdown();
     }
+    if let Some(scratch) = scratch {
+        let _ = std::fs::remove_dir_all(scratch);
+    }
     result
 }
 
@@ -157,10 +197,104 @@ impl Drop for EmbeddedService {
         }
         let runtime = self.runtime.take();
         let control = self.control.take();
+        let scratch = self.scratch.take();
         if let Ok(executor) = tokio::runtime::Handle::try_current() {
             executor.spawn(async move {
-                let _ = shutdown(runtime, control).await;
+                let _ = shutdown(runtime, control, scratch).await;
             });
+        } else if let Some(scratch) = scratch {
+            let _ = std::fs::remove_dir_all(scratch);
+        }
+    }
+}
+
+#[cfg(any(test, feature = "ui-test-support"))]
+mod offline {
+    //! A hub connector for isolated test services: every host is unreachable.
+    use splitty_remote::{
+        bridge::NativeBridge,
+        handshake::{Handshake, RunningDaemon},
+        install::{Prepared, Server},
+        ssh::SshTarget,
+        tunnel::{exposure::Share, PortReservation},
+    };
+    use splitty_server::hub::{Connector, Forwarding, HubError};
+    use splitty_transport::{admission, budget::Charged, queue};
+    use std::{future::Future, pin::Pin};
+
+    type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+    pub(super) struct NoHosts;
+
+    fn unreachable<'a, T: Send + 'a>(target: &SshTarget) -> BoxFuture<'a, Result<T, HubError>> {
+        let host = target.as_str().to_owned();
+        Box::pin(async move { Err(HubError::NoDaemon { host }) })
+    }
+
+    impl Connector for NoHosts {
+        fn prepare<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: Box<dyn FnOnce(&str) + Send + 'a>,
+            _: &'a queue::Context,
+        ) -> BoxFuture<'a, Result<Prepared, HubError>> {
+            unreachable(target)
+        }
+        fn handshake<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: &'a Prepared,
+            _: &'a queue::Context,
+        ) -> BoxFuture<'a, Result<Charged<Handshake>, HubError>> {
+            unreachable(target)
+        }
+        fn stop_daemon<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: &'a Server,
+            _: &'a RunningDaemon,
+            _: &'a queue::Context,
+        ) -> BoxFuture<'a, Result<(), HubError>> {
+            unreachable(target)
+        }
+        fn migrate_legacy<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: &'a Server,
+            _: &'a RunningDaemon,
+            _: &'a queue::Context,
+        ) -> BoxFuture<'a, Result<(), HubError>> {
+            unreachable(target)
+        }
+        fn bridge<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: &'a Server,
+            _: &'a RunningDaemon,
+            _: (admission::Carrier, admission::Opening),
+            _: &'a queue::Context,
+        ) -> BoxFuture<'a, Result<NativeBridge, HubError>> {
+            unreachable(target)
+        }
+        fn forward<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: PortReservation,
+            _: u16,
+        ) -> BoxFuture<'a, Result<Box<dyn Forwarding>, HubError>> {
+            unreachable(target)
+        }
+        fn reserve_share(&self, _: u16) -> BoxFuture<'_, Result<Option<Share>, HubError>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn reverse<'a>(
+            &'a self,
+            target: &'a SshTarget,
+            _: u16,
+            _: u16,
+            _: Option<&'a Share>,
+        ) -> BoxFuture<'a, Result<Box<dyn Forwarding>, HubError>> {
+            unreachable(target)
         }
     }
 }
@@ -174,7 +308,7 @@ mod tests {
     use std::time::Duration;
 
     fn service() -> EmbeddedService {
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         // An explicit in-memory profile avoids depending on the user's shell
         // startup files. This profile override is memory-only; the production
         // constructor above still loads configuration and may persist migrations.

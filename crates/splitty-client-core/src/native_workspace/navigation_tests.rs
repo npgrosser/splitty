@@ -42,7 +42,7 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     }
     let (commands, receiver) = mpsc::channel(64);
     let (sender, mut updates) = mpsc::channel(64);
-    let worker = Worker::start(receiver, sender);
+    let worker = Worker::start_isolated(receiver, sender);
     let first = model_where(&mut updates, |model| {
         model.catalog_initialized()
             && model.screens().len() == 1

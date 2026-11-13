@@ -592,7 +592,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn captured_profile_source_resolves_float_and_rejects_replaced_session() {
-        let service = EmbeddedService::start();
+        let service = EmbeddedService::isolated();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
         let mut workspace = SourceWorkspace::new(connection);

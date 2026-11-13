@@ -379,7 +379,7 @@ pub(crate) fn get_home_metadata() -> Payload<Value> {
 }
 
 pub(crate) async fn patch_home_settings(state: &ServiceState, partial: Value) -> Reply {
-    match splitty_core::config::update(partial) {
+    match splitty_core::config::update_at(&state.config_path, partial) {
         Ok(updated) => {
             apply_home_settings(state, updated.clone());
             state.client_state.broadcast_events(
@@ -447,7 +447,7 @@ pub(crate) async fn put_shell_profiles(
         }
     };
 
-    if let Err(e) = splitty_core::config::save(&candidate) {
+    if let Err(e) = splitty_core::config::save_to(&candidate, &state.config_path) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Payload(json!({"error": e.to_string()})),
