@@ -8,6 +8,12 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`tab-group-transfer` TGT-1 to TGT-5** (2026-11-14, provisional, tbd; recorded in the change's design, behavior in the `workspace-model`, `mux-protocol` and `control-api` specs):
+  - **TGT-1:** a whole tab group moves to another Screen with one op, `move_tab_group_to_screen`, naming its slot; every check comes first, so a rejection changes nothing. Alternative: one `move_pane_to_screen` per tab.
+  - **TGT-2:** as for a single pane: a managed job's pane refuses the whole group, viewer panes and floating groups move, the panes join the target's first slot, an emptied source goes. Alternative: keep the moved group as a group of its own beside the target's groups.
+  - **TGT-3:** the window names the tab it shows in the group as `activePaneId` and follows to it. Alternative: the server's active tab.
+  - **TGT-4:** a request without `slotId` or `targetScreenId` is ignored over the WebSocket like any malformed op (the control API answers 400). Alternative: answer it with `mux.op_failed`, which the malformed-message policy would need to allow.
+  - **TGT-5:** "Move Group to Screen" is in the tab menu for groups of more than one tab, offered whatever the server; the command gate row `tab-group-transfer-v1` refuses it for an older server, which would otherwise ignore the op without an answer. Alternative: the entry also for a single tab.
 - **`tab-group-drag` TGD-1 to TGD-5** (2026-11-14, provisional, tbd; recorded in the change's proposal, behavior in the `workspace-model` and `mux-protocol` specs):
   - **TGD-1:** a native group move is sent as one `arrange_panes` of the whole root layout; a layout changed meanwhile makes the drag stale. Alternative: a dedicated op naming only the group and the target.
   - **TGD-2:** the grip is the empty area of a tiled group's tab bar; floating groups are not dragged as groups, and the tab lock locks group drags too. Alternative: a grip icon in every tab bar.
