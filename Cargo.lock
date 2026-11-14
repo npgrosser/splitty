@@ -8295,7 +8295,7 @@ dependencies = [
  "hex",
  "nix 0.29.0",
  "portable-pty",
- "rand 0.8.8",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -8340,7 +8340,7 @@ version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "gtk",
- "rand 0.8.8",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8367,7 +8367,7 @@ version = "0.5.0"
 dependencies = [
  "dirs 6.0.0",
  "nix 0.29.0",
- "rand 0.8.8",
+ "rand 0.10.3",
  "semver",
  "serde",
  "serde_json",
@@ -8398,7 +8398,7 @@ dependencies = [
  "mime_guess",
  "nix 0.29.0",
  "open",
- "rand 0.8.8",
+ "rand 0.10.3",
  "reqwest 0.12.28",
  "rust-embed",
  "semver",
@@ -8423,7 +8423,7 @@ dependencies = [
 name = "splitty-transport"
 version = "0.5.0"
 dependencies = [
- "rand 0.8.8",
+ "rand 0.10.3",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
