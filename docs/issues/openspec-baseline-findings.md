@@ -585,6 +585,13 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-14 in CI on `main` for the v0.4.3 version commit, in the Rust tests job, one in each of two
+  attempts; neither is investigated:
+  `native_workspace::ssh_prompts::tests::a_question_of_the_local_service_reaches_the_window_and_its_answer_the_helper`
+  (`splitty-client-core`) waited ten seconds for the worker's question list ("question update: Elapsed"), and
+  `hub::reverse::tests::stop_pauses_a_saved_rule_and_forget_keeps_the_forward` (`splitty-server`) could not
+  bind the shared port right after `stop` ("the host's port is free"). The release run of the same commit
+  passed both.
 - Seen on 2026-11-14 in CI on `main` for the v0.4.1 version commit, in the macOS job:
   `pty::session::tests::managed_stop_escalates_and_retains_final_output` (`splitty-core`), where the first of two
   stops at once failed with "killpg owned leader group … with SIGKILL: EPERM". Darwin answers `killpg` with
