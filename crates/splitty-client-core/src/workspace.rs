@@ -25,7 +25,8 @@ pub use catalog::templates::{
     TemplateApplyResult, TemplateApplyTarget, TemplateLaunchError, TemplateProfileFallback,
 };
 pub use catalog::transfer::{
-    PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
+    GroupActionTarget, PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult,
+    ScreenTransferTarget,
 };
 pub use catalog::{SourceKind, SourceWorkspace};
 pub use identity::{LayoutKey, PaneKey, ScreenKey, SourceId, SourceToken, TerminalToken};

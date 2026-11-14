@@ -247,3 +247,81 @@ async fn exact_tab_placement_via_control_preserves_records_and_rejects_stale_sou
         serde_json::to_value(Some(after)).expect("screen")
     );
 }
+
+/// control-api, Workspace Operations: a tab group moves whole through the
+/// owner control API; a malformed request is a 400, a rejected one leaves
+/// the workspace as it was.
+#[tokio::test]
+async fn a_tab_group_moves_through_the_control_api() {
+    use splitty_core::{
+        ids::{PaneId, ScreenId},
+        mux::{LayoutNode, Op, ScreenOp},
+    };
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    for (screen, pane) in [("s1", "p1"), ("s2", "p2")] {
+        state
+            .mux_store
+            .dispatch(Op::CreateScreen {
+                screen_id: Some(ScreenId::from(screen)),
+                name: None,
+                new_pane_id: Some(PaneId::from(pane)),
+                shell_profile_id: None,
+            })
+            .expect("seed screen without running effects");
+    }
+    for op in [
+        json!({"type":"split_pane", "paneId":"p1", "axis":"horizontal", "newPaneId":"p3"}),
+        json!({"type":"new_tab", "paneId":"p3", "newPaneId":"p4"}),
+    ] {
+        let op: ScreenOp = serde_json::from_value(op).expect("op");
+        state
+            .mux_store
+            .dispatch_screen(&ScreenId::from("s1"), op)
+            .expect("seed");
+    }
+    let slot = state
+        .mux_store
+        .get_screen(&ScreenId::from("s1"))
+        .expect("screen")
+        .root
+        .find_slot(&PaneId::from("p3"))
+        .expect("group")
+        .id()
+        .clone();
+    let control = super::super::build_control_router(state.service.clone());
+    let post = |op: serde_json::Value| {
+        let body = json!({"screenId":"s1","op":op});
+        exchange(&control, api("POST", "/api/mux/op", Some(&body)))
+    };
+
+    let (code, body) = post(json!({"type":"move_tab_group_to_screen","slotId":slot})).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    let before = serde_json::to_value(state.mux_store.get_workspace_state()).expect("state");
+    let (code, body) =
+        post(json!({"type":"move_tab_group_to_screen","slotId":"absent","targetScreenId":"s2"}))
+            .await;
+    assert!(!code.is_success(), "{body}");
+    assert_eq!(
+        serde_json::to_value(state.mux_store.get_workspace_state()).expect("state"),
+        before
+    );
+
+    let (code, body) = post(json!({"type":"move_tab_group_to_screen","slotId":slot,"activePaneId":"p3","targetScreenId":"s2"})).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let target = state
+        .mux_store
+        .get_screen(&ScreenId::from("s2"))
+        .expect("target");
+    assert!(matches!(
+        target.root.find_slot(&PaneId::from("p3")),
+        Some(LayoutNode::Slot { pane_ids, active_pane_id, .. })
+            if pane_ids == &["p2", "p3", "p4"].map(PaneId::from)
+                && active_pane_id.as_ref() == Some(&PaneId::from("p3"))
+    ));
+    let source = state
+        .mux_store
+        .get_screen(&ScreenId::from("s1"))
+        .expect("source");
+    assert_eq!(source.root.collect_pane_ids(), [PaneId::from("p1")]);
+}

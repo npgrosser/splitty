@@ -993,7 +993,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "terminal-input-bytes-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1" and "viewer-reviews-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "terminal-input-bytes-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1", "viewer-reviews-v1" and "tab-group-transfer-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1494,6 +1494,32 @@ interface MovePaneToScreenOp {
 }
 
 /**
+ * Move every pane of tab group `slotId` (a slot of the root layout or of a
+ * floating entry) with its running session from the envelope's screen to
+ * another screen of the same server, or to a new one placed right after the
+ * source, as one change ("tab-group-transfer-v1"). The panes join the
+ * target's first slot in their tab order, `activePaneId` (else the group's
+ * active tab) shown. No session starts or ends; a source left without panes
+ * is removed. Refused as a whole when one of the panes belongs to a managed
+ * job, and when `slotId` is unknown or no slot; a request without `slotId`
+ * or `targetScreenId` is ignored like any malformed op (POST /api/mux/op:
+ * 400). Other clients get `mux.nudge` for both screens; the sender gets
+ * nothing.
+ * A server without the capability ignores the op without an answer.
+ */
+interface MoveTabGroupToScreenOp {
+  type: "move_tab_group_to_screen";
+  slotId: string;
+  /** One of the group's panes, shown on the target. */
+  activePaneId?: string;
+  targetScreenId: string;
+  /** Create `targetScreenId` instead of moving into an existing screen. */
+  createScreen?: boolean;
+  /** The new screen's name; only with `createScreen`. */
+  screenName?: string;
+}
+
+/**
  * Replace a session's scratchpad with `text` (empty clears it). Only a window
  * sends it, over the WebSocket; POST /api/mux/op answers 400. Refused for an
  * unknown session or more than 64 KiB of UTF-8. Other clients get `mux.nudge`
@@ -1682,6 +1708,7 @@ type Operation =
   | ReorderScreensOp
   | MoveScreenOp
   | MovePaneToScreenOp
+  | MoveTabGroupToScreenOp
   | SetScratchpadOp
   | OpenViewerOp
   | PutAnnotationsOp

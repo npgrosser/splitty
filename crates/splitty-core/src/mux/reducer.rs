@@ -337,6 +337,21 @@ pub fn reduce_workspace(
             screen_name,
         ),
 
+        Op::MoveTabGroupToScreen {
+            screen_id,
+            slot_id,
+            active_pane_id,
+            target_screen_id,
+            create_screen,
+            screen_name,
+        } => reduce_move_tab_group_to_screen(
+            state,
+            screen_id,
+            slot_id,
+            active_pane_id,
+            (target_screen_id, create_screen, screen_name),
+        ),
+
         Op::AgentReply {
             screen_id,
             pane_id,
@@ -482,6 +497,145 @@ fn reduce_move_pane_to_screen(
         target.sessions.insert(session.id.clone(), session);
     }
     target.panes.insert(pane_id, pane);
+    target.revision += 1;
+
+    if create_screen {
+        let at = state
+            .screen_order
+            .iter()
+            .position(|id| id == &screen_id)
+            .map_or(state.screen_order.len(), |index| index + 1);
+        state.screen_order.insert(at, target_id.clone());
+    }
+    if source.panes.is_empty() {
+        // Nothing runs there any more: the screen goes with the move.
+        state.screen_order.retain(|id| id != &screen_id);
+        if state.active_screen_id.as_ref() == Some(&screen_id) {
+            state.active_screen_id = Some(target_id.clone());
+        }
+    } else {
+        state.screens.insert(screen_id, source);
+    }
+    state.screens.insert(target_id, target);
+    Ok((state, vec![]))
+}
+
+// ── move_tab_group_to_screen ───────────────────────────────────────────────
+
+/// Move every pane of tab group `slot_id` with its session record to another
+/// screen, or to a new one right after the source, as `move_pane_to_screen`
+/// moves one: into the target's first slot, in tab order, `active_pane_id`
+/// (else the group's active tab) shown. No effect; a source left without
+/// panes is removed. Every check happens before anything changes, so a
+/// rejection, also for one managed job's pane in the group, leaves the
+/// workspace as it was.
+fn reduce_move_tab_group_to_screen(
+    mut state: WorkspaceState,
+    screen_id: ScreenId,
+    slot_id: NodeId,
+    active_pane_id: Option<PaneId>,
+    (target_id, create_screen, screen_name): (ScreenId, bool, Option<String>),
+) -> Result<(WorkspaceState, Vec<Effect>), MuxError> {
+    if target_id == screen_id {
+        return Err(MuxError::GroupSameScreen(slot_id));
+    }
+    let source = state
+        .screens
+        .get(&screen_id)
+        .ok_or_else(|| MuxError::ScreenNotFound(screen_id.clone()))?;
+    let slot = std::iter::once(&source.root)
+        .chain(source.floating.iter().map(|entry| &entry.root))
+        .find_map(|root| root.find_node(&slot_id))
+        .ok_or_else(|| MuxError::NodeNotFound(slot_id.clone()))?;
+    let LayoutNode::Slot {
+        pane_ids,
+        active_pane_id: slot_active,
+        ..
+    } = slot
+    else {
+        return Err(MuxError::NotASlot(slot_id));
+    };
+    if pane_ids.is_empty() {
+        return Err(MuxError::EmptyTabGroup(slot_id));
+    }
+    let moved = pane_ids.clone();
+    for pane_id in &moved {
+        let pane = source
+            .panes
+            .get(pane_id)
+            .ok_or_else(|| MuxError::PaneNotFound(pane_id.clone()))?;
+        if pane.job_id.is_some() {
+            return Err(MuxError::JobPaneMove(pane_id.clone()));
+        }
+    }
+    if let Some(active) = active_pane_id.as_ref().filter(|id| !moved.contains(id)) {
+        return Err(MuxError::ActivePaneOutsideSlot(active.clone()));
+    }
+    let shown = active_pane_id
+        .or_else(|| slot_active.clone().filter(|id| moved.contains(id)))
+        .unwrap_or_else(|| moved[0].clone());
+    match (create_screen, state.screens.contains_key(&target_id)) {
+        (true, true) => return Err(MuxError::ScreenExists(target_id)),
+        (false, false) => return Err(MuxError::ScreenNotFound(target_id)),
+        _ => {}
+    }
+    let screen_name = screen_name.or_else(|| create_screen.then(|| default_screen_name(&state)));
+
+    // Out of the source, one pane after the other as close_pane takes them
+    // out, but nothing is ended.
+    let mut source = state
+        .screens
+        .remove(&screen_id)
+        .ok_or_else(|| MuxError::ScreenNotFound(screen_id.clone()))?;
+    let mut panes = Vec::new();
+    for pane_id in &moved {
+        let location = source
+            .find_slot_location(pane_id)
+            .ok_or_else(|| MuxError::PaneNotInLayout(pane_id.clone()))?;
+        let pane = source
+            .panes
+            .remove(pane_id)
+            .ok_or_else(|| MuxError::PaneNotFound(pane_id.clone()))?;
+        let session = pane
+            .session_id
+            .as_ref()
+            .and_then(|id| source.sessions.remove(id));
+        match location {
+            SlotLocation::Floating(index) => {
+                close_pane_in_floating(&mut source, pane_id, index, None)
+            }
+            SlotLocation::Root => close_pane_in_root(&mut source, pane_id, None),
+        }
+        panes.push((pane, session));
+    }
+    source.revision += 1;
+
+    let mut target = if create_screen {
+        let mut screen = ScreenState::new(target_id.clone(), screen_name);
+        screen.root = LayoutNode::new_slot(NodeId::with_prefix("root"), vec![]);
+        screen
+    } else {
+        state
+            .screens
+            .remove(&target_id)
+            .ok_or_else(|| MuxError::ScreenNotFound(target_id.clone()))?
+    };
+    let first = first_slot_id(&target.root);
+    if let Some(LayoutNode::Slot {
+        pane_ids,
+        active_pane_id,
+        ..
+    }) = target.root.find_node_mut(&first)
+    {
+        pane_ids.extend(moved.iter().cloned());
+        *active_pane_id = Some(shown);
+    }
+    for (pane, session) in panes {
+        if let Some(session) = session {
+            target.sessions.insert(session.id.clone(), session);
+        }
+        target.panes.insert(pane.id.clone(), pane);
+    }
     target.revision += 1;
 
     if create_screen {
@@ -3074,6 +3228,288 @@ mod tests {
             store.screen_of_movable_pane(&PaneId::from("p3")),
             Some(ScreenId::from("scr2"))
         );
+    }
+
+    fn tab_op(screen: &str, pane: &str, new_pane: &str) -> Op {
+        Op::ModifyScreen {
+            screen_id: ScreenId::from(screen),
+            op: ScreenOp::NewTab {
+                pane_id: PaneId::from(pane),
+                new_pane_id: Some(PaneId::from(new_pane)),
+                cwd: None,
+                shell_profile_id: None,
+            },
+        }
+    }
+
+    fn group_move_op(from: &str, slot: &NodeId, active: Option<&str>, to: &str) -> Op {
+        Op::MoveTabGroupToScreen {
+            screen_id: ScreenId::from(from),
+            slot_id: slot.clone(),
+            active_pane_id: active.map(PaneId::from),
+            target_screen_id: ScreenId::from(to),
+            create_screen: false,
+            screen_name: None,
+        }
+    }
+
+    fn slot_of(state: &WorkspaceState, screen: &str, pane: &str) -> NodeId {
+        let screen = &state.screens[&ScreenId::from(screen)];
+        std::iter::once(&screen.root)
+            .chain(screen.floating.iter().map(|entry| &entry.root))
+            .find_map(|root| root.find_slot(&PaneId::from(pane)))
+            .expect("pane in a slot")
+            .id()
+            .clone()
+    }
+
+    fn tabs_of(state: &WorkspaceState, screen: &str, pane: &str) -> (Vec<PaneId>, Option<PaneId>) {
+        match state.screens[&ScreenId::from(screen)]
+            .root
+            .find_slot(&PaneId::from(pane))
+        {
+            Some(LayoutNode::Slot {
+                pane_ids,
+                active_pane_id,
+                ..
+            }) => (pane_ids.clone(), active_pane_id.clone()),
+            other => panic!("not in a root slot: {other:?}"),
+        }
+    }
+
+    /// `scr1`: `p1` beside the group [`p3`, `p4`]; `scr2`: `p2`.
+    fn group_store() -> crate::mux::Store {
+        let store = two_screen_store();
+        store.dispatch(split_op("scr1", "p1", "p3")).unwrap();
+        store.dispatch(tab_op("scr1", "p3", "p4")).unwrap();
+        store
+    }
+
+    // workspace-model, Move A Tab Group To Another Screen
+    #[test]
+    fn a_tab_group_moves_whole_in_tab_order_and_ends_nothing() {
+        let store = group_store();
+        let before = store.get_workspace_state();
+        let slot = slot_of(&before, "scr1", "p3");
+        let sessions = [
+            session_of(&before, "scr1", "p3").unwrap(),
+            session_of(&before, "scr1", "p4").unwrap(),
+        ];
+
+        let effects = store
+            .dispatch(group_move_op("scr1", &slot, Some("p3"), "scr2"))
+            .unwrap();
+
+        assert!(effects.is_empty(), "no session is started or ended");
+        let after = store.get_workspace_state();
+        let source = &after.screens[&ScreenId::from("scr1")];
+        assert_eq!(
+            source.panes.keys().collect::<Vec<_>>(),
+            vec![&PaneId::from("p1")]
+        );
+        assert!(source.root.find_node(&slot).is_none());
+        assert!(sessions.iter().all(|id| !source.sessions.contains_key(id)));
+        let target = &after.screens[&ScreenId::from("scr2")];
+        assert!(sessions.iter().all(|id| target.sessions.contains_key(id)));
+        assert_eq!(
+            tabs_of(&after, "scr2", "p2"),
+            (
+                vec![PaneId::from("p2"), PaneId::from("p3"), PaneId::from("p4")],
+                Some(PaneId::from("p3"))
+            )
+        );
+        let revision =
+            |state: &WorkspaceState, id: &str| state.screens[&ScreenId::from(id)].revision;
+        assert_eq!(revision(&after, "scr1"), revision(&before, "scr1") + 1);
+        assert_eq!(revision(&after, "scr2"), revision(&before, "scr2") + 1);
+        assert_eq!(after.active_screen_id, before.active_screen_id);
+    }
+
+    #[test]
+    fn a_tab_group_without_a_named_tab_keeps_its_active_tab_shown() {
+        let store = group_store();
+        let state = store.get_workspace_state();
+        // NewTab left the new tab p4 active.
+        assert_eq!(tabs_of(&state, "scr1", "p3").1, Some(PaneId::from("p4")));
+        let slot = slot_of(&state, "scr1", "p3");
+        store
+            .dispatch(group_move_op("scr1", &slot, None, "scr2"))
+            .unwrap();
+        assert_eq!(
+            tabs_of(&store.get_workspace_state(), "scr2", "p2").1,
+            Some(PaneId::from("p4"))
+        );
+    }
+
+    #[test]
+    fn a_tab_group_moved_to_a_new_screen_places_it_after_the_source() {
+        let store = group_store();
+        let slot = slot_of(&store.get_workspace_state(), "scr1", "p3");
+        store
+            .dispatch(Op::MoveTabGroupToScreen {
+                screen_id: ScreenId::from("scr1"),
+                slot_id: slot,
+                active_pane_id: None,
+                target_screen_id: ScreenId::from("scr9"),
+                create_screen: true,
+                screen_name: Some("Logs".into()),
+            })
+            .unwrap();
+        let after = store.get_workspace_state();
+        assert_eq!(
+            after.screen_order,
+            vec![
+                ScreenId::from("scr1"),
+                ScreenId::from("scr9"),
+                ScreenId::from("scr2")
+            ]
+        );
+        let created = &after.screens[&ScreenId::from("scr9")];
+        assert_eq!(created.name.as_deref(), Some("Logs"));
+        assert_eq!(
+            tabs_of(&after, "scr9", "p3"),
+            (
+                vec![PaneId::from("p3"), PaneId::from("p4")],
+                Some(PaneId::from("p4"))
+            )
+        );
+        assert_eq!(created.panes.len(), 2);
+        assert_eq!(created.sessions.len(), 2);
+    }
+
+    #[test]
+    fn the_last_tab_group_moved_away_takes_its_screen_along() {
+        let store = two_screen_store();
+        store.dispatch(tab_op("scr1", "p1", "p3")).unwrap();
+        store
+            .dispatch(Op::SetActiveScreen {
+                screen_id: ScreenId::from("scr1"),
+            })
+            .unwrap();
+        let slot = slot_of(&store.get_workspace_state(), "scr1", "p1");
+
+        let effects = store
+            .dispatch(group_move_op("scr1", &slot, None, "scr2"))
+            .unwrap();
+
+        assert!(effects.is_empty(), "no session is ended");
+        let after = store.get_workspace_state();
+        assert!(!after.screens.contains_key(&ScreenId::from("scr1")));
+        assert_eq!(after.screen_order, vec![ScreenId::from("scr2")]);
+        assert_eq!(after.active_screen_id, Some(ScreenId::from("scr2")));
+        assert_eq!(tabs_of(&after, "scr2", "p1").0.len(), 3);
+    }
+
+    #[test]
+    fn a_floating_tab_group_moves_into_the_target_grid() {
+        let store = group_store();
+        for op in [
+            ScreenOp::FloatPane {
+                pane_id: PaneId::from("p3"),
+                bounds: None,
+            },
+            ScreenOp::NewTab {
+                pane_id: PaneId::from("p3"),
+                new_pane_id: Some(PaneId::from("p5")),
+                cwd: None,
+                shell_profile_id: None,
+            },
+        ] {
+            store
+                .dispatch(Op::ModifyScreen {
+                    screen_id: ScreenId::from("scr1"),
+                    op,
+                })
+                .unwrap();
+        }
+        let state = store.get_workspace_state();
+        assert_eq!(state.screens[&ScreenId::from("scr1")].floating.len(), 1);
+        let slot = slot_of(&state, "scr1", "p3");
+
+        store
+            .dispatch(group_move_op("scr1", &slot, Some("p3"), "scr2"))
+            .unwrap();
+
+        let after = store.get_workspace_state();
+        assert!(after.screens[&ScreenId::from("scr1")].floating.is_empty());
+        assert_eq!(
+            tabs_of(&after, "scr2", "p2"),
+            (
+                vec![PaneId::from("p2"), PaneId::from("p3"), PaneId::from("p5")],
+                Some(PaneId::from("p3"))
+            )
+        );
+        assert!(after.screens[&ScreenId::from("scr2")].floating.is_empty());
+    }
+
+    // workspace-model, Move A Tab Group To Another Screen: rejections
+    #[test]
+    fn rejected_group_moves_leave_the_workspace_unchanged() {
+        let store = group_store();
+        let state = store.get_workspace_state();
+        let slot = slot_of(&state, "scr1", "p3");
+        let split = state.screens[&ScreenId::from("scr1")].root.id().clone();
+        let before = workspace_summary(&state);
+        let created = |to: &str| Op::MoveTabGroupToScreen {
+            screen_id: ScreenId::from("scr1"),
+            slot_id: slot.clone(),
+            active_pane_id: None,
+            target_screen_id: ScreenId::from(to),
+            create_screen: true,
+            screen_name: None,
+        };
+        for (op, expected) in [
+            (
+                group_move_op("nope", &slot, None, "scr2"),
+                "screen nope not found",
+            ),
+            (
+                group_move_op("scr1", &slot, None, "nope"),
+                "screen nope not found",
+            ),
+            (created("scr2"), "screen scr2 already exists"),
+            (
+                group_move_op("scr1", &slot, None, "scr1"),
+                "cannot move to the screen it is on",
+            ),
+            (
+                group_move_op("scr1", &NodeId::from("nope"), None, "scr2"),
+                "node nope not found",
+            ),
+            (group_move_op("scr1", &split, None, "scr2"), "is not a slot"),
+            (
+                group_move_op("scr1", &slot, Some("p1"), "scr2"),
+                "active pane p1 is not in its slot",
+            ),
+        ] {
+            let error = store.dispatch(op).expect_err(expected).to_string();
+            assert!(error.contains(expected), "{error}");
+            assert_eq!(workspace_summary(&store.get_workspace_state()), before);
+        }
+    }
+
+    #[test]
+    fn a_tab_group_with_a_job_pane_does_not_move() {
+        let mut state = group_store().get_workspace_state();
+        let slot = slot_of(&state, "scr1", "p3");
+        let screen = state.screens.get_mut(&ScreenId::from("scr1")).unwrap();
+        screen.panes.get_mut(&PaneId::from("p4")).unwrap().job_id = Some(JobId::new());
+        let result = reduce_workspace(state, group_move_op("scr1", &slot, None, "scr2"));
+        assert!(matches!(result, Err(MuxError::JobPaneMove(ref id)) if id == &PaneId::from("p4")));
+    }
+
+    #[test]
+    fn an_empty_slot_is_no_tab_group_to_move() {
+        // A grid whose panes all float keeps one bare root slot.
+        let mut state = two_screen_store().get_workspace_state();
+        let screen = state.screens.get_mut(&ScreenId::from("scr1")).unwrap();
+        let LayoutNode::Slot { id, pane_ids, .. } = &mut screen.root else {
+            panic!("one root slot");
+        };
+        pane_ids.clear();
+        let slot = id.clone();
+        let result = reduce_workspace(state, group_move_op("scr1", &slot, None, "scr2"));
+        assert!(matches!(result, Err(MuxError::EmptyTabGroup(ref id)) if id == &slot));
     }
 
     #[test]

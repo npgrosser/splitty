@@ -39,10 +39,32 @@ pub enum ScreenTransferOutcome {
     Rejected(String),
     Unverified(String),
 }
+/// A whole tab group to move to another Screen, captured from one of its
+/// tabs: the slot, its tabs in order with their identities, and `shown`, the
+/// tab this window shows in it, which stays shown on the target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupActionTarget {
+    pub shown: PaneActionTarget,
+    pub slot_id: String,
+    pub tabs: Vec<(String, String)>,
+}
+impl GroupActionTarget {
+    pub fn source_token(&self) -> SourceToken {
+        self.shown.source_token()
+    }
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+}
 #[derive(Clone)]
 pub(super) struct PendingTransfer {
     pub request_id: Uuid,
+    /// The pane moved, or the shown tab of the group moved.
     pub source: PaneActionTarget,
+    /// Every pane moved with its identity: `source` alone, or the group.
+    pub moved: Vec<(String, String)>,
+    /// The op whose `mux.op_failed` rejects this transfer.
+    pub op: &'static str,
     pub target: ScreenTransferTarget,
     pub follow: bool,
     pub failure: Option<String>,
@@ -156,6 +178,133 @@ impl SourceWorkspace {
     ) -> io::Result<()> {
         self.require_catalog()?;
         self.validate_transfer_source(&source)?;
+        let moved = vec![(source.pane_id.clone(), source.session_id.clone())];
+        self.begin_transfer(
+            request_id,
+            source,
+            moved,
+            "move_pane_to_screen",
+            target,
+            |source, target, create| send(&source.screen_id, &source.pane_id, target, create),
+        )
+    }
+
+    /// The group of tab `pane` on the shown Screen, to move to another
+    /// Screen as a whole.
+    pub fn capture_group_action(&self, pane: &str) -> io::Result<GroupActionTarget> {
+        let shown = self.capture_pane_action(pane)?;
+        let screen = self
+            .shown()
+            .and_then(ScreenModel::snapshot)
+            .ok_or_else(|| invalid("Screen snapshot not loaded"))?;
+        let slot = find_slot(screen, pane).ok_or_else(|| invalid("terminal pane is gone"))?;
+        let LayoutNode::Slot { id, pane_ids, .. } = slot else {
+            return Err(invalid("terminal pane is gone"));
+        };
+        let tabs = pane_ids
+            .iter()
+            .map(|pane| {
+                self.identity_for(pane.as_str())
+                    .map(|identity| (pane.to_string(), identity))
+                    .ok_or_else(|| invalid("terminal session is not ready"))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let shown = match self.selected_pane(slot) {
+            Some(selected) if selected != pane => self.capture_pane_action(selected)?,
+            _ => shown,
+        };
+        let group = GroupActionTarget {
+            shown,
+            slot_id: id.to_string(),
+            tabs,
+        };
+        self.validate_group_source(&group)?;
+        Ok(group)
+    }
+    /// Whether `group` can still move to another Screen as captured.
+    pub fn can_transfer_group(&self, group: &GroupActionTarget) -> bool {
+        self.validate_group_source(group).is_ok()
+    }
+    fn validate_group_source(&self, group: &GroupActionTarget) -> io::Result<()> {
+        self.validate_pane_action(&group.shown)?;
+        let screen = self
+            .shown()
+            .and_then(ScreenModel::snapshot)
+            .ok_or_else(|| invalid("Screen snapshot not loaded"))?;
+        let same = match find_node(screen, &group.slot_id) {
+            Some(LayoutNode::Slot { pane_ids, .. }) => {
+                pane_ids.len() == group.tabs.len()
+                    && pane_ids
+                        .iter()
+                        .zip(&group.tabs)
+                        .all(|(pane, (id, identity))| {
+                            pane.as_str() == id
+                                && self.identity_for(id).as_deref() == Some(identity.as_str())
+                        })
+            }
+            _ => false,
+        };
+        if !same || !group.tabs.iter().any(|(id, _)| id == &group.shown.pane_id) {
+            return Err(invalid("Tab group changed since the action began"));
+        }
+        if group.tabs.iter().any(|(id, _)| {
+            screen
+                .panes
+                .get(&PaneId::from(id.as_str()))
+                .is_none_or(|pane| pane.job_id.is_some())
+        }) {
+            return Err(invalid(
+                "A tab group with a managed job terminal cannot move to another Screen",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn transfer_group(
+        &mut self,
+        client: &Client,
+        request_id: Uuid,
+        group: GroupActionTarget,
+        target: ScreenTransferTarget,
+    ) -> io::Result<()> {
+        self.check_connection(client)?;
+        self.transfer_group_with(
+            request_id,
+            group,
+            target,
+            |screen, slot, shown, target, create| {
+                client.submit_group_transfer(screen, slot, shown, target, create)
+            },
+        )
+    }
+    pub(super) fn transfer_group_with(
+        &mut self,
+        request_id: Uuid,
+        group: GroupActionTarget,
+        target: ScreenTransferTarget,
+        send: impl FnOnce(&str, &str, &str, &str, bool) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.require_catalog()?;
+        self.validate_group_source(&group)?;
+        let slot = group.slot_id;
+        self.begin_transfer(
+            request_id,
+            group.shown,
+            group.tabs,
+            "move_tab_group_to_screen",
+            target,
+            |shown, target, create| send(&shown.screen_id, &slot, &shown.pane_id, target, create),
+        )
+    }
+
+    fn begin_transfer(
+        &mut self,
+        request_id: Uuid,
+        source: PaneActionTarget,
+        moved: Vec<(String, String)>,
+        op: &'static str,
+        target: ScreenTransferTarget,
+        send: impl FnOnce(&PaneActionTarget, &str, bool) -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.pending_transfer.is_some()
             || self.pending_placement.is_some()
             || self
@@ -193,8 +342,7 @@ impl SourceWorkspace {
             .checked_add(2)
             .ok_or_else(|| invalid("workspace mutation generation exhausted"))?;
         send(
-            &source.screen_id,
-            &source.pane_id,
+            &source,
             target.screen_id(),
             matches!(target, ScreenTransferTarget::New { .. }),
         )?;
@@ -214,6 +362,8 @@ impl SourceWorkspace {
         self.pending_transfer = Some(PendingTransfer {
             request_id,
             source,
+            moved,
+            op,
             target,
             follow: true,
             failure: None,
@@ -221,14 +371,11 @@ impl SourceWorkspace {
         Ok(())
     }
     pub(crate) fn observe_transfer_failure(&mut self, connection: Uuid, event: &Value) {
-        if connection != self.connection_id
-            || !MessageType::MuxOpFailed.is(event)
-            || event["op"] != "move_pane_to_screen"
-        {
+        if connection != self.connection_id || !MessageType::MuxOpFailed.is(event) {
             return;
         }
         if let Some(pending) = &mut self.pending_transfer {
-            if event["screenId"] == pending.source.screen_id {
+            if event["op"] == pending.op && event["screenId"] == pending.source.screen_id {
                 pending.failure = Some("Screen transfer was rejected by the service".into());
             }
         }
@@ -246,20 +393,20 @@ impl SourceWorkspace {
             ScreenTransferOutcome::Rejected(reason)
         } else if let Some(reason) = error {
             ScreenTransferOutcome::Unverified(reason)
-        } else if self.screen_for(&pending.source.pane_id) != Some(pending.target.screen_id())
-            || self.identity_for(&pending.source.pane_id).as_deref()
-                != Some(pending.source.session_id.as_str())
-            || !self
-                .models
-                .get(pending.target.screen_id())
-                .and_then(ScreenModel::snapshot)
-                .is_some_and(|screen| {
-                    screen
-                        .root
-                        .find_slot(&PaneId::from(pending.source.pane_id.as_str()))
-                        .is_some()
-                })
-        {
+        } else if !pending.moved.iter().all(|(pane, identity)| {
+            self.screen_for(pane) == Some(pending.target.screen_id())
+                && self.identity_for(pane).as_deref() == Some(identity.as_str())
+                && self
+                    .models
+                    .get(pending.target.screen_id())
+                    .and_then(ScreenModel::snapshot)
+                    .is_some_and(|screen| {
+                        screen
+                            .root
+                            .find_slot(&PaneId::from(pane.as_str()))
+                            .is_some()
+                    })
+        }) {
             ScreenTransferOutcome::Rejected(
                 "Screen transfer was superseded by authoritative state".into(),
             )
@@ -292,3 +439,6 @@ impl SourceWorkspace {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -24,8 +24,8 @@ use crate::{
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
         Axis, CloseImpact, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome,
-        FloatingActionResult, FloatingTarget, GroupDrag, HostActionTarget, HostUpdatePlan,
-        MovePlacement, PaneActionTarget, PaneDrag, PlacementOutcome, ScreenKey,
+        FloatingActionResult, FloatingTarget, GroupActionTarget, GroupDrag, HostActionTarget,
+        HostUpdatePlan, MovePlacement, PaneActionTarget, PaneDrag, PlacementOutcome, ScreenKey,
         ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget, SourceToken,
         SourceWorkspace, TabStep, TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan,
         TemplateApplyResult, TerminalToken, WindowWorkspace, WorkspaceRefresh,
@@ -113,6 +113,7 @@ impl Command {
                 Some(drag.source_token())
             }
             CommandKind::MoveGroup { drag, .. } => Some(drag.source_token()),
+            CommandKind::TransferGroup { source, .. } => Some(source.source_token()),
             _ => self.source,
         };
         if captured != self.source {
@@ -277,6 +278,13 @@ pub enum CommandKind {
     TransferPane {
         request_id: uuid::Uuid,
         source: PaneActionTarget,
+        target: ScreenTransferTarget,
+    },
+    /// A whole tab group to another Screen of its server
+    /// (`tab-group-transfer-v1`); answered like `TransferPane`.
+    TransferGroup {
+        request_id: uuid::Uuid,
+        source: GroupActionTarget,
         target: ScreenTransferTarget,
     },
     Zoom {
@@ -658,6 +666,13 @@ fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: 
             request_id, source, ..
         } => Update::ScreenTransfer(ScreenTransferResult {
             connection_id: source.connection_id,
+            request_id: *request_id,
+            outcome: ScreenTransferOutcome::Rejected(reason),
+        }),
+        CommandKind::TransferGroup {
+            request_id, source, ..
+        } => Update::ScreenTransfer(ScreenTransferResult {
+            connection_id: source.shown.connection_id,
             request_id: *request_id,
             outcome: ScreenTransferOutcome::Rejected(reason),
         }),

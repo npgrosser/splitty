@@ -161,8 +161,13 @@ feature that needs a newer server adds one row to `required_capability`.
 Older checks that change what a command does (a close without
 `close-assessment-v1` asks generically, a tab drop without
 `tab-placement-v1` is not offered as a target) predate the table and stay
-where they are. A refusal that does come back from a server (`mux.op_failed`)
-is an ordinary status message as well (`Operation rejected: …`).
+where they are, and so does the template extraction's own check of
+`server-templates-v1` in `SourceRuntime::command`, which answers through the
+template result rather than a status. A refusal that does come back from a
+server (`mux.op_failed`) is an ordinary status message as well
+(`Operation rejected: …`, for a transfer `Move rejected: …`). Rows today: the
+group drag (`layout-arrange-v1`) and the group transfer
+(`tab-group-transfer-v1`).
 
 ## Tab groups
 
@@ -173,6 +178,15 @@ area takes no clicks. The drop targets are a single tab's (`Dragged` in
 one `arrange_panes` of the root layout the window shows, each group's shown
 tab as its active one (TGD-1 to TGD-5 in `openspec/open-decisions.md`).
 Floating groups move by their own header. Not yet tried in a running window.
+
+The tab menu's "Move Group to Screen" (groups of more than one tab, tiled or
+floating) sends the whole group to another Screen of its server with one
+`move_tab_group_to_screen` (`tab-group-transfer-v1`). Client-core captures it
+as a `GroupActionTarget` (`workspace/catalog/transfer.rs`) and runs it through
+the single tab's transfer path: one pending transfer listing every moved
+pane, the same verification and follow to the group's shown tab (TGT-1 to
+TGT-5 in `openspec/open-decisions.md`). The menu entry and its submenu were
+not tried in a running window either.
 
 ## Architecture boundaries and recent regression lessons
 

@@ -307,6 +307,26 @@ impl MuxHandler {
                     screen_name: field("screenName").map(String::from),
                 })
             }
+            // Behind `tab-group-transfer-v1`.
+            "move_tab_group_to_screen" => {
+                let field = |name: &str| msg.op.get(name).and_then(|v| v.as_str());
+                let (Some(slot_id), Some(target)) = (field("slotId"), field("targetScreenId"))
+                else {
+                    tracing::warn!(
+                        "mux.op: move_tab_group_to_screen needs slotId and targetScreenId"
+                    );
+                    return;
+                };
+                dispatch(Op::MoveTabGroupToScreen {
+                    screen_id: screen_id.clone(),
+                    slot_id: NodeId::from(slot_id),
+                    active_pane_id: field("activePaneId").map(PaneId::from),
+                    target_screen_id: ScreenId::from(target),
+                    create_screen: msg.op.get("createScreen").and_then(|v| v.as_bool())
+                        == Some(true),
+                    screen_name: field("screenName").map(String::from),
+                })
+            }
             "create_screen" => {
                 let name = msg
                     .op
@@ -676,6 +696,7 @@ mod tests {
             "template-names-v1",
             "scratchpad-versions-v1",
             "viewer-reviews-v1",
+            "tab-group-transfer-v1",
         ];
         let store = layout_store();
         let others = Default::default();
@@ -1433,6 +1454,10 @@ mod tests {
                 serde_json::json!({"type":"move_pane_to_screen", "paneId":"p1", "targetScreenId":"absent"}),
             ),
             (
+                "screen-1",
+                serde_json::json!({"type":"move_tab_group_to_screen", "slotId":"absent", "targetScreenId":"screen-2"}),
+            ),
+            (
                 "absent",
                 serde_json::json!({"type":"rename_screen", "name":"Renamed"}),
             ),
@@ -1473,6 +1498,7 @@ mod tests {
             serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"unknown"}}),
             serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"split_pane", "paneId":"p1", "newPaneId":"p4"}}),
             serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"move_pane_to_screen", "paneId":"p1"}}),
+            serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"move_tab_group_to_screen", "slotId":"absent"}}),
         ] {
             handler.handle_value(message).await;
             assert!(sent.try_recv().is_err());
@@ -1697,6 +1723,73 @@ mod tests {
             Some(ScreenId::from("screen-a"))
         );
         assert!(store.get_screen(&ScreenId::from("screen-z")).is_none());
+    }
+
+    /// mux-protocol, Change Propagation to Other Clients (Tab group moved by
+    /// a client): the group arrives whole, the others are nudged for both
+    /// screens, the mover gets nothing.
+    #[tokio::test]
+    async fn a_moved_tab_group_nudges_the_others_for_both_screens() {
+        let store = layout_store();
+        store
+            .dispatch_screen(
+                &ScreenId::from("screen-1"),
+                ScreenOp::NewTab {
+                    pane_id: PaneId::from("p2"),
+                    new_pane_id: Some(PaneId::from("p5")),
+                    cwd: None,
+                    shell_profile_id: None,
+                },
+            )
+            .expect("tab");
+        let slot = store
+            .get_screen(&ScreenId::from("screen-1"))
+            .expect("screen")
+            .root
+            .find_slot(&PaneId::from("p2"))
+            .expect("group")
+            .id()
+            .clone();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "mover", &others);
+
+        handler
+            .handle_value(
+                serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{
+                    "type":"move_tab_group_to_screen", "slotId":slot, "activePaneId":"p2",
+                    "targetScreenId":"screen-2"
+                }}),
+            )
+            .await;
+
+        assert!(sent.try_recv().is_err(), "the mover gets no answer");
+        let events = std::mem::take(&mut *others.lock().expect("events"));
+        let nudged: Vec<_> = events
+            .iter()
+            .map(|event| (event["type"].clone(), event["screenId"].clone()))
+            .collect();
+        assert_eq!(
+            nudged,
+            vec![
+                (
+                    serde_json::json!("mux.nudge"),
+                    serde_json::json!("screen-1")
+                ),
+                (
+                    serde_json::json!("mux.nudge"),
+                    serde_json::json!("screen-2")
+                ),
+            ]
+        );
+        let target = store
+            .get_screen(&ScreenId::from("screen-2"))
+            .expect("target");
+        assert!(matches!(
+            target.root.find_slot(&PaneId::from("p2")),
+            Some(splitty_core::mux::LayoutNode::Slot { pane_ids, active_pane_id, .. })
+                if pane_ids == &[PaneId::from("p4"), PaneId::from("p2"), PaneId::from("p5")]
+                    && active_pane_id.as_ref() == Some(&PaneId::from("p2"))
+        ));
     }
 
     /// mux-protocol, Change Propagation to Other Clients (Panes arranged by a

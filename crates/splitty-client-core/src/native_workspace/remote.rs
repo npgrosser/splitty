@@ -695,6 +695,7 @@ impl<'a> Remotes<'a> {
                 | CommandKind::DockFloat { .. }
                 | CommandKind::MoveFloat { .. }
                 | CommandKind::TransferPane { .. }
+                | CommandKind::TransferGroup { .. }
                 | CommandKind::ApplyTemplate { .. }
                 | CommandKind::ExtractTemplate { .. }
                 | CommandKind::AssessClose { .. }

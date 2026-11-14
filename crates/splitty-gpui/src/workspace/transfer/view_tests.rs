@@ -8,7 +8,10 @@ use gpui_kit::{
 };
 use splitty_client_core::{
     native_workspace::{Update, Worker},
-    workspace::{ClosePlan, MovePlacement, ScreenTransferTarget, WindowWorkspace},
+    workspace::{
+        ClosePlan, MovePlacement, ScreenTransferOutcome, ScreenTransferResult,
+        ScreenTransferTarget, WindowWorkspace,
+    },
 };
 use std::{
     cell::RefCell,
@@ -268,7 +271,7 @@ fn tab_close_keyboard_and_stale_owner_do_not_redirect() {
 }
 
 #[test]
-fn entries_follow_the_web_order_with_one_submenu_row() {
+fn entries_follow_the_web_order_with_the_group_entry_last() {
     with_model(
         local_model(
             Uuid::new_v4(),
@@ -283,6 +286,7 @@ fn entries_follow_the_web_order_with_one_submenu_row() {
                 "tab-context-close-right",
                 "tab-context-copy-cwd",
                 "tab-context-move",
+                "tab-context-move-group",
             ];
             let tops: Vec<_> = order.iter().map(|row| bounds(window, row).top()).collect();
             assert!(tops.windows(2).all(|pair| pair[0] < pair[1]), "{tops:?}");
@@ -307,6 +311,7 @@ fn entries_follow_the_web_order_with_one_submenu_row() {
                     TabMenuAction::CloseRight,
                     TabMenuAction::CopyDirectory,
                     TabMenuAction::MoveToScreen,
+                    TabMenuAction::MoveGroupToScreen,
                 ]
             );
         },
@@ -353,7 +358,10 @@ fn keyboard_skips_disabled_rows_wraps_and_copies_the_directory() {
                 "focus starts on the first enabled entry without a visible highlight"
             );
             keys(window, "up");
-            assert_eq!(selected(window), (Some(TabMenuAction::MoveToScreen), true));
+            assert_eq!(
+                selected(window),
+                (Some(TabMenuAction::MoveGroupToScreen), true)
+            );
             keys(window, "home down");
             assert_eq!(selected(window).0, Some(TabMenuAction::CloseOthers));
             keys(window, "down");
@@ -364,7 +372,7 @@ fn keyboard_skips_disabled_rows_wraps_and_copies_the_directory() {
             );
             keys(window, "end down");
             assert_eq!(selected(window).0, Some(TabMenuAction::Close));
-            keys(window, "end up enter");
+            keys(window, "end up up enter");
             assert!(!menu_open(window, &view));
             assert_eq!(
                 window.read_from_clipboard().and_then(|item| item.text()),
@@ -637,7 +645,7 @@ fn submenu_keyboard_enters_leaves_and_chooses() {
             };
             keys(window, "right");
             assert_eq!(state(window).1, None, "Close Tab has no submenu");
-            keys(window, "end");
+            keys(window, "end up");
             assert_eq!(state(window), (Some(TabMenuAction::MoveToScreen), None));
             keys(window, "enter");
             assert_eq!(
@@ -692,7 +700,7 @@ fn moving_the_parent_focus_off_its_row_closes_the_submenu() {
         local_model(Uuid::new_v4(), &[("p0", false), ("p1", false)], None),
         |window, view, _| {
             open(window, &view, "p0", point(px(120.), px(80.)));
-            hover(window, "tab-context-move");
+            hover(window, "tab-context-move-group");
             assert!(window.debug_bounds("tab-context-move-menu").is_some());
             keys(window, "end");
             assert!(
@@ -713,10 +721,11 @@ fn menus_shift_inside_the_window_and_submenus_flip_left() {
             open(window, &view, "p0", point(px(880.), px(590.)));
             let panel = bounds(window, "tab-context-menu");
             assert_eq!(panel.right(), px(892.), "shifted 8px inside the right edge");
-            assert_eq!(
-                panel.bottom(),
-                px(592.),
-                "shifted 8px inside the bottom edge"
+            // Layout snaps the rows' heights to half pixels.
+            assert!(
+                (panel.bottom() - px(592.)).abs() <= px(0.5),
+                "shifted 8px inside the bottom edge: {:?}",
+                panel.bottom()
             );
             hover(window, "tab-context-move");
             let submenu = bounds(window, "tab-context-move-menu");
@@ -725,7 +734,7 @@ fn menus_shift_inside_the_window_and_submenus_flip_left() {
                 panel.left() - px(4.),
                 "without room on the right it opens on the left"
             );
-            assert!(submenu.bottom() <= px(592.));
+            assert!(submenu.bottom() <= px(592.5));
         },
     );
 }
@@ -969,4 +978,136 @@ fn a_group_dropped_on_an_edge_zone_goes_beside_that_group() {
             } if target == "right"
         ));
     });
+}
+
+fn transfer_result(owner: Uuid, request_id: Uuid, outcome: ScreenTransferOutcome) -> Update {
+    Update::ScreenTransfer(ScreenTransferResult {
+        connection_id: owner,
+        request_id,
+        outcome,
+    })
+}
+
+/// workspace-model, Native Tab Group Transfer: the group entry opens the
+/// same Screen choices beside its own row and sends the whole group, the
+/// tab the window shows in it shown on the target, whichever tab the menu
+/// was opened on.
+#[test]
+fn the_group_entry_sends_the_whole_group_to_the_chosen_screen() {
+    let owner = Uuid::new_v4();
+    with_model(
+        local_model(owner, &[("p0", false), ("p1", false), ("p2", false)], None),
+        |window, view, mut receiver| {
+            open(window, &view, "p1", point(px(120.), px(80.)));
+            hover(window, "tab-context-move-group");
+            // Level with its row, within the half pixel layout snaps to.
+            let level = |window: &mut VisualTestContext, row: &'static str| {
+                let row = bounds(window, row).top();
+                (bounds(window, "tab-context-move-menu").top() - row).abs() <= px(0.5)
+            };
+            assert!(
+                level(window, "tab-context-move-group"),
+                "beside the group entry"
+            );
+            hover(window, "tab-context-move");
+            assert!(
+                level(window, "tab-context-move") && !level(window, "tab-context-move-group"),
+                "the terminal's own entry has its own submenu"
+            );
+            hover(window, "tab-context-move-group");
+            click(window, "tab-context-transfer-other");
+            assert!(!menu_open(window, &view));
+            let command = receiver.try_recv().expect("group transfer sent");
+            let request = match command.kind() {
+                Command::TransferGroup {
+                    request_id,
+                    source,
+                    target,
+                } => {
+                    assert_eq!(source.slot_id, "slot");
+                    assert_eq!(
+                        source
+                            .tabs
+                            .iter()
+                            .map(|(pane, _)| pane.as_str())
+                            .collect::<Vec<_>>(),
+                        ["p0", "p1", "p2"]
+                    );
+                    assert_eq!(source.shown.pane_id, "p0", "the shown tab stays shown");
+                    assert!(matches!(
+                        target,
+                        ScreenTransferTarget::Existing { screen } if screen.screen_id() == "other"
+                    ));
+                    *request_id
+                }
+                _ => panic!("expected a group transfer"),
+            };
+            deliver(
+                window,
+                &view,
+                transfer_result(owner, request, ScreenTransferOutcome::Confirmed),
+            );
+            assert_eq!(status(window, &view), "Tab group moved to Screen");
+        },
+    );
+}
+
+/// The group entry is offered whatever the server: a refusal, by the
+/// command layer for an older server or by the server itself, is an
+/// ordinary status and the menu works again afterwards.
+#[test]
+fn a_refused_group_transfer_is_a_status_and_the_menu_stays_usable() {
+    let owner = Uuid::new_v4();
+    with_model(
+        local_model(owner, &[("p0", false), ("p1", false)], None),
+        |window, view, mut receiver| {
+            let send_to_new = |window: &mut VisualTestContext, receiver: &mut Commands| {
+                open(window, &view, "p0", point(px(120.), px(80.)));
+                keys(window, "end right up enter");
+                let command = receiver.try_recv().expect("group transfer sent");
+                match command.kind() {
+                    Command::TransferGroup {
+                        request_id,
+                        target: ScreenTransferTarget::New { .. },
+                        ..
+                    } => *request_id,
+                    _ => panic!("expected a group transfer to a new Screen"),
+                }
+            };
+            let request = send_to_new(window, &mut receiver);
+            let outdated =
+                "The local Splitty service is older than this app; update it for this action";
+            deliver(
+                window,
+                &view,
+                transfer_result(
+                    owner,
+                    request,
+                    ScreenTransferOutcome::Rejected(outdated.into()),
+                ),
+            );
+            deliver(window, &view, Update::ServerOutdated(outdated.into()));
+            assert_eq!(status(window, &view), outdated);
+            assert!(window.update(|_, cx| view.read(cx).pending_transfer.is_none()));
+
+            let request = send_to_new(window, &mut receiver);
+            deliver(
+                window,
+                &view,
+                transfer_result(
+                    owner,
+                    request,
+                    ScreenTransferOutcome::Rejected(
+                        "Screen transfer was rejected by the service".into(),
+                    ),
+                ),
+            );
+            assert_eq!(
+                status(window, &view),
+                "Move rejected: Screen transfer was rejected by the service"
+            );
+            open(window, &view, "p0", point(px(120.), px(80.)));
+            assert!(menu_open(window, &view), "the menu opens again");
+        },
+    );
 }

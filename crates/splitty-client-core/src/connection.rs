@@ -354,6 +354,27 @@ impl Client {
         }}))
     }
 
+    /// `move_tab_group_to_screen` (`tab-group-transfer-v1`): the panes of
+    /// slot `slot`, `shown` shown on the target.
+    pub(crate) fn submit_group_transfer(
+        &self,
+        source: &str,
+        slot: &str,
+        shown: &str,
+        target: &str,
+        create: bool,
+    ) -> io::Result<()> {
+        for id in [source, slot, shown, target] {
+            identifier(id)?;
+        }
+        self.command(0, || {
+            json!({"type":"mux.op","screenId":source,"op":{
+                "type":"move_tab_group_to_screen","slotId":slot,"activePaneId":shown,
+                "targetScreenId":target,"createScreen":create
+            }})
+        })
+    }
+
     /// Refill a service-owned screen that ran empty, preserving its ID and name.
     pub fn recreate_screen(&self, screen_id: &str, new_pane_id: &str) -> io::Result<()> {
         self.submit_recreate_screen(screen_id, new_pane_id)?;

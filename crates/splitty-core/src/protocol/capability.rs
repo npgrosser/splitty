@@ -76,6 +76,9 @@ pub const TEMPLATE_NAMES: &str = "template-names-v1";
 pub const SCRATCHPAD_VERSIONS: &str = "scratchpad-versions-v1";
 /// The server anchors annotations and builds reviews on request.
 pub const VIEWER_REVIEWS: &str = "viewer-reviews-v1";
+/// A whole tab group moves to another Screen (`move_tab_group_to_screen`,
+/// `workspace-model`, Move A Tab Group To Another Screen).
+pub const TAB_GROUP_TRANSFER: &str = "tab-group-transfer-v1";
 
 /// What every connection is told.
 const EVERY_CONNECTION: [&str; 10] = [
@@ -100,7 +103,7 @@ const LOCAL_HUB: [&str; 4] = [
 ];
 
 /// What every connection is told after the hub's capabilities.
-const SESSION: [&str; 13] = [
+const SESSION: [&str; 14] = [
     SERVER_DERIVED_PANE_STATE,
     EDITOR_OPEN,
     FILE_OFFER,
@@ -114,6 +117,7 @@ const SESSION: [&str; 13] = [
     TEMPLATE_NAMES,
     SCRATCHPAD_VERSIONS,
     VIEWER_REVIEWS,
+    TAB_GROUP_TRANSFER,
 ];
 
 /// The capabilities of `mux.welcome`, in the order servers send them;

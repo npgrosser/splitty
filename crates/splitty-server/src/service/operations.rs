@@ -860,6 +860,26 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                 screen_name: field("screenName").map(String::from),
             })
         }
+        "move_tab_group_to_screen" => {
+            let field = |name: &str| req.op.get(name).and_then(|v| v.as_str());
+            let (Some(slot_id), Some(target)) = (field("slotId"), field("targetScreenId")) else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Payload(json!({"ok": false, "error": "invalid op: slotId and targetScreenId are required"})),
+                )
+                    .into_reply();
+            };
+            let target = ScreenId::from(target);
+            moved_to = Some(target.clone());
+            state.mux_store.dispatch(mux::Op::MoveTabGroupToScreen {
+                screen_id: screen_id.clone(),
+                slot_id: splitty_core::ids::NodeId::from(slot_id),
+                active_pane_id: field("activePaneId").map(splitty_core::ids::PaneId::from),
+                target_screen_id: target,
+                create_screen: req.op.get("createScreen").and_then(|v| v.as_bool()) == Some(true),
+                screen_name: field("screenName").map(String::from),
+            })
+        }
         "create_screen" => {
             let name = req
                 .op

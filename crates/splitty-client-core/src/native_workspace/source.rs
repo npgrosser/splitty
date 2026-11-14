@@ -708,6 +708,39 @@ impl SourceRuntime {
             }
             return Ok(out);
         }
+        if let CommandKind::TransferGroup {
+            request_id,
+            source,
+            target,
+        } = command
+        {
+            if model
+                .as_ref()
+                .is_some_and(|model| model.transfer_request_pending(request_id))
+            {
+                return Ok(out);
+            }
+            let connection_id = source.shown.connection_id;
+            let result = if self.pending_close.is_some() {
+                Err(std::io::Error::other("A close operation is pending"))
+            } else if let Some(model) = &mut model {
+                model
+                    .transfer_group(&self.client, request_id, source, target)
+                    .and_then(|()| self.workspace_refresh.begin(model))
+            } else {
+                Err(std::io::Error::other("Workspace is not ready"))
+            };
+            if let Err(error) = result {
+                out.push(Update::ScreenTransfer(ScreenTransferResult {
+                    connection_id,
+                    request_id,
+                    outcome: ScreenTransferOutcome::Rejected(error.to_string()),
+                }));
+            } else {
+                out.changed = true;
+            }
+            return Ok(out);
+        }
         if let CommandKind::AssessClose { request_id, scope } = command {
             // The server's answer arrives as `mux.close_assessed`; without
             // the capability the window asks generically.
@@ -814,6 +847,7 @@ impl SourceRuntime {
             | CommandKind::DockFloat { .. }
             | CommandKind::MoveFloat { .. }
             | CommandKind::TransferPane { .. }
+            | CommandKind::TransferGroup { .. }
             | CommandKind::Zoom { .. }
             | CommandKind::UpdateSettings { .. }
             | CommandKind::SetDrawerVisibility { .. }

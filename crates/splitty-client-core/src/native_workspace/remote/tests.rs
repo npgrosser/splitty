@@ -2222,6 +2222,129 @@ async fn a_tab_group_of_a_host_screen_moves_by_drag_unless_its_daemon_is_older()
     let _ = std::fs::remove_dir_all(path);
 }
 
+/// workspace-model, Native Tab Group Transfer: a host's tab group moves to a
+/// new Screen of that host as one `move_tab_group_to_screen`, through the
+/// same command gate as a local one. While the host's daemon is taken not to
+/// announce `tab-group-transfer-v1`, nothing is sent: the transfer is
+/// rejected and the window is told the daemon needs an update.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn a_tab_group_of_a_host_screen_moves_to_another_screen_unless_its_daemon_is_older() {
+    use splitty_core::mux::LayoutNode;
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let ids = client.create_screen("Host screen").unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let (mut remotes, id, token) =
+        opened_host_screen(&service, &mut window, client, &ids.screen_id).await;
+    let key = window.source(id).unwrap().screen_key(&ids.screen_id);
+    let tab = Command::new(
+        token,
+        CommandKind::Tab {
+            screen: key,
+            pane: ids.pane_id.clone(),
+        },
+    );
+    assert!(remotes
+        .command(&mut window, tab)
+        .unwrap()
+        .updates
+        .is_empty());
+    let screen_id = ids.screen_id.clone();
+    let tabs_on = |window: &WindowWorkspace, screen: &str| -> Option<Vec<String>> {
+        let snapshot = window
+            .source(id)
+            .and_then(|source| source.screen(screen))
+            .and_then(|screen| screen.server_snapshot())?;
+        match &snapshot.root {
+            LayoutNode::Slot { pane_ids, .. } => {
+                Some(pane_ids.iter().map(ToString::to_string).collect())
+            }
+            LayoutNode::Split { .. } => None,
+        }
+    };
+    pump_first_host(&mut remotes, &mut window, |window, source| {
+        tabs_on(window, &screen_id).is_some_and(|tabs| tabs.len() == 2)
+            && window
+                .source(id)
+                .unwrap()
+                .screen(&screen_id)
+                .and_then(|screen| screen.snapshot())
+                .is_some_and(|snapshot| snapshot.sessions.len() == 2)
+            && !source.observation_pending(window)
+    })
+    .await;
+    let tabs = tabs_on(&window, &screen_id).unwrap();
+    let new_screen = uuid::Uuid::new_v4().to_string();
+    let transfer = |window: &WindowWorkspace, request_id| {
+        let source = window.source(id).unwrap();
+        let group = source.capture_group_action(&tabs[1]).expect("a group");
+        assert_eq!(group.tab_count(), 2);
+        assert!(source.can_transfer_group(&group));
+        Command::new(
+            token,
+            CommandKind::TransferGroup {
+                request_id,
+                source: group,
+                target: ScreenTransferTarget::New {
+                    screen_id: new_screen.clone(),
+                },
+            },
+        )
+    };
+
+    // An older daemon: nothing is sent; the transfer settles as rejected
+    // and one status says why.
+    remotes.hosts[0]
+        .source
+        .as_mut()
+        .unwrap()
+        .announce_only(&[splitty_core::protocol::capability::LAYOUT_ARRANGE]);
+    let request = uuid::Uuid::new_v4();
+    let command = transfer(&window, request);
+    let refused = remotes.command(&mut window, command).unwrap().updates;
+    assert!(
+        matches!(refused.as_slice(), [
+            Update::ScreenTransfer(ScreenTransferResult { request_id, outcome: ScreenTransferOutcome::Rejected(_), .. }),
+            Update::ServerOutdated(status),
+        ] if *request_id == request && status.contains("host's Splitty daemon is older")),
+        "{} updates",
+        refused.len()
+    );
+    assert_eq!(tabs_on(&window, &screen_id), Some(tabs.clone()));
+    assert!(!window.source(id).unwrap().transfer_pending());
+
+    // The daemon as it is: the group moves whole and its Screen goes along.
+    remotes.hosts[0]
+        .source
+        .as_mut()
+        .unwrap()
+        .announce_only(&[splitty_core::protocol::capability::TAB_GROUP_TRANSFER]);
+    let command = transfer(&window, uuid::Uuid::new_v4());
+    assert!(remotes
+        .command(&mut window, command)
+        .unwrap()
+        .updates
+        .is_empty());
+    pump_first_host(&mut remotes, &mut window, |window, _| {
+        tabs_on(window, &new_screen).as_ref() == Some(&tabs)
+            && window.source(id).unwrap().screen(&screen_id).is_none()
+            && !window.source(id).unwrap().transfer_pending()
+    })
+    .await;
+
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
 /// remote-screens, Host Screen Directory Cache (A Screen that left a
 /// connected host): once the host confirmed the terminate of a Screen, the
 /// window reports the host's remaining Screens over its local connection and

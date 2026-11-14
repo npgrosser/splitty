@@ -1047,6 +1047,8 @@ struct PendingDrawerPin {
 struct PendingTransfer {
     source: SourceToken,
     request_id: Uuid,
+    /// A whole tab group rather than one terminal.
+    group: bool,
 }
 
 impl PendingTransfer {
@@ -4318,10 +4320,15 @@ impl Workspace {
                             .is_some_and(|model| model.source_token() == pending.source)
                             && pending.matches(result.connection_id, result.request_id)
                     }) {
-                        self.pending_transfer = None;
+                        let group = self.pending_transfer.take().is_some_and(|p| p.group);
                         match result.outcome {
                             ScreenTransferOutcome::Confirmed => {
-                                self.status = "Terminal moved to Screen".into();
+                                self.status = if group {
+                                    "Tab group moved to Screen"
+                                } else {
+                                    "Terminal moved to Screen"
+                                }
+                                .into();
                             }
                             ScreenTransferOutcome::Rejected(reason) => {
                                 self.status = format!("Move rejected: {reason}");

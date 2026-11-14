@@ -167,6 +167,12 @@ pub enum MuxError {
     #[error("pane {0} belongs to a managed job and cannot move to another screen")]
     JobPaneMove(PaneId),
 
+    #[error("tab group {0} cannot move to the screen it is on")]
+    GroupSameScreen(NodeId),
+
+    #[error("tab group {0} holds no pane")]
+    EmptyTabGroup(NodeId),
+
     #[error("session {0} not found")]
     SessionNotFound(SessionId),
 

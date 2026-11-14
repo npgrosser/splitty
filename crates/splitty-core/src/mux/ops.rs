@@ -114,6 +114,20 @@ pub enum Op {
         screen_name: Option<String>,
     },
 
+    /// Move the panes of tab group `slot_id`, of the root layout or a
+    /// floating entry, with their sessions, in their tab order, to another
+    /// screen or a new one, as one change; `active_pane_id`, or the group's
+    /// active tab, is shown there.
+    MoveTabGroupToScreen {
+        screen_id: ScreenId,
+        slot_id: NodeId,
+        active_pane_id: Option<PaneId>,
+        target_screen_id: ScreenId,
+        /// Create the target, named `screen_name`; otherwise it must exist.
+        create_screen: bool,
+        screen_name: Option<String>,
+    },
+
     /// An agent's reply to annotation `number` of viewer pane `pane_id` on
     /// `screen_id`, derived from a control API request: the server chose the
     /// reply's ID and its `from` (`viewer-annotations`, Agents Read And Reply

@@ -1,6 +1,7 @@
 //! The captured tab's context menu: Close actions over its tab group, its
-//! working directory and, for local Screens, moving it to another Screen.
-//! Entries, order and keyboard behavior follow the web client's tab menu.
+//! working directory and moving it, or its whole group, to another Screen.
+//! Entries, order and keyboard behavior follow the web client's tab menu;
+//! the group entry is the native app's own.
 use super::*;
 use gpui_kit::base::DeferredPopover;
 use splitty_client_core::native_workspace::{
@@ -19,6 +20,7 @@ enum TabMenuAction {
     CopyDirectory,
     CopySshPath,
     MoveToScreen,
+    MoveGroupToScreen,
 }
 
 impl TabMenuAction {
@@ -31,6 +33,24 @@ impl TabMenuAction {
             Self::CopyDirectory => "copy-cwd",
             Self::CopySshPath => "copy-ssh",
             Self::MoveToScreen => "move",
+            Self::MoveGroupToScreen => "move-group",
+        }
+    }
+
+    /// Whether the entry opens the Screen submenu, and for the whole group.
+    fn transfer(self) -> Option<bool> {
+        match self {
+            Self::MoveToScreen => Some(false),
+            Self::MoveGroupToScreen => Some(true),
+            _ => None,
+        }
+    }
+
+    fn for_transfer(group: bool) -> Self {
+        if group {
+            Self::MoveGroupToScreen
+        } else {
+            Self::MoveToScreen
         }
     }
 }
@@ -94,9 +114,11 @@ enum TabCloseScope {
     Right,
 }
 
-/// The open "Move to Screen" submenu.
+/// The open "Move to Screen" or "Move Group to Screen" submenu.
 #[derive(Default)]
 pub(super) struct TransferMenu {
+    /// The submenu of the group entry: its choice moves the whole group.
+    pub(super) group: bool,
     /// The keyboard focus once it moved into the submenu; the parent row keeps
     /// it otherwise.
     pub(super) focused: Option<TransferChoice>,
@@ -116,6 +138,7 @@ pub(super) struct TabContextMenu {
     scroll: ScrollHandle,
     panel_bounds: menu_style::PlacedBounds,
     move_row_bounds: menu_style::PlacedBounds,
+    move_group_row_bounds: menu_style::PlacedBounds,
     /// Popup-aware interactions elsewhere step aside while the menu is open.
     _open: DeferredPopover,
     /// Kit's root binds Tab to focus traversal ahead of raw key handlers;
@@ -124,6 +147,13 @@ pub(super) struct TabContextMenu {
 }
 
 impl TabContextMenu {
+    /// Whether the submenu of `action` is the open one.
+    fn transfer_open_for(&self, action: TabMenuAction) -> bool {
+        action
+            .transfer()
+            .is_some_and(|group| self.transfer.as_ref().is_some_and(|t| t.group == group))
+    }
+
     fn keyboard_in_transfer(&self) -> bool {
         self.transfer
             .as_ref()
@@ -298,6 +328,7 @@ impl Workspace {
                     scroll: ScrollHandle::new(),
                     panel_bounds: Rc::default(),
                     move_row_bounds: Rc::default(),
+                    move_group_row_bounds: Rc::default(),
                     _open: GlobalState::register_deferred_popover(cx),
                     _tab_closes: tab_closes,
                 };
@@ -326,6 +357,16 @@ impl Workspace {
     fn tab_menu_can_transfer(&self, menu: &TabContextMenu) -> bool {
         self.selected_model()
             .is_some_and(|model| model.can_transfer_pane(&menu.source))
+    }
+
+    /// The tab's group has more tabs than this one and may move as a whole.
+    /// Whether its server takes the move is the command layer's to say.
+    fn tab_menu_can_transfer_group(&self, menu: &TabContextMenu) -> bool {
+        self.selected_model().is_some_and(|model| {
+            model
+                .capture_group_action(&menu.source.pane_id)
+                .is_ok_and(|group| group.tab_count() > 1)
+        })
     }
 
     /// The SSH target of the captured tab's remote source.
@@ -377,10 +418,21 @@ impl Workspace {
                 });
             }
         }
-        if self.tab_menu_can_transfer(menu) {
+        let single = self.tab_menu_can_transfer(menu);
+        if single {
             rows.push(TabMenuRow {
                 separator_before: true,
                 ..row(TabMenuAction::MoveToScreen, "Move to Screen", true)
+            });
+        }
+        if self.tab_menu_can_transfer_group(menu) {
+            rows.push(TabMenuRow {
+                separator_before: !single,
+                ..row(
+                    TabMenuAction::MoveGroupToScreen,
+                    "Move Group to Screen",
+                    true,
+                )
             });
         }
         rows
@@ -476,10 +528,9 @@ impl Workspace {
             "escape" => self.dismiss_tab_context_menu(window, cx),
             "right"
                 if !in_transfer
-                    && menu.selected == Some(TabMenuAction::MoveToScreen)
-                    && self
-                        .tab_menu_enabled(menu)
-                        .contains(&TabMenuAction::MoveToScreen) =>
+                    && menu.selected.is_some_and(|action| {
+                        action.transfer().is_some() && self.tab_menu_enabled(menu).contains(&action)
+                    }) =>
             {
                 self.enter_transfer_menu(cx)
             }
@@ -499,7 +550,10 @@ impl Workspace {
                     let menu = self.tab_context_menu.as_mut().expect("open menu");
                     menu.selected = step(&enabled, menu.selected.as_ref(), &key);
                     menu.focus_visible = true;
-                    if menu.selected != Some(TabMenuAction::MoveToScreen) {
+                    if !menu
+                        .selected
+                        .is_some_and(|action| menu.transfer_open_for(action))
+                    {
                         menu.transfer = None;
                     }
                 }
@@ -535,9 +589,13 @@ impl Workspace {
         }
     }
 
-    /// Opens the submenu with the keyboard focus on its first entry.
+    /// Opens the selected entry's submenu with the keyboard focus on its
+    /// first entry.
     fn enter_transfer_menu(&mut self, cx: &mut Context<Self>) {
         let Some(menu) = self.tab_context_menu.as_ref() else {
+            return;
+        };
+        let Some(group) = menu.selected.and_then(TabMenuAction::transfer) else {
             return;
         };
         let first = self
@@ -546,9 +604,13 @@ impl Workspace {
             .next()
             .map(|(choice, _)| choice);
         let menu = self.tab_context_menu.as_mut().expect("open menu");
-        menu.transfer
-            .get_or_insert_with(TransferMenu::default)
-            .focused = first;
+        if !menu.transfer.as_ref().is_some_and(|t| t.group == group) {
+            menu.transfer = Some(TransferMenu {
+                group,
+                ..TransferMenu::default()
+            });
+        }
+        menu.transfer.as_mut().expect("open submenu").focused = first;
         menu.focus_visible = true;
         self.reveal_tab_menu_focus();
         cx.notify();
@@ -557,8 +619,8 @@ impl Workspace {
     /// Closes the submenu and returns the keyboard focus to its row.
     fn leave_transfer_menu(&mut self, cx: &mut Context<Self>) {
         if let Some(menu) = self.tab_context_menu.as_mut() {
-            menu.transfer = None;
-            menu.selected = Some(TabMenuAction::MoveToScreen);
+            let group = menu.transfer.take().is_some_and(|transfer| transfer.group);
+            menu.selected = Some(TabMenuAction::for_transfer(group));
             menu.focus_visible = true;
             cx.notify();
         }
@@ -570,9 +632,12 @@ impl Workspace {
         let Some(menu) = self.tab_context_menu.as_mut() else {
             return;
         };
-        if action == Some(TabMenuAction::MoveToScreen) {
-            if menu.transfer.is_none() {
-                menu.transfer = Some(TransferMenu::default());
+        if let Some(group) = action.and_then(TabMenuAction::transfer) {
+            if !menu.transfer.as_ref().is_some_and(|t| t.group == group) {
+                menu.transfer = Some(TransferMenu {
+                    group,
+                    ..TransferMenu::default()
+                });
                 cx.notify();
             }
         } else if menu.transfer.take().is_some() {
@@ -619,9 +684,15 @@ impl Workspace {
             TabMenuAction::CopyDirectory | TabMenuAction::CopySshPath => {
                 self.choose_copy(pane, action, window, cx)
             }
-            TabMenuAction::MoveToScreen => {
+            TabMenuAction::MoveToScreen | TabMenuAction::MoveGroupToScreen => {
+                let group = action == TabMenuAction::MoveGroupToScreen;
                 if let Some(menu) = self.tab_context_menu.as_mut() {
-                    menu.transfer.get_or_insert_with(TransferMenu::default);
+                    if !menu.transfer.as_ref().is_some_and(|t| t.group == group) {
+                        menu.transfer = Some(TransferMenu {
+                            group,
+                            ..TransferMenu::default()
+                        });
+                    }
                     cx.notify();
                 }
             }
@@ -767,7 +838,102 @@ impl Workspace {
         let Some(menu) = self.take_tab_menu(pane, window, cx) else {
             return;
         };
-        self.choose_transfer_captured(menu.source, existing, cx);
+        if menu
+            .transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.group)
+        {
+            self.choose_group_transfer_captured(menu.source, existing, cx);
+        } else {
+            self.choose_transfer_captured(menu.source, existing, cx);
+        }
+    }
+
+    /// Sends the group of the captured tab to `existing`, or to a new Screen.
+    /// The command layer refuses it, with its own message, where the server
+    /// cannot take it.
+    pub(super) fn choose_group_transfer_captured(
+        &mut self,
+        source: PaneActionTarget,
+        existing: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        let group = match model.capture_group_action(&source.pane_id) {
+            Ok(group) if group.shown.screen_id == source.screen_id => group,
+            Ok(_) => {
+                self.status = "Move target changed; open the menu again".into();
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("Move target changed: {error}");
+                cx.notify();
+                return;
+            }
+        };
+        let Some(target) = self.transfer_target(&source, existing, cx) else {
+            return;
+        };
+        let request_id = Uuid::new_v4();
+        let source_token = source.source_token();
+        match self.commands.try_send(WorkerCommand::new(
+            source_token,
+            Command::TransferGroup {
+                request_id,
+                source: group,
+                target,
+            },
+        )) {
+            Ok(()) => {
+                self.pending_transfer = Some(PendingTransfer {
+                    source: source_token,
+                    request_id,
+                    group: true,
+                });
+            }
+            Err(error) => self.status = format!("Move not sent: {error}"),
+        }
+        cx.notify();
+    }
+
+    /// The destination of a move from `source`'s Screen, or none, with the
+    /// reason as status, while a move is being verified or the chosen
+    /// Screen is gone.
+    fn transfer_target(
+        &mut self,
+        source: &PaneActionTarget,
+        existing: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<ScreenTransferTarget> {
+        let model = self.selected_model()?;
+        if model.transfer_pending() || model.routes_reconciling() || self.pending_transfer.is_some()
+        {
+            self.status = "Screen move is still being verified".into();
+            cx.notify();
+            return None;
+        }
+        if let Some(screen_id) = existing {
+            if screen_id == source.screen_id
+                || !model
+                    .screens()
+                    .iter()
+                    .any(|screen| screen.id.as_str() == screen_id)
+            {
+                self.status = "Move destination changed; open the menu again".into();
+                cx.notify();
+                return None;
+            }
+            Some(ScreenTransferTarget::Existing {
+                screen: model.screen_key(screen_id),
+            })
+        } else {
+            Some(ScreenTransferTarget::New {
+                screen_id: Uuid::new_v4().to_string(),
+            })
+        }
     }
 
     pub(super) fn choose_transfer_captured(
@@ -789,30 +955,8 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if model.transfer_pending() || model.routes_reconciling() || self.pending_transfer.is_some()
-        {
-            self.status = "Screen move is still being verified".into();
-            cx.notify();
+        let Some(target) = self.transfer_target(&source, existing, cx) else {
             return;
-        }
-        let target = if let Some(screen_id) = existing {
-            if screen_id == source.screen_id
-                || !model
-                    .screens()
-                    .iter()
-                    .any(|screen| screen.id.as_str() == screen_id)
-            {
-                self.status = "Move destination changed; open the menu again".into();
-                cx.notify();
-                return;
-            }
-            ScreenTransferTarget::Existing {
-                screen: model.screen_key(screen_id),
-            }
-        } else {
-            ScreenTransferTarget::New {
-                screen_id: Uuid::new_v4().to_string(),
-            }
         };
         let request_id = Uuid::new_v4();
         let source_token = source.source_token();
@@ -828,6 +972,7 @@ impl Workspace {
                 self.pending_transfer = Some(PendingTransfer {
                     source: source_token,
                     request_id,
+                    group: false,
                 });
             }
             Err(error) => self.status = format!("Move not sent: {error}"),
@@ -870,7 +1015,7 @@ impl Workspace {
             let selector = format!("tab-context-{}", action.key());
             let label = menu_style::label(colors, row.label, row.detail);
             let element = if row.enabled {
-                let expanded = action == TabMenuAction::MoveToScreen && menu.transfer.is_some();
+                let expanded = menu.transfer_open_for(action);
                 let focused =
                     menu.focus_visible && !keyboard_in_transfer && menu.selected == Some(action);
                 menu_style::item(colors, focused || expanded, action == TabMenuAction::Close)
@@ -886,8 +1031,12 @@ impl Workspace {
                         cx.stop_propagation();
                         this.tab_menu_click(action, window, cx);
                     }))
-                    .when(action == TabMenuAction::MoveToScreen, |row| {
-                        let bounds = menu.move_row_bounds.clone();
+                    .when(action.transfer().is_some(), |row| {
+                        let bounds = if action == TabMenuAction::MoveGroupToScreen {
+                            menu.move_group_row_bounds.clone()
+                        } else {
+                            menu.move_row_bounds.clone()
+                        };
                         row.child(menu_style::meta().child(menu_style::chevron()))
                             .child(
                                 canvas(move |row, _, _| bounds.set(Some(row)), |_, _, _, _| {})
@@ -954,7 +1103,11 @@ impl Workspace {
             menu_style::placed(
                 menu_style::Placement::Beside {
                     parent: menu.panel_bounds.clone(),
-                    row: menu.move_row_bounds.clone(),
+                    row: if transfer.group {
+                        menu.move_group_row_bounds.clone()
+                    } else {
+                        menu.move_row_bounds.clone()
+                    },
                 },
                 None,
                 submenu,
