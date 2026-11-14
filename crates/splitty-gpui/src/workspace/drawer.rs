@@ -2345,7 +2345,21 @@ fn drawer_pane_groups(screen: &ScreenState) -> Vec<Vec<&str>> {
     groups
 }
 
-fn split_title_icon(title: &str) -> (Option<char>, &str) {
+/// The family a title's leading icon is drawn in: the platform's symbol font,
+/// whose glyphs are monochrome and take the text color. Without it the
+/// fallback reaches the color emoji font first for symbols such as U+2733.
+/// A character the symbol font lacks still falls back as before.
+pub(super) fn title_icon_family() -> Option<SharedString> {
+    if cfg!(target_os = "windows") {
+        Some("Segoe UI Symbol".into())
+    } else if cfg!(target_os = "macos") {
+        Some("Apple Symbols".into())
+    } else {
+        None
+    }
+}
+
+pub(super) fn split_title_icon(title: &str) -> (Option<char>, &str) {
     let mut chars = title.chars();
     let Some(first) = chars.next() else {
         return (None, title);
@@ -3516,6 +3530,9 @@ impl Workspace {
                                         PANE_ICON_TEXT
                                     }))
                                     .when(busy, |icon| icon.text_color(rgb(self.appearance.text)))
+                                    .when_some(title_icon_family(), |icon, family| {
+                                        icon.font_family(family)
+                                    })
                                     .child(icon.to_string())
                                     .into_any_element()
                             } else {

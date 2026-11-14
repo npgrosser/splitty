@@ -81,13 +81,34 @@ pub(super) fn tab_surface(
         })
 }
 
+/// `.tab-label`'s gap between a title's leading icon and its text.
+const TAB_ICON_GAP: f32 = 4.;
+
 pub(super) fn tab_label(title: String) -> Div {
-    div()
+    let (icon, text) = drawer::split_title_icon(&title);
+    let text = div()
         .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
-        .child(title)
+        .child(text.to_string());
+    div()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .overflow_hidden()
+        .when_some(icon, |label, icon| {
+            label.child(
+                div()
+                    .flex_none()
+                    .mr(chrome_rems(TAB_ICON_GAP))
+                    .when_some(drawer::title_icon_family(), |icon, family| {
+                        icon.font_family(family)
+                    })
+                    .child(icon.to_string()),
+            )
+        })
+        .child(text)
 }
 
 /// An inert drawing of a tab's close button.
