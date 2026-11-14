@@ -191,19 +191,24 @@ Each source keeps the root records (OSC 7501) its current connection reports
 once its `mux.welcome` listed `program-status-v1`
 (`crates/splitty-client-core/src/workspace/program_status.rs`); a host that is
 older or not connected shows nothing. The window
-(`crates/splitty-gpui/src/workspace/program_status.rs`) puts a dot on a pane's
-tab for a working, waiting, done or failed program, with the state and the
-record's message as its tooltip. A Drawer Screen and a host group caption show
+(`crates/splitty-gpui/src/workspace/program_status.rs`) draws a pane's state
+as a monochrome glyph before the title, on the pane's tab and on its row in the
+Drawer: pulsing for a working program, in the warning color for a waiting one,
+a check or a cross for a done or failed one; on the tab the state and the
+record's message are its tooltip. A program at rest shows a muted glyph there
+unless the title starts with an icon of its own, which then stays; a state to
+notice takes the place of the title's icon (`title_mark`). The glyphs come from
+the terminal face the app carries. A Drawer Screen and a host group caption show
 a waiting pane, also for a host's Screens the window has not opened; the host's
-panel and the Hosts list word such a Screen as "Waiting". A done or failed dot
+panel and the Hosts list word such a Screen as "Waiting". A done or failed mark
 goes once the pane is watched, the same rule as for unread notifications, and
 returns only for a newer record; what was seen is kept in memory per window.
 Reports the server marked `notify` carry the server's notice and become
 notifications under `notifications.programStatus` (a row in the notification
 settings); the server suppresses the finished-command notices of a session that
 holds a record, and bells are no notification. The
-outgoing Screen of a transition shows no dots, as it shows no scratchpad
-marks.
+outgoing Screen of a transition and a dragged tab show the title's own icon
+only, as they show no scratchpad marks.
 
 ## SSH questions
 

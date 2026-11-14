@@ -3512,16 +3512,30 @@ impl Workspace {
                                 .as_ref()
                                 .and_then(|id| screen.sessions.get(id))
                                 .is_some_and(|session| session.busy);
-                            let glows = busy && !is_viewer && leading_icon.is_some();
+                            let mark = self.pane_title_mark(key.source_id(), pane_id, leading_icon);
+                            let glows = busy
+                                && !is_viewer
+                                && matches!(mark, Some(program_status::TitleMark::Icon(_)));
                             let glyph: AnyElement = if is_viewer {
                                 Icon::new(IconName::FileText)
                                     .size(chrome_rems(PANE_DOC_ICON))
                                     .into_any_element()
-                            } else if let Some(icon) = leading_icon {
+                            } else if let Some(mark) = mark {
                                 div()
                                     .when(cfg!(all(test, feature = "ui-test-support")), |view| {
-                                        view.debug_selector(|| {
-                                            format!("drawer-title-icon-{pane_id}-{icon}")
+                                        view.debug_selector(|| match mark {
+                                            program_status::TitleMark::Icon(icon) => {
+                                                format!("drawer-title-icon-{pane_id}-{icon}")
+                                            }
+                                            program_status::TitleMark::Idle => {
+                                                format!("drawer-status-{pane_id}-rest")
+                                            }
+                                            program_status::TitleMark::Status(state) => {
+                                                format!(
+                                                    "drawer-status-{pane_id}-{}",
+                                                    state.as_str()
+                                                )
+                                            }
                                         })
                                     })
                                     .text_size(chrome_rems(if busy {
@@ -3530,10 +3544,7 @@ impl Workspace {
                                         PANE_ICON_TEXT
                                     }))
                                     .when(busy, |icon| icon.text_color(rgb(self.appearance.text)))
-                                    .when_some(title_icon_family(), |icon, family| {
-                                        icon.font_family(family)
-                                    })
-                                    .child(icon.to_string())
+                                    .child(program_status::title_mark_glyph(mark, cx))
                                     .into_any_element()
                             } else {
                                 div()

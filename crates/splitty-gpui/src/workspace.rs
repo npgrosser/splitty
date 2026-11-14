@@ -529,7 +529,7 @@ struct DragPreview {
 const DRAG_PREVIEW_LEFT_OF_POINTER: f32 = 30.;
 const DRAG_PREVIEW_BELOW_POINTER: f32 = 4.;
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let scale = self.appearance.zoom.window_scale();
         // GPUI draws this view with `grab` under the pointer; the margins move
         // the tab from there to its place beside the pointer.
@@ -544,7 +544,7 @@ impl Render for DragPreview {
                 .font(font(self.appearance.font_family.clone()))
                 .border_1()
                 .border_color(rgb(self.appearance.border))
-                .child(screen_motion::tab_label(self.title.clone()))
+                .child(screen_motion::passive_tab_label(&self.title, cx))
                 .child(
                     div()
                         .flex()
@@ -5764,7 +5764,13 @@ impl Workspace {
                                 },
                             )
                             .child(
-                                screen_motion::tab_label(title.clone())
+                                {
+                                    let (icon, text) = drawer::split_title_icon(&title);
+                                    screen_motion::tab_label(
+                                        self.render_tab_mark(&pane_key, icon, cx),
+                                        text,
+                                    )
+                                }
                                     .id(SharedString::from(format!("drag-tab-{slot_key}-{pane_key}")))
                                     // A menu opened on the tab is not covered by its title.
                                     .when(self.tab_context_menu.is_none(), |label| {
@@ -5782,7 +5788,6 @@ impl Workspace {
                                         })
                                     }),
                             )
-                            .children(self.render_tab_status(&pane_key, cx))
                             .when(has_scratchpad, |tab| {
                                 tab.child(
                                     Button::new(SharedString::from(format!(

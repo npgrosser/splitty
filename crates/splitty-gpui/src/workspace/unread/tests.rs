@@ -614,6 +614,10 @@ fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
             );
             assert_eq!(marks(window, "p1"), [mark]);
             assert!(marks(window, "p0").is_empty());
+            assert!(
+                has(window, format!("drawer-status-p1-{mark}")),
+                "the pane's row in the Drawer shows the state too"
+            );
             assert_eq!(
                 has(window, format!("drawer-blocked-{screen}")),
                 mark == "blocked",
@@ -639,7 +643,18 @@ fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
         );
         assert!(
             marks(window, "p1").is_empty(),
-            "an idle program shows nothing"
+            "an idle program shows no state to notice"
+        );
+        for rest in ["tab-status-p1-rest", "drawer-status-p1-rest"] {
+            assert!(
+                has(window, rest.into()),
+                "an idle program shows that it rests"
+            );
+        }
+        assert!(
+            !has(window, "tab-status-p0-rest".into())
+                && !has(window, "drawer-status-p0-rest".into()),
+            "a pane without a record shows no mark"
         );
         // The window was not watched: blocked, done and error notified.
         window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 3));
@@ -684,6 +699,10 @@ fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
         assert!(
             marks(window, "p1").is_empty(),
             "a watched done loses its mark"
+        );
+        assert!(
+            has(window, "tab-status-p1-rest".into()),
+            "a seen done shows as a program at rest"
         );
         window.deactivate_window();
         window.executor().run_until_parked();

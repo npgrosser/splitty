@@ -84,31 +84,36 @@ pub(super) fn tab_surface(
 /// `.tab-label`'s gap between a title's leading icon and its text.
 const TAB_ICON_GAP: f32 = 4.;
 
-pub(super) fn tab_label(title: String) -> Div {
-    let (icon, text) = drawer::split_title_icon(&title);
-    let text = div()
-        .min_w_0()
-        .overflow_hidden()
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(text.to_string());
+/// A tab's title with the mark before it; the title shortens, the mark stays.
+pub(super) fn tab_label(mark: Option<AnyElement>, text: &str) -> Div {
     div()
         .min_w_0()
         .flex()
         .items_center()
         .overflow_hidden()
-        .when_some(icon, |label, icon| {
-            label.child(
-                div()
-                    .flex_none()
-                    .mr(chrome_rems(TAB_ICON_GAP))
-                    .when_some(drawer::title_icon_family(), |icon, family| {
-                        icon.font_family(family)
-                    })
-                    .child(icon.to_string()),
-            )
+        .when_some(mark, |label, mark| {
+            label.child(div().flex_none().mr(chrome_rems(TAB_ICON_GAP)).child(mark))
         })
-        .child(text)
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(text.to_string()),
+        )
+}
+
+/// The label of a tab drawn without its pane's status: the title's own icon
+/// and the text.
+pub(super) fn passive_tab_label(title: &str, cx: &App) -> Div {
+    let (icon, text) = drawer::split_title_icon(title);
+    tab_label(
+        icon.map(|icon| {
+            program_status::title_mark_glyph(program_status::TitleMark::Icon(icon), cx)
+        }),
+        text,
+    )
 }
 
 /// An inert drawing of a tab's close button.
@@ -495,7 +500,7 @@ impl Workspace {
                     focused,
                     ix == 0,
                 )
-                .child(tab_label(title))
+                .child(passive_tab_label(&title, cx))
                 .when(
                     selected == Some(pane.as_str()) || !self.tab_prefs.close_selected_only,
                     |tab| tab.child(passive_close_icon(!outgoing.ready, cx)),
