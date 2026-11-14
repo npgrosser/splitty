@@ -8271,7 +8271,7 @@ name = "splitty-client-core"
 version = "0.5.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dirs 6.0.0",
  "serde",
  "serde_json",
@@ -8289,7 +8289,7 @@ name = "splitty-core"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dirs 6.0.0",
  "glob",
  "hex",
@@ -8338,7 +8338,7 @@ dependencies = [
 name = "splitty-gui"
 version = "0.5.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "gtk",
  "rand 0.8.8",
  "serde",
@@ -8385,7 +8385,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "dirs 6.0.0",
  "flate2",
