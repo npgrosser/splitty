@@ -195,7 +195,7 @@ The server SHALL mark an event for a session's root record `notify` when the rec
 - **THEN** the event for it is not marked `notify`
 
 ### Requirement: Status in the Window
-A native window SHALL keep the root records each connection reports, scoped to that connection, and SHALL show on a pane's tab whether its program works, is blocked (with the kind), is done or failed. A screen and a host group SHALL show that a pane in them is blocked, also for a host's screens the window has not opened. A `done` or `error` mark SHALL go once the user has seen the pane and return only for a newer record. A host that is not connected or does not announce `program-status-v1` shows no status.
+A native window SHALL keep the root records each connection reports, scoped to that connection, and SHALL show on a pane's tab and on the pane's row in the drawer whether its program works, is blocked (with the kind), is done or failed. For an idle record both places SHALL show that the pane holds a program that reports its status, unless the pane's title starts with an icon of its own, which then stays. A screen and a host group SHALL show that a pane in them is blocked, also for a host's screens the window has not opened. A `done` or `error` mark SHALL go once the user has seen the pane and return only for a newer record; the pane then shows as an idle one does. A host that is not connected or does not announce `program-status-v1` shows no status.
 
 #### Scenario: Blocked pane on a screen not opened
 - **WHEN** a window is connected to a host, has not opened one of its screens, and a pane on that screen becomes `blocked`
@@ -212,6 +212,14 @@ A native window SHALL keep the root records each connection reports, scoped to t
 #### Scenario: Older host
 - **WHEN** a host's `mux.welcome` does not list `program-status-v1`
 - **THEN** its panes, screens and host group show no status
+
+#### Scenario: Working pane in the drawer
+- **WHEN** a pane holds a `working` root record
+- **THEN** its tab and its row in the drawer both show that the program works
+
+#### Scenario: Idle pane with a title icon
+- **WHEN** a pane holds an `idle` root record and its title starts with an icon
+- **THEN** its tab and its row in the drawer show the title's icon and no status mark
 
 ### Requirement: Status Notifications in the Window
 For an event marked `notify` of a pane the user is not watching, a window SHALL add a notification while `notifications.enabled` and `notifications.programStatus` are on, taken from the event's notice (see `mux-protocol`, Classified Notification Events): a warning for `blocked`, a success for `done`, an error for `error`. Its text SHALL name the screen and, on a host, the host, and SHALL show the record's `msg`, or else its `title`, as plain, shortened text. While a pane holds a root record, its OSC notifications and its shell integration's reports of a finished command SHALL add no notification of their own; a bell adds no notification.
