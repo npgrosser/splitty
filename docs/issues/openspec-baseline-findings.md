@@ -13,6 +13,15 @@ Line numbers refer to the tree at commit `b495e1c`.
   `terminal.allowOsc52Write`, but the server settings struct discarded it on PATCH.
   The server now stores and returns the field, with an enabled default and a durable opt-out.
 
+- **Fixed (2026-11-14): a port forward whose `ssh` failed could lose the reason.** A forward or a shared
+  port reads `ssh`'s output for its ready line and, when the output ends, read `ssh`'s status once
+  (`crates/splitty-remote/src/tunnel/forward.rs`, `tunnel/reverse.rs`). The output of a process ends as it
+  exits, a moment before its status can be read, so a refused login or host key was at times reported as
+  "ssh ended before the relay reported" (or "SSH ended without confirming its local forward") without `ssh`'s
+  own diagnostic and hint. Seen as a failure of `failed_setup_preserves_ssh_diagnostics_after_cleanup` in
+  the release run of v0.4.2. Both now wait up to two seconds for the status after the output ended; the
+  tests run an `ssh` that closes its output before it exits.
+
 - **Fixed: terminal replies typed into the shell on resume.** Historical output contained OSC color
   queries (notably OSC 11), which the emulator answered again after the querying program had exited.
   The attach router now strips historical terminal report requests before rendering, across frame

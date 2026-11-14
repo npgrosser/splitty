@@ -660,6 +660,10 @@ impl Remote for SshRemote {
     }
 }
 
+/// How long an `ssh` whose output ended gets to exit, so that its status and
+/// diagnostics name the failure.
+const EXIT_GRACE: Duration = Duration::from_secs(2);
+
 async fn wait_for_forward(child: &mut Worker, local_port: u16) -> io::Result<()> {
     use tokio::net::TcpStream;
     use tokio::time::{sleep, timeout, Instant};

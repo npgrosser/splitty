@@ -319,7 +319,15 @@ impl ReverseTunnel {
                 });
             }
             other => {
-                let exited = tunnel.child.try_wait().ok().flatten();
+                // The output of an `ssh` that fails ends as it exits, a moment
+                // before its status can be read: wait for the status then.
+                let exited = match &other {
+                    Ok(Err(_)) => tokio::time::timeout(super::EXIT_GRACE, tunnel.child.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok),
+                    _ => tunnel.child.try_wait().ok().flatten(),
+                };
                 // Own the guarded drain before close consumes the remaining
                 // resources. Its diagnostics still determine the setup error.
                 let diagnostic = kept_end(tunnel.stderr.take());
@@ -474,13 +482,19 @@ mod tests {
             path: "/unused/splitty".into(),
             config_dir: None,
         };
-        for diagnostic in [
-            "Host key verification failed.",
-            "Permission denied (publickey).",
-            "remote port forwarding failed for listen path /relay/test.sock",
+        // The last `ssh` closes its output a while before it exits: the
+        // status is not there yet when the output ends.
+        for (diagnostic, lingers) in [
+            ("Host key verification failed.", ""),
+            ("Permission denied (publickey).", ""),
+            (
+                "remote port forwarding failed for listen path /relay/test.sock",
+                "",
+            ),
+            ("Permission denied (publickey).", "exec >&-\nsleep 0.3\n"),
         ] {
             std::fs::write(&program, format!(
-                "#!/bin/sh\nfor arg do\n [ \"$arg\" != -G ] || exit 0\ndone\nprintf '%s\\n' '{diagnostic}' >&2\nexit 255\n"
+                "#!/bin/sh\nfor arg do\n [ \"$arg\" != -G ] || exit 0\ndone\n{lingers}printf '%s\\n' '{diagnostic}' >&2\nexit 255\n"
             )).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
             let ssh = Ssh::relay_only(crate::ssh::SshTarget::parse("vm").unwrap())

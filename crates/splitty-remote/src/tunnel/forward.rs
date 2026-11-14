@@ -382,8 +382,16 @@ impl PortTunnel {
             }
             return Ok(tunnel);
         };
-        // An `ssh` that failed says why in its status and error output.
-        let exited = tunnel.child.try_wait().ok().flatten();
+        // An `ssh` that failed says why in its status and error output. Its
+        // output ends as it exits, a moment before the status can be read.
+        let exited = if error.kind() == io::ErrorKind::TimedOut {
+            tunnel.child.try_wait().ok().flatten()
+        } else {
+            tokio::time::timeout(super::EXIT_GRACE, tunnel.child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
+        };
         let _ = tunnel.child.kill().await;
         let stderr = kept_end(tunnel.stderr.take()).await;
         // If another process won the IPv4 handoff (or took IPv6 during login),
@@ -787,5 +795,32 @@ mod tests {
             TcpListener::bind(("127.0.0.1", port)).is_err(),
             "rival listener left alone"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_ssh_is_named_when_its_output_ends_before_it_exits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("ssh");
+        // Answers `ssh -G` with nothing; otherwise closes its output, exits a
+        // while later and says why: the status is not there when the output ends.
+        std::fs::write(
+            &program,
+            "#!/bin/sh\nfor arg do\n [ \"$arg\" != -G ] || exit 0\ndone\nexec >&-\nsleep 0.3\n\
+             printf '%s\\n' 'Permission denied (publickey).' >&2\nexit 255\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let ssh = Ssh::forward_only(crate::ssh::SshTarget::parse("vm").unwrap())
+            .with_test_program(program);
+        let local = PortReservation::acquire().unwrap();
+        match PortTunnel::open(&ssh, local, 8080).await.err() {
+            Some(PortTunnelError::Ssh(SshError::Failed { stderr, .. })) => {
+                assert_eq!(stderr, "Permission denied (publickey).");
+            }
+            other => panic!("lost SSH classification: {other:?}"),
+        }
     }
 }
