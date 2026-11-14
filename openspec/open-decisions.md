@@ -8,6 +8,13 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`tab-group-drag` TGD-1 to TGD-5** (2026-11-14, provisional, tbd; recorded in the change's proposal, behavior in the `workspace-model` and `mux-protocol` specs):
+  - **TGD-1:** a native group move is sent as one `arrange_panes` of the whole root layout; a layout changed meanwhile makes the drag stale. Alternative: a dedicated op naming only the group and the target.
+  - **TGD-2:** the grip is the empty area of a tiled group's tab bar; floating groups are not dragged as groups, and the tab lock locks group drags too. Alternative: a grip icon in every tab bar.
+  - **TGD-3:** dropped beside a group, the group takes half of that group's place; dropped into a group, its tabs go before the marked tab or last and its shown tab is shown there. Alternative: keep the dragged group's size.
+  - **TGD-4:** the arrangement names each group's tab shown in this window as its active tab, since all node IDs change; other windows then show those tabs too. Alternative: keep the server's active tabs.
+  - **TGD-5:** actions that need a newer server are offered everywhere and gated by `mux.welcome` capabilities in the native command layer, which sends nothing and shows that the service or the host's daemon needs an update; never by version. Older capability checks that change what a command does stay where they are. Alternative: hide or disable such actions in the views.
+
 - **`server-close-assessment` SCA-2 to SCA-6** (2026-11-13, provisional, tbd; recorded in the change's proposal, behavior in the `mux-protocol`, `templates`, `session-scratchpad`, `viewer-annotations` and `client-connections` specs):
   - **SCA-2:** managed job panes are not counted as running programs by the close assessment. Alternative: count a running job like any busy terminal.
   - **SCA-3:** without `close-assessment-v1`, or when the assessment fails or times out (five seconds), every close asks a generic confirmation, idle ones included; the clients keep no rule of their own for older servers. Alternative: keep the previous client rules as a fallback.

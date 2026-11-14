@@ -1,5 +1,7 @@
 //! Service-owned local screens, projected without a second layout tree.
 mod catalog;
+mod group_move;
+pub use group_move::GroupDrag;
 mod identity;
 mod ports;
 pub use ports::{ObservedPort, PortObservation};

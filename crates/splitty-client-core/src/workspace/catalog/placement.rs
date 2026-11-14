@@ -90,6 +90,62 @@ impl SourceWorkspace {
         self.check_place_tab(drag, target, before).unwrap_or(false)
     }
 
+    /// A drag of tab group `slot` of the shown Screen's root layout.
+    pub fn capture_group_drag(&self, slot: &str) -> Option<GroupDrag> {
+        self.shown()?.capture_group_drag(slot)
+    }
+
+    /// Whether dropping `drag` at `target` moves the group (`Ok(false)` for
+    /// a drop that changes nothing), as [`ScreenModel::check_group_move`].
+    pub fn check_group_move(
+        &self,
+        drag: &GroupDrag,
+        target: &str,
+        placement: MovePlacement,
+        before: Option<&str>,
+    ) -> io::Result<bool> {
+        self.require_no_placement()?;
+        if self
+            .models
+            .values()
+            .any(|model| model.pending_move.is_some())
+        {
+            return Err(invalid(
+                "A pane move is awaiting its authoritative snapshot",
+            ));
+        }
+        self.shown()
+            .ok_or_else(|| invalid("no screen selected"))?
+            .check_group_move(drag, target, placement, before)
+    }
+
+    pub fn can_move_group(
+        &self,
+        drag: &GroupDrag,
+        target: &str,
+        placement: MovePlacement,
+        before: Option<&str>,
+    ) -> bool {
+        self.check_group_move(drag, target, placement, before)
+            .unwrap_or(false)
+    }
+
+    pub fn move_group(
+        &mut self,
+        client: &Client,
+        drag: GroupDrag,
+        target: String,
+        placement: MovePlacement,
+        before: Option<String>,
+    ) -> io::Result<bool> {
+        self.check_connection(client)?;
+        if !self.check_group_move(&drag, &target, placement, before.as_deref())? {
+            return Ok(false);
+        }
+        self.shown_mut()?
+            .move_group(client, drag, &target, placement, before.as_deref())
+    }
+
     pub fn place_tab(
         &mut self,
         client: &Client,

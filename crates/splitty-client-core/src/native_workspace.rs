@@ -1,4 +1,5 @@
 //! Own the local service and route workspace intents on one ordered connection.
+mod capability_gate;
 mod editor_uri;
 mod editors;
 mod files;
@@ -23,11 +24,11 @@ use crate::{
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
         Axis, CloseImpact, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome,
-        FloatingActionResult, FloatingTarget, HostActionTarget, HostUpdatePlan, MovePlacement,
-        PaneActionTarget, PaneDrag, PlacementOutcome, ScreenKey, ScreenTransferOutcome,
-        ScreenTransferResult, ScreenTransferTarget, SourceToken, SourceWorkspace, TabStep,
-        TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult,
-        TerminalToken, WindowWorkspace, WorkspaceRefresh,
+        FloatingActionResult, FloatingTarget, GroupDrag, HostActionTarget, HostUpdatePlan,
+        MovePlacement, PaneActionTarget, PaneDrag, PlacementOutcome, ScreenKey,
+        ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget, SourceToken,
+        SourceWorkspace, TabStep, TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan,
+        TemplateApplyResult, TerminalToken, WindowWorkspace, WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -111,6 +112,7 @@ impl Command {
             CommandKind::PlaceTab { drag, .. } | CommandKind::MovePane { drag, .. } => {
                 Some(drag.source_token())
             }
+            CommandKind::MoveGroup { drag, .. } => Some(drag.source_token()),
             _ => self.source,
         };
         if captured != self.source {
@@ -368,6 +370,14 @@ pub enum CommandKind {
         target: String,
         placement: MovePlacement,
     },
+    /// Move a whole tab group of the root layout beside `target` or, with
+    /// `MovePlacement::Tab`, into group `target` before tab `before`.
+    MoveGroup {
+        drag: GroupDrag,
+        target: String,
+        placement: MovePlacement,
+        before: Option<String>,
+    },
     RequestClose {
         plan: ClosePlan,
         confirmed: bool,
@@ -508,6 +518,10 @@ pub enum Update {
         size: PtySize,
     },
     Status(String),
+    /// A command was not sent: the server of its Screen did not announce the
+    /// capability it needs (`capability_gate`). Shown as the window's status,
+    /// for a host's Screen as well.
+    ServerOutdated(String),
     /// The phase the start of the local backend entered; the window shows
     /// it until its workspace arrives.
     Startup(crate::owned_service::StartupPhase),

@@ -27,6 +27,8 @@ pub(super) struct SourceRuntime {
     pub client: Client,
     owner: SourceToken,
     pub welcomed: bool,
+    /// What this connection's `mux.welcome` listed; none before it.
+    capabilities: Vec<String>,
     workspace_refresh: WorkspaceRefresh,
     attached: HashSet<String>,
     visible: HashSet<String>,
@@ -75,6 +77,7 @@ impl SourceRuntime {
             client,
             owner,
             welcomed: false,
+            capabilities: Vec::new(),
             workspace_refresh: WorkspaceRefresh::default(),
             attached: HashSet::new(),
             visible: HashSet::new(),
@@ -190,12 +193,26 @@ impl SourceRuntime {
         })
     }
 
+    /// What the server is taken to have announced, as an older one would.
+    #[cfg(test)]
+    pub(super) fn announce_only(&mut self, capabilities: &[&str]) {
+        self.capabilities = capabilities.iter().map(|name| (*name).to_owned()).collect();
+    }
+
     pub fn command(
         &mut self,
         window: &mut WindowWorkspace,
         command: Command,
     ) -> anyhow::Result<SourceEffects> {
         let mut out = SourceEffects::default();
+        // Nothing reaches a server that did not announce what the command needs.
+        let remote = window
+            .source(self.id())
+            .is_some_and(|model| model.kind() == SourceKind::Remote);
+        if let Some(updates) = capability_gate::refusal(&command, &self.capabilities, remote) {
+            out.updates = updates;
+            return Ok(out);
+        }
         if let CommandKind::CreateRemoteScreen { request } = &command.kind {
             // Identity precedes bounded deduplication; a retained UUID never
             // upgrades an old owner/attempt to the current connection.
@@ -257,6 +274,7 @@ impl SourceRuntime {
                 | CommandKind::CycleTabInSlot { .. }
                 | CommandKind::SetMaximized { .. }
                 | CommandKind::MovePane { .. }
+                | CommandKind::MoveGroup { .. }
                 | CommandKind::PlaceTab { .. }
                 | CommandKind::ProfileTab { .. }
                 | CommandKind::OpenTextViewer { .. }
@@ -931,6 +949,18 @@ impl SourceRuntime {
                 }
                 result.map(|_| ())
             }
+            CommandKind::MoveGroup {
+                drag,
+                target,
+                placement,
+                before,
+            } => {
+                let result = model.move_group(&self.client, drag, target, placement, before);
+                if result.as_ref().is_ok_and(|moved| *moved) {
+                    out.changed = true;
+                }
+                result.map(|_| ())
+            }
             CommandKind::SetMaximized {
                 screen,
                 connection,
@@ -1088,6 +1118,14 @@ impl SourceRuntime {
             match kind {
                 MessageType::MuxWelcome if !self.welcomed => {
                     let workspace = model.as_mut().expect("owned local source");
+                    self.capabilities = json["capabilities"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|offered| offered.as_str().filter(|name| name.len() <= 64))
+                        .take(256)
+                        .map(str::to_owned)
+                        .collect();
                     let offered = |name: &str| capability::offered(json, name);
                     workspace.set_templates_supported(offered(capability::SERVER_TEMPLATES));
                     workspace.set_viewers_supported(offered(capability::VIEWER));
@@ -1400,7 +1438,8 @@ impl SourceRuntime {
                             model.reject_move(event.connection_id);
                         }
                     }
-                    if json["op"] == "resize_split" {
+                    // A rejected group move shows the service's layout again.
+                    if json["op"] == "resize_split" || json["op"] == "arrange_panes" {
                         if let Some(model) = &mut model {
                             model.reject_resize(event.connection_id, json);
                         }

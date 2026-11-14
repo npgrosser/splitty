@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 use splitty_client_core::{
     native_workspace::{Update, Worker},
-    workspace::{ClosePlan, ScreenTransferTarget, WindowWorkspace},
+    workspace::{ClosePlan, MovePlacement, ScreenTransferTarget, WindowWorkspace},
 };
 use std::{
     cell::RefCell,
@@ -869,4 +869,104 @@ fn dragged_tab_preview_starts_just_below_the_pointer() {
             window.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
         },
     );
+}
+
+/// Screen "work" with two groups side by side: `left` holding p0 and p1,
+/// showing p1, and `right` holding p2.
+fn two_groups(owner: Uuid) -> WindowWorkspace {
+    let mut model = WindowWorkspace::new(owner);
+    model
+        .ui_test_screen_order_fixture(&[("work", "Work"), ("other", "Other")], None)
+        .unwrap();
+    let token = model.lifecycle_token();
+    let pane = |id: &str| serde_json::json!({"id": id, "sessionId": format!("s-{id}"), "title": format!("tab {id}")});
+    let session = |id: &str| serde_json::json!({"id": format!("s-{id}"), "status": "running"});
+    model
+        .source_mut(token.source_id())
+        .unwrap()
+        .apply_snapshot(
+            owner,
+            &serde_json::json!({"type":"mux.screen_snapshot","screen":{
+                "id":"work","revision":2,
+                "root":{"type":"split","id":"root","axis":"horizontal","sizes":[0.5,0.5],"children":[
+                    {"type":"slot","id":"left","paneIds":["p0","p1"],"activePaneId":"p1"},
+                    {"type":"slot","id":"right","paneIds":["p2"],"activePaneId":"p2"}]},
+                "panes":{"p0":pane("p0"),"p1":pane("p1"),"p2":pane("p2")},
+                "sessions":{"s-p0":session("p0"),"s-p1":session("p1"),"s-p2":session("p2")}
+            }}),
+        )
+        .unwrap();
+    model
+}
+
+fn drag(window: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
+    window.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+    window.simulate_mouse_move(
+        from + point(px(9.), px(0.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    window.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+    draw(window);
+    window.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+    draw(window);
+}
+
+/// workspace-model, Native Tab Group Move: the empty area of a tab bar drags
+/// the whole group; a drop into another group sends the move once, and a
+/// drop onto its own group or a press without a drag sends nothing.
+#[test]
+fn the_empty_tab_bar_area_drags_the_whole_group() {
+    with_model(two_groups(Uuid::new_v4()), |window, _, mut receiver| {
+        let grip = bounds(window, "group-grip-left");
+        let right = bounds(window, "group-grip-right");
+        let from = grip.center();
+        press(window, from, MouseButton::Left);
+        assert!(receiver.try_recv().is_err(), "a press sends nothing");
+        drag(
+            window,
+            from,
+            point(grip.center().x, grip.bottom() + px(200.)),
+        );
+        assert!(receiver.try_recv().is_err(), "its own group is no target");
+        let body = point(right.center().x, right.bottom() + px(200.));
+        drag(window, from, body);
+        let command = receiver.try_recv().expect("group move sent");
+        match command.kind() {
+            Command::MoveGroup {
+                drag,
+                target,
+                placement,
+                before,
+            } => {
+                assert_eq!(drag.slot_id(), "left");
+                assert_eq!(drag.shown_pane(), "p1");
+                assert_eq!(target, "right");
+                assert_eq!(*placement, MovePlacement::Tab);
+                assert_eq!(*before, None);
+            }
+            _ => panic!("expected a group move"),
+        }
+        assert!(receiver.try_recv().is_err(), "sent once");
+    });
+}
+
+/// A group dropped on another group's right edge zone goes right of it.
+#[test]
+fn a_group_dropped_on_an_edge_zone_goes_beside_that_group() {
+    with_model(two_groups(Uuid::new_v4()), |window, _, mut receiver| {
+        let grip = bounds(window, "group-grip-left");
+        let right = bounds(window, "group-grip-right");
+        let edge = point(right.right() - px(10.), right.bottom() + px(200.));
+        drag(window, grip.center(), edge);
+        let command = receiver.try_recv().expect("group move sent");
+        assert!(matches!(
+            command.kind(),
+            Command::MoveGroup {
+                target,
+                placement: MovePlacement::Right,
+                ..
+            } if target == "right"
+        ));
+    });
 }

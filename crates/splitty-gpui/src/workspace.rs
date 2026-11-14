@@ -55,10 +55,10 @@ use splitty_client_core::notifications::NotificationCenter;
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
     close_scope, tabs_close_scope, Axis, CloseAssessment, CloseIdentity, CloseImpact, ClosePlan,
-    CloseScope, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode, MovePlacement,
-    PaneActionTarget, PaneDrag, PaneKey, ProgramStatusSeen, RemoteScreenCreateRequest, ScreenKey,
-    ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken,
-    SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
+    CloseScope, CloseTarget, FloatingActionOutcome, GroupDrag, LayoutKey, LayoutNode,
+    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ProgramStatusSeen,
+    RemoteScreenCreateRequest, ScreenKey, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget,
+    SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
 };
 use splitty_client_core::zoom::{PresentedZoom, Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -402,6 +402,46 @@ fn nearest_slot<'a>(
 struct TabDrag {
     origin: PaneDrag,
     owner: EntityId,
+}
+/// A whole tab group dragged by the empty area of its tab bar.
+#[derive(Clone)]
+struct GroupTabsDrag {
+    origin: GroupDrag,
+    owner: EntityId,
+}
+/// What is being dragged over the groups: one tab or a whole group. Both
+/// have the same drop targets.
+#[derive(Clone, Copy)]
+enum Dragged<'a> {
+    Tab(&'a PaneDrag),
+    Group(&'a GroupDrag),
+}
+impl<'a> Dragged<'a> {
+    fn check_move(
+        self,
+        model: &SourceWorkspace,
+        target: &str,
+        placement: MovePlacement,
+    ) -> std::io::Result<bool> {
+        match self {
+            Self::Tab(drag) => model.check_move(drag, target, placement),
+            Self::Group(drag) => model.check_group_move(drag, target, placement, None),
+        }
+    }
+    fn can_place(self, model: &SourceWorkspace, slot: &str, before: Option<&str>) -> bool {
+        match self {
+            Self::Tab(drag) => model.can_place_tab(drag, slot, before),
+            Self::Group(drag) => model.can_move_group(drag, slot, MovePlacement::Tab, before),
+        }
+    }
+    /// The dragged tab, which a drop next to it does not place before; a
+    /// group's tabs are in another group than the one dropped on.
+    fn pane_id(self) -> &'a str {
+        match self {
+            Self::Tab(drag) => drag.pane_id(),
+            Self::Group(_) => "",
+        }
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 enum DropTarget {
@@ -4333,7 +4373,7 @@ impl Workspace {
                         cx.notify();
                     }
                 }
-                Update::Status(status) => {
+                Update::Status(status) | Update::ServerOutdated(status) => {
                     self.status = status;
                     cx.notify();
                 }
@@ -4943,7 +4983,28 @@ impl Workspace {
         }
         let drag = event.drag(cx);
         let target = if drag.owner == cx.entity().entity_id() {
-            self.drop_target_at(&drag.origin, event.event.position)
+            self.drop_target_at(Dragged::Tab(&drag.origin), event.event.position)
+        } else {
+            None
+        };
+        self.set_drop_target(target, cx);
+    }
+
+    fn group_drag_hover(
+        &mut self,
+        event: &DragMoveEvent<GroupTabsDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if GlobalState::is_in_deferred_context(cx) {
+            if self.drop_target.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
+        let drag = event.drag(cx);
+        let target = if drag.owner == cx.entity().entity_id() {
+            self.drop_target_at(Dragged::Group(&drag.origin), event.event.position)
         } else {
             None
         };
@@ -4989,7 +5050,7 @@ impl Workspace {
         )
     }
 
-    fn drop_target_at(&self, drag: &PaneDrag, position: Point<Pixels>) -> Option<DropTarget> {
+    fn drop_target_at(&self, drag: Dragged<'_>, position: Point<Pixels>) -> Option<DropTarget> {
         let model = self.selected_model()?;
         let root = model.presentation_root()?;
         let screen = self.current_screen_key()?;
@@ -5024,8 +5085,8 @@ impl Workspace {
                 .then(|| layout_edge_zone(viewport, position, activation))
                 .flatten()
             {
-                if model
-                    .check_move(drag, root_id.as_str(), placement)
+                if drag
+                    .check_move(model, root_id.as_str(), placement)
                     .is_ok_and(|moves| moves)
                 {
                     return Some(DropTarget::Layout { placement });
@@ -5078,8 +5139,7 @@ impl Workspace {
                             .filter(|void| void.contains(&position))?,
                     ),
                 };
-                model
-                    .can_place_tab(drag, slot.node_id(), before.as_deref())
+                drag.can_place(model, slot.node_id(), before.as_deref())
                     .then(|| DropTarget::Header {
                         slot: slot.clone(),
                         before,
@@ -5087,8 +5147,7 @@ impl Workspace {
                     })
             } else {
                 let placement = body_drop_zone(*bounds, self.tab_header_height(), position)?;
-                model
-                    .check_move(drag, slot.node_id(), placement)
+                drag.check_move(model, slot.node_id(), placement)
                     .is_ok()
                     .then(|| DropTarget::Body {
                         slot: slot.clone(),
@@ -5109,7 +5168,7 @@ impl Workspace {
         if drag.owner != cx.entity().entity_id() || GlobalState::is_in_deferred_context(cx) {
             return;
         }
-        let intent = self.drop_target_at(&drag.origin, window.mouse_position());
+        let intent = self.drop_target_at(Dragged::Tab(&drag.origin), window.mouse_position());
         if let (Some(model), Some(intent)) = (self.selected_model(), intent) {
             match intent {
                 DropTarget::Body { slot, placement } if slot.node_id() == target => {
@@ -5163,6 +5222,129 @@ impl Workspace {
                 }
                 _ => {}
             }
+        }
+        cx.notify();
+    }
+
+    /// The empty area of a tiled group's tab bar, right of its tabs and new
+    /// tab actions: dragging it drags the whole group. It takes no clicks.
+    fn render_group_grip(
+        &self,
+        slot: &str,
+        slot_key: &LayoutKey,
+        ready: bool,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let grip = div()
+            .id(SharedString::from(format!("group-grip-{slot_key}")))
+            .when(cfg!(all(test, feature = "ui-test-support")), |grip| {
+                let slot = slot.to_owned();
+                grip.debug_selector(move || format!("group-grip-{slot}"))
+            })
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .h_full();
+        let origin = (ready
+            && !self.tab_prefs.locked
+            && surface == Surface::Tiled
+            && !GlobalState::is_in_deferred_context(cx))
+        .then(|| self.selected_model()?.capture_group_drag(slot))
+        .flatten();
+        let Some(origin) = origin else {
+            return grip;
+        };
+        let title = self
+            .selected_model()
+            .and_then(|model| {
+                let shown = origin.shown_pane();
+                let (_, tabs) = model.displayed_tabs(slot)?;
+                let index = tabs.iter().position(|pane| *pane == shown)?;
+                Some(
+                    model
+                        .snapshot()?
+                        .panes
+                        .iter()
+                        .find(|(id, _)| id.as_str() == shown)
+                        .and_then(|(_, pane)| pane.title.clone())
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or_else(|| format!("Terminal {}", index + 1)),
+                )
+            })
+            .unwrap_or_default();
+        let title = match origin.tab_count() {
+            0 | 1 => title,
+            count => format!("{title} (+{})", count - 1),
+        };
+        let appearance = self.appearance.clone();
+        grip.on_drag(
+            GroupTabsDrag {
+                origin,
+                owner: cx.entity().entity_id(),
+            },
+            move |_, grab, _, cx| {
+                cx.new(|_| DragPreview {
+                    title: title.clone(),
+                    active: true,
+                    appearance: appearance.clone(),
+                    grab,
+                })
+            },
+        )
+    }
+
+    /// A tab group dropped on group `target`'s body or tab bar, or on an edge
+    /// of the whole layout: one `arrange_panes` with the moved group.
+    fn drop_group(
+        &mut self,
+        drag: &GroupTabsDrag,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drop_target = None;
+        if drag.owner != cx.entity().entity_id() || GlobalState::is_in_deferred_context(cx) {
+            return;
+        }
+        let intent = self.drop_target_at(Dragged::Group(&drag.origin), window.mouse_position());
+        let (Some(model), Some(intent)) = (self.selected_model(), intent) else {
+            cx.notify();
+            return;
+        };
+        let (node, placement, before) = match intent {
+            DropTarget::Body { slot, placement } if slot.node_id() == target => {
+                (slot.node_id().to_owned(), placement, None)
+            }
+            DropTarget::Header { slot, before, .. } if slot.node_id() == target => {
+                (slot.node_id().to_owned(), MovePlacement::Tab, before)
+            }
+            DropTarget::Layout { placement } => (
+                model
+                    .presentation_root()
+                    .map(|root| root.id().to_string())
+                    .unwrap_or_default(),
+                placement,
+                None,
+            ),
+            _ => {
+                cx.notify();
+                return;
+            }
+        };
+        match model.check_group_move(&drag.origin, &node, placement, before.as_deref()) {
+            Ok(true) => self.send_captured(
+                drag.origin.source_token(),
+                Command::MoveGroup {
+                    drag: drag.origin.clone(),
+                    target: node,
+                    placement,
+                    before,
+                },
+                cx,
+            ),
+            Ok(false) => {}
+            Err(error) => self.status = error.to_string(),
         }
         cx.notify();
     }
@@ -5877,20 +6059,23 @@ impl Workspace {
                     .bg(rgb(self.appearance.raised))
                     .child(tabs)
                     .child(self.render_group_new_tab_actions(id.as_str(), selected, window, cx))
-                    .child(div().relative().flex_1().min_w_0().h_full().child({
-                        let entity = cx.entity();
-                        let void_key = slot_key.clone();
-                        canvas(
-                            move |bounds, _, cx| {
-                                entity.update(cx, |this, _| {
-                                    this.tab_voids.insert(void_key.clone(), bounds);
-                                })
-                            },
-                            |_, (), _, _| {},
-                        )
-                        .absolute()
-                        .size_full()
-                    }))
+                    .child(
+                        self.render_group_grip(id.as_str(), &slot_key, ready, surface, cx)
+                            .child({
+                                let entity = cx.entity();
+                                let void_key = slot_key.clone();
+                                canvas(
+                                    move |bounds, _, cx| {
+                                        entity.update(cx, |this, _| {
+                                            this.tab_voids.insert(void_key.clone(), bounds);
+                                        })
+                                    },
+                                    |_, (), _, _| {},
+                                )
+                                .absolute()
+                                .size_full()
+                            }),
+                    )
                     .child(self.render_group_actions(id.as_str(), selected, surface, cx));
                 let bounds_id = slot_key.clone();
                 let bounds_source = identity;
@@ -5900,9 +6085,15 @@ impl Workspace {
                     .id(SharedString::from(format!("slot-{slot_key}")))
                     .relative()
                     .when(surface == Surface::Tiled, |slot| {
+                        let group_target = target.clone();
                         slot.on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
                             this.drop_pane(drag, &target, window, cx)
                         }))
+                        .on_drop(cx.listener(
+                            move |this, drag: &GroupTabsDrag, window, cx| {
+                                this.drop_group(drag, &group_target, window, cx)
+                            },
+                        ))
                     })
                     .size_full()
                     .flex()
@@ -6511,6 +6702,7 @@ impl Render for Workspace {
             .bg(rgb(self.appearance.surface))
             .track_focus(&self.focus)
             .on_drag_move(cx.listener(Self::drag_hover))
+            .on_drag_move(cx.listener(Self::group_drag_hover))
             .text_color(rgb(self.appearance.text))
             .font(font(self.appearance.font_family.clone()))
             .text_size(chrome_rems(self.appearance.font_size))

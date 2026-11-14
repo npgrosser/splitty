@@ -681,6 +681,7 @@ impl<'a> Remotes<'a> {
                 | CommandKind::CycleTab { .. }
                 | CommandKind::CycleTabInSlot { .. }
                 | CommandKind::MovePane { .. }
+                | CommandKind::MoveGroup { .. }
                 | CommandKind::PlaceTab { .. }
                 | CommandKind::SetMaximized { .. }
                 | CommandKind::ReadViewer { .. }

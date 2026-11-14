@@ -145,6 +145,35 @@ The hidden Windows window still waits up to one second for the backend's
 appearance before it shows. Not yet seen in a real Windows window; the
 provisional choices are NSP-1 to NSP-3 in `openspec/open-decisions.md`.
 
+## Actions that need a newer server
+
+A feature whose operation needs a `mux.welcome` capability is gated in the
+command layer of `splitty-client-core`, not hidden in a view: the window
+offers the action whatever server a Screen belongs to, and
+`native_workspace/capability_gate.rs` maps each such command kind to its
+capability. `SourceRuntime::command` keeps the capabilities of the
+connection's welcome and, for a command whose capability is missing, sends
+nothing, settles the window's pending state with the command's own
+rejection and publishes `Update::ServerOutdated`, which the window shows as
+its status ("the local service" or "the host's daemon" is older than the app
+and needs an update). Only capabilities decide, never a version. A new
+feature that needs a newer server adds one row to `required_capability`.
+Older checks that change what a command does (a close without
+`close-assessment-v1` asks generically, a tab drop without
+`tab-placement-v1` is not offered as a target) predate the table and stay
+where they are. A refusal that does come back from a server (`mux.op_failed`)
+is an ordinary status message as well (`Operation rejected: …`).
+
+## Tab groups
+
+The empty area of a tiled group's tab bar, right of its tabs and new-tab
+actions, drags the whole group (`render_group_grip` in `workspace.rs`); the
+area takes no clicks. The drop targets are a single tab's (`Dragged` in
+`workspace.rs`); `workspace/group_move.rs` in client-core turns a drop into
+one `arrange_panes` of the root layout the window shows, each group's shown
+tab as its active one (TGD-1 to TGD-5 in `openspec/open-decisions.md`).
+Floating groups move by their own header. Not yet tried in a running window.
+
 ## Architecture boundaries and recent regression lessons
 
 - Server mux state, session lifecycle and host launch defaults remain canonical.
