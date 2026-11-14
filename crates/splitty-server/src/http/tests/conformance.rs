@@ -498,8 +498,13 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     }
     async fn management_state(state: &TestState) -> Vec<(&'static str, (StatusCode, Value))> {
         let mut snapshot = Vec::new();
+        // The SSH questions are the process's, not this state's: a test that
+        // runs beside this one publishes its own. That a Remote connection
+        // cannot answer one is checked where a question is asked.
         for operation in crate::service::catalog::OPERATIONS.iter().filter(|entry| {
-            entry.scope == crate::service::catalog::Scope::LocalHub && entry.method == "GET"
+            entry.scope == crate::service::catalog::Scope::LocalHub
+                && entry.method == "GET"
+                && entry.operation != Operation::SshPrompts
         }) {
             snapshot.push((
                 operation.name,

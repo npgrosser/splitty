@@ -573,6 +573,11 @@ that area touches them.
   stops at once failed with "killpg owned leader group … with SIGKILL: EPERM". Darwin answers `killpg` with
   EPERM once the leader is a zombie; `group_has_only_exited_leader` (`pty/lifecycle.rs`) accepts that only for a
   complete, sole-leader group. Not investigated.
+- **Fixed (2026-11-14): the role-catalog test compared another test's SSH question.** Seen once, in the static
+  release build (`framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catalog`,
+  `crates/splitty-server/src/http/tests/conformance.rs`): its snapshot of the local management state read
+  `ssh.prompts.get`, the process's questions, while the test beside it had one waiting. The snapshot leaves the
+  questions out.
 - **Fixed (2026-11-13): the askpass change-feed test read another test's notification.** Seen once, in the
   release run of v0.4.0 (`askpass::tests::publishing_and_settling_a_question_move_the_change_feed`,
   `crates/splitty-remote/src/askpass.rs`): the change feed is the process's, so a question of a parallel test
