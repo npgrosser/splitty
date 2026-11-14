@@ -61,7 +61,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -70,13 +70,13 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: windows-native
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The archive and its .sha256 file, which the installer ships.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wsl-payload
           path: payloads
@@ -118,7 +118,7 @@ jobs:
           $setups = @(Get-ChildItem -Path out -Filter "Splitty_*_x64-setup.exe")
           if ($setups.Count -ne 1) { throw "expected one Splitty_<version>_x64-setup.exe in out, found $($setups.Count)" }
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: splitty-windows-x64-native
           path: out/Splitty_*_x64-setup.exe
@@ -140,15 +140,15 @@ jobs:
       SPLITTY_REMOTE_PAYLOAD_DARWIN_AARCH64: ${{ github.workspace }}/payloads/splitty-darwin-aarch64.tar.gz
       SPLITTY_REMOTE_PAYLOAD_DARWIN_X86_64: ${{ github.workspace }}/payloads/splitty-darwin-x86_64.tar.gz
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
         with:
           version: 11
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -159,27 +159,27 @@ jobs:
           toolchain: stable
           targets: x86_64-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: windows-tauri
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: wsl-payload
           path: crates/splitty-tauri/resources
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: remote-payload-aarch64
           path: payloads
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: remote-payload-darwin
           path: payloads
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: frontend-dist
           path: frontend/dist
@@ -207,7 +207,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path out | Out-Null
           Copy-Item -LiteralPath $setups[0].FullName -Destination (Join-Path out ("Splitty-Web_" + $name.Substring("Splitty Web_".Length)))
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: splitty-windows-x64-web
           path: out/Splitty-Web_*_x64-setup.exe
