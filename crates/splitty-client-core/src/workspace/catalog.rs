@@ -607,6 +607,17 @@ impl SourceWorkspace {
         self.shown()
             .is_some_and(|screen| screen.is_displayed_pane(pane))
     }
+    /// See `ScreenModel::slot_for`, on the shown Screen.
+    pub fn slot_for(&self, pane: &str) -> Option<&str> {
+        self.shown()?.slot_for(pane)
+    }
+    /// See `ScreenModel::displayed_tabs`, on the shown Screen.
+    pub fn displayed_tabs(&self, slot: &str) -> Option<(&str, Vec<&str>)> {
+        if self.pending_template().is_some() {
+            return None;
+        }
+        self.shown()?.displayed_tabs(slot)
+    }
     pub fn toggle_maximize_focused(&mut self) -> bool {
         let changed = self
             .shown_mut()

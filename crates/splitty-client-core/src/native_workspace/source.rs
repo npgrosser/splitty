@@ -31,6 +31,9 @@ pub(super) struct SourceRuntime {
     attached: HashSet<String>,
     visible: HashSet<String>,
     desired_visible: HashSet<String>,
+    /// The tab groups, as (Screen, slot), of the panes the window shows.
+    /// Their other terminal tabs follow the shown tab's measured size.
+    shown_slots: HashSet<(String, String)>,
     owned_sessions: HashSet<String>,
     closed_sessions: HashSet<String>,
     pending_hide: HashSet<String>,
@@ -48,6 +51,9 @@ pub(super) struct SourceRuntime {
     /// The size the window last reported for each session's pane, in the
     /// current route generation. A session without one is not reported.
     sizes: HashMap<String, (u16, u16)>,
+    /// The size this connection last reported for each session, until the
+    /// session is hidden, detached, closed or attached again.
+    reported: HashMap<String, (u16, u16)>,
     refresh_error: Option<String>,
     control_error: Option<String>,
     last_close_request: u64,
@@ -73,6 +79,7 @@ impl SourceRuntime {
             attached: HashSet::new(),
             visible: HashSet::new(),
             desired_visible: HashSet::new(),
+            shown_slots: HashSet::new(),
             owned_sessions: HashSet::new(),
             closed_sessions: HashSet::new(),
             pending_hide: HashSet::new(),
@@ -82,6 +89,7 @@ impl SourceRuntime {
             window_presence: presence::WindowPresenceCell::default(),
             pty_sizes: HashMap::new(),
             sizes: HashMap::new(),
+            reported: HashMap::new(),
             refresh_error: None,
             control_error: None,
             last_close_request: 0,
@@ -116,6 +124,7 @@ impl SourceRuntime {
     }
     pub fn withdraw_visibility(&mut self) {
         self.desired_visible.clear();
+        self.shown_slots.clear();
     }
     pub fn has_pending_close(&self) -> bool {
         self.pending_close.is_some()
@@ -426,6 +435,13 @@ impl SourceRuntime {
                             .iter()
                             .filter(|pane| model.is_displayed_pane(pane))
                             .cloned()
+                            .collect();
+                        let shown = model.shown_screen_id().unwrap_or_default();
+                        self.shown_slots = self
+                            .desired_visible
+                            .iter()
+                            .filter_map(|pane| model.slot_for(pane))
+                            .map(|slot| (shown.to_owned(), slot.to_owned()))
                             .collect();
                     }
                 }
@@ -1287,6 +1303,7 @@ impl SourceRuntime {
                         }) {
                             self.attached.insert(session.to_owned());
                             self.redraw_pending.insert(session.to_owned());
+                            self.reported.remove(session);
                             if model
                                 .as_ref()
                                 .and_then(|model| model.pane_for(session))
@@ -1326,6 +1343,7 @@ impl SourceRuntime {
                         self.attached.remove(session);
                         self.pty_sizes.remove(session);
                         self.redraw_pending.remove(session);
+                        self.reported.remove(session);
                         self.editors.session_closed(
                             &self.client,
                             source,
@@ -1558,6 +1576,41 @@ impl SourceRuntime {
         }
         self.client.resize(session, cols, rows, redraw)
     }
+    /// The background tabs of the tab groups the window shows, with the size
+    /// each follows: its group's shown terminal's measured size, or `None`
+    /// while that is not measured yet. A group whose shown tab is not a
+    /// terminal has none, and a server that does not decide sizes gets none:
+    /// without `hide` a report there would claim the PTY for good.
+    fn followers(&mut self, model: &SourceWorkspace) -> HashMap<String, Option<(u16, u16)>> {
+        let mut followers = HashMap::new();
+        if !self.presence.supported() {
+            self.shown_slots.clear();
+            return followers;
+        }
+        let shown = model.shown_screen_id();
+        self.shown_slots.retain(|(screen, slot)| {
+            shown == Some(screen.as_str()) && model.displayed_tabs(slot).is_some()
+        });
+        for (_, slot) in &self.shown_slots {
+            let Some((selected, tabs)) = model.displayed_tabs(slot) else {
+                continue;
+            };
+            let Some(session) = model.session_for(selected) else {
+                continue;
+            };
+            let size = self
+                .desired_visible
+                .contains(selected)
+                .then(|| self.sizes.get(session).copied())
+                .flatten();
+            for tab in tabs {
+                if !self.desired_visible.contains(tab) && model.session_for(tab).is_some() {
+                    followers.insert(tab.to_owned(), size);
+                }
+            }
+        }
+        followers
+    }
     pub fn reconcile(&mut self, window: &mut WindowWorkspace) -> anyhow::Result<SourceEffects> {
         let mut out = SourceEffects::default();
         self.files
@@ -1567,6 +1620,7 @@ impl SourceRuntime {
             .is_some_and(|key| key.source_id() == self.id());
         if !globally_shown {
             self.desired_visible.clear();
+            self.shown_slots.clear();
         }
         if let Some(model) = window.source(self.id()) {
             let desired_sessions: HashSet<String> = model
@@ -1582,11 +1636,22 @@ impl SourceRuntime {
                 .retain(|session| desired_sessions.contains(session));
             self.pty_sizes
                 .retain(|session, _| desired_sessions.contains(session));
+            self.reported
+                .retain(|session, _| desired_sessions.contains(session));
             self.desired_visible.retain(|pane| {
                 model.screen_for(pane) == model.shown_screen_id()
                     && model.session_for(pane).is_some()
                     && model.is_displayed_pane(pane)
             });
+            let followers = self.followers(model);
+            // A background tab is kept reported while it follows a measured
+            // size, and while its group's size is not measured yet once it
+            // has been reported (a tab switch, a route refresh).
+            let keeps = |visible: &HashSet<String>, pane: &str| match followers.get(pane) {
+                Some(Some(_)) => true,
+                Some(None) => visible.contains(pane),
+                None => false,
+            };
             self.closed_sessions
                 .retain(|session| desired_sessions.contains(session));
             self.closed_sessions
@@ -1602,6 +1667,7 @@ impl SourceRuntime {
                             self.pending_resize.remove(&session);
                             self.redraw_pending.remove(&session);
                             self.sizes.remove(&session);
+                            self.reported.remove(&session);
                             self.pty_sizes.remove(&session);
                         }
                         Err(error) => {
@@ -1639,11 +1705,12 @@ impl SourceRuntime {
                 }
             }
             for pane in self.visible.clone() {
-                if !self.desired_visible.contains(&pane) {
+                if !self.desired_visible.contains(&pane) && !keeps(&self.visible, &pane) {
                     if let Some(session) = model.session_for(&pane) {
                         match self.hide(session) {
                             Ok(()) => {
                                 self.visible.remove(&pane);
+                                self.reported.remove(session);
                             }
                             Err(error) => {
                                 pending_error
@@ -1658,16 +1725,16 @@ impl SourceRuntime {
             for session in self.pending_hide.clone() {
                 if !self.attached.contains(&session) || !desired_sessions.contains(&session) {
                     self.pending_hide.remove(&session);
-                } else if model
-                    .pane_for(&session)
-                    .is_some_and(|pane| self.desired_visible.contains(pane))
-                {
+                } else if model.pane_for(&session).is_some_and(|pane| {
+                    self.desired_visible.contains(pane) || keeps(&self.visible, pane)
+                }) {
                     self.pending_hide.remove(&session);
                     self.pending_resize.insert(session);
                 } else {
                     match self.hide(&session) {
                         Ok(()) => {
                             self.pending_hide.remove(&session);
+                            self.reported.remove(&session);
                         }
                         Err(error) => {
                             pending_error.get_or_insert_with(|| format!("Hide pending: {error}"));
@@ -1693,12 +1760,37 @@ impl SourceRuntime {
                                 self.visible.insert(pane.clone());
                                 self.pending_resize.remove(session);
                                 self.redraw_pending.remove(session);
+                                self.reported.insert(session.to_owned(), (cols, rows));
                             }
                             Err(error) => {
                                 pending_error
                                     .get_or_insert_with(|| format!("Resize pending: {error}"));
                             }
                         }
+                    }
+                }
+            }
+            for (pane, size) in &followers {
+                let (Some((cols, rows)), Some(session)) = (*size, model.session_for(pane)) else {
+                    continue;
+                };
+                if !self.attached.contains(session)
+                    || (self.visible.contains(pane)
+                        && !self.pending_resize.contains(session)
+                        && self.reported.get(session) == Some(&(cols, rows)))
+                {
+                    continue;
+                }
+                let redraw = self.redraw_pending.contains(session);
+                match self.report_size(session, cols, rows, redraw) {
+                    Ok(()) => {
+                        self.visible.insert(pane.clone());
+                        self.pending_resize.remove(session);
+                        self.redraw_pending.remove(session);
+                        self.reported.insert(session.to_owned(), (cols, rows));
+                    }
+                    Err(error) => {
+                        pending_error.get_or_insert_with(|| format!("Resize pending: {error}"));
                     }
                 }
             }
@@ -2882,6 +2974,8 @@ mod tests {
         id: SourceId,
         token: SourceToken,
         screen: ScreenKey,
+        /// The window's local Screen, of another source.
+        local: ScreenKey,
         pane: String,
         session: String,
         pane_size: (u16, u16),
@@ -2898,9 +2992,10 @@ mod tests {
             pane_size: (u16, u16),
         ) -> Self {
             let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
-            window
+            let local = window
                 .ui_test_screen_order_fixture(&[(screen_id, "Local")], None)
-                .unwrap();
+                .unwrap()
+                .remove(0);
             let id = window
                 .admit_remote(window.lifecycle_token(), "size.test")
                 .unwrap();
@@ -2919,6 +3014,7 @@ mod tests {
                 id,
                 token,
                 screen,
+                local,
                 pane: String::new(),
                 session: String::new(),
                 pane_size,
@@ -3018,8 +3114,14 @@ mod tests {
 
         /// The PTY size (columns, rows) the session's shell reports now.
         async fn stty(&mut self, marker: &str) -> (u16, u16) {
+            let (pane, session) = (self.pane.clone(), self.session.clone());
+            self.stty_in(&pane, &session, marker).await
+        }
+
+        /// [`Self::stty`] for the session of `pane`, shown or not.
+        async fn stty_in(&mut self, pane: &str, session: &str, marker: &str) -> (u16, u16) {
             let command = format!("printf '{marker}_%s_\\n' \"$(stty size)\"\n");
-            let route = TerminalToken::new(self.token, &self.pane, &self.session);
+            let route = TerminalToken::new(self.token, pane, session);
             self.source
                 .command(
                     &mut self.window,
@@ -3032,11 +3134,11 @@ mod tests {
                     ),
                 )
                 .unwrap();
-            let found = |this: &Self| stty_answer(this.output.get(&this.session), marker);
+            let found = |this: &Self| stty_answer(this.output.get(session), marker);
             self.pump("the shell's size", |this| found(this).is_some())
                 .await;
             let size = found(self).unwrap();
-            self.output.remove(&self.session);
+            self.output.remove(session);
             size
         }
     }
@@ -3171,6 +3273,283 @@ mod tests {
         assert_eq!(window.sizes.last(), Some(&(session.clone(), pty(60, 20))));
 
         drop(other);
+        window.source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    impl ShownWindow {
+        /// Open a second tab in the shown pane's slot and show it, measured at
+        /// `size`. Returns the background tab's pane and session.
+        async fn open_tab(&mut self, size: (u16, u16)) -> (String, String) {
+            let (pane, session) = (self.pane.clone(), self.session.clone());
+            let (token, screen, id) = (self.token, self.screen.clone(), self.id);
+            self.source
+                .command(
+                    &mut self.window,
+                    Command::new(
+                        token,
+                        CommandKind::Tab {
+                            screen,
+                            pane: pane.clone(),
+                        },
+                    ),
+                )
+                .unwrap();
+            self.pump("the second tab", |this| {
+                let routes = this.window.source(id).unwrap().routes();
+                routes.len() == 2
+                    && routes
+                        .iter()
+                        .all(|route| this.source.attached.contains(&route.session_id))
+            })
+            .await;
+            let model = self.window.source(id).unwrap();
+            let tab = model
+                .routes()
+                .into_iter()
+                .find(|route| route.pane_id != pane)
+                .unwrap();
+            assert_eq!(model.slot_for(&tab.pane_id), model.slot_for(&pane));
+            assert_eq!(model.displayed_panes(), std::slice::from_ref(&tab.pane_id));
+            self.pane = tab.pane_id;
+            self.session = tab.session_id;
+            self.pane_size = size;
+            self.report();
+            (pane, session)
+        }
+
+        /// Switch the shown tab of its slot to `pane`, as the window does: the
+        /// selection first, then the shown panes, then the tab's measured
+        /// size, the service answering a shell in between.
+        async fn select_tab(&mut self, pane: &str, session: &str) {
+            let (token, screen, id) = (self.token, self.screen.clone(), self.id);
+            let command = |kind| Command::new(token, kind);
+            self.source
+                .command(
+                    &mut self.window,
+                    command(CommandKind::Select {
+                        screen: screen.clone(),
+                        pane: pane.to_owned(),
+                    }),
+                )
+                .unwrap();
+            self.pane = pane.to_owned();
+            self.session = session.to_owned();
+            self.stty("SELECTED").await;
+            let generation = self.window.source(id).unwrap().route_generation();
+            self.source
+                .command(
+                    &mut self.window,
+                    command(CommandKind::Visible {
+                        screen: Some(screen.clone()),
+                        route_generation: generation,
+                        panes: vec![pane.to_owned()],
+                    }),
+                )
+                .unwrap();
+            self.stty("VISIBLE").await;
+            let (cols, rows) = self.pane_size;
+            self.source
+                .command(
+                    &mut self.window,
+                    command(CommandKind::ResizePane {
+                        route: TerminalToken::new(token, pane, session),
+                        screen,
+                        route_generation: generation,
+                        cols,
+                        rows,
+                    }),
+                )
+                .unwrap();
+            self.source.reconcile(&mut self.window).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn background_tabs_follow_the_shown_tab_of_their_group() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        let mut window = ShownWindow::open(client, &initial.screen_id, in_use(), (50, 30)).await;
+        assert!(window.source.presence.supported());
+        let (back, back_session) = window.open_tab((44, 22)).await;
+        let (front, front_session) = (window.pane.clone(), window.session.clone());
+
+        // The background tab takes the shown tab's size.
+        assert_eq!(window.stty("FRONT").await, (44, 22));
+        assert_eq!(window.stty_in(&back, &back_session, "BACK").await, (44, 22));
+
+        // Another client in use shows both sessions larger; once this window
+        // is in use too, the smaller size of each session decides, so a `hide`
+        // of this window shows as the other client's size.
+        let others = [
+            client_in_use(&service, &front_session, 100, 40).await,
+            client_in_use(&service, &back_session, 100, 40).await,
+        ];
+        window.source.acted();
+        assert_eq!(window.stty("ACTED").await, (44, 22));
+        assert_eq!(
+            window.stty_in(&back, &back_session, "BACK_ACTED").await,
+            (44, 22)
+        );
+
+        // A new size of the shown tab reaches the background tab.
+        window.pane_size = (40, 20);
+        window.report();
+        assert_eq!(
+            window.stty_in(&back, &back_session, "RESIZED").await,
+            (40, 20)
+        );
+
+        // Switching tabs keeps both sessions at this window's size throughout.
+        let switched = window.sizes.len();
+        window.select_tab(&back, &back_session).await;
+        assert_eq!(window.stty("SWITCHED").await, (40, 20));
+        assert_eq!(
+            window.stty_in(&front, &front_session, "NOW_BACK").await,
+            (40, 20)
+        );
+        window.pane_size = (38, 19);
+        window.report();
+        assert_eq!(
+            window.stty_in(&front, &front_session, "FOLLOWS").await,
+            (38, 19)
+        );
+        let large = window.sizes[switched..]
+            .iter()
+            .find(|(_, size)| (size.cols, size.rows) == (100, 40));
+        assert_eq!(large, None, "a tab switch withdrew a size report");
+
+        // Maximizing another slot hides the whole group.
+        let (token, screen, id) = (window.token, window.screen.clone(), window.id);
+        window
+            .source
+            .command(
+                &mut window.window,
+                Command::new(
+                    token,
+                    CommandKind::Split {
+                        screen: screen.clone(),
+                        pane: back.clone(),
+                        axis: Axis::Horizontal,
+                    },
+                ),
+            )
+            .unwrap();
+        window
+            .pump("the split", |this| {
+                let routes = this.window.source(id).unwrap().routes();
+                routes.len() == 3
+                    && routes
+                        .iter()
+                        .all(|route| this.source.attached.contains(&route.session_id))
+            })
+            .await;
+        let model = window.window.source(id).unwrap();
+        let beside = model
+            .routes()
+            .into_iter()
+            .find(|route| route.pane_id != front && route.pane_id != back)
+            .unwrap()
+            .pane_id;
+        let beside_slot = model.slot_for(&beside).unwrap().to_owned();
+        let connection = model.connection_id();
+        report_layout(
+            &mut window.source,
+            &mut window.window,
+            id,
+            &screen,
+            &[(&back, 38, 19), (&beside, 30, 19)],
+        );
+        window
+            .source
+            .command(
+                &mut window.window,
+                Command::new(
+                    token,
+                    CommandKind::SetMaximized {
+                        screen: initial.screen_id.clone(),
+                        connection,
+                        slot: Some(beside_slot),
+                        pane: Some(beside.clone()),
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            window.window.source(id).unwrap().displayed_panes(),
+            std::slice::from_ref(&beside)
+        );
+        assert_eq!(window.stty("MAXIMIZED").await, (100, 40));
+        assert_eq!(
+            window
+                .stty_in(&front, &front_session, "MAXIMIZED_BACK")
+                .await,
+            (100, 40)
+        );
+        window
+            .source
+            .command(
+                &mut window.window,
+                Command::new(
+                    token,
+                    CommandKind::SetMaximized {
+                        screen: initial.screen_id.clone(),
+                        connection,
+                        slot: None,
+                        pane: None,
+                    },
+                ),
+            )
+            .unwrap();
+        report_layout(
+            &mut window.source,
+            &mut window.window,
+            id,
+            &screen,
+            &[(&back, 38, 19), (&beside, 30, 19)],
+        );
+        assert_eq!(
+            window.stty_in(&front, &front_session, "RESTORED").await,
+            (38, 19)
+        );
+
+        // Showing a Screen of another source hides the whole group.
+        let owner = window.window.lifecycle_token();
+        let local = window.local.clone();
+        window.window.select(owner, &local).unwrap();
+        assert_eq!(window.stty("HIDDEN").await, (100, 40));
+        assert_eq!(
+            window.stty_in(&front, &front_session, "HIDDEN_BACK").await,
+            (100, 40)
+        );
+
+        drop(others);
+        window.source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn background_tabs_keep_their_size_on_a_server_that_does_not_decide_sizes() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        let mut window = ShownWindow::open(client, &initial.screen_id, in_use(), (50, 30)).await;
+        // As after the welcome of a server without `pty-size-v1`.
+        window.source.presence.welcome(false, false);
+        let (back, back_session) = window.open_tab((44, 22)).await;
+        assert_eq!(window.stty("FRONT").await, (44, 22));
+        assert_eq!(window.stty_in(&back, &back_session, "BACK").await, (50, 30));
         window.source.client.finish().await.unwrap();
         service.close().await.unwrap();
         let _ = std::fs::remove_dir_all(path);

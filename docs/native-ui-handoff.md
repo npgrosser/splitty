@@ -242,7 +242,10 @@ its session (`workspace/pty_size.rs`): the emulator runs at that size, the
 pane's rest is hatched, a taller grid moves up as far as its cursor row needs,
 and a badge with the size takes it over unless the policy is `smallest`. Not
 yet seen with two clients on one session in a real window; the provisional
-choices are NPS-1 to NPS-3 in `openspec/open-decisions.md`.
+choices are NPS-1 to NPS-3 in `openspec/open-decisions.md`. The worker also
+reports the other terminal tabs of a shown pane's tab group at that pane's
+measured size and hides them with the group (terminal-sessions, Client Size
+Reports; BTS-1 to BTS-3), so a tab switch neither resizes nor redraws.
 
 ## Versions
 

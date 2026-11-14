@@ -504,6 +504,21 @@ impl ScreenModel {
     pub fn focused_slot_id(&self) -> Option<&str> {
         find_slot(self.snapshot()?, self.focused_pane()?).map(|slot| slot.id().as_str())
     }
+    /// The slot that holds `pane`, in the layout or a floating group.
+    pub fn slot_for(&self, pane: &str) -> Option<&str> {
+        find_slot(self.snapshot()?, pane).map(|slot| slot.id().as_str())
+    }
+    /// The tab this window shows in slot `slot` and all of the slot's tabs,
+    /// while the slot is displayed.
+    pub fn displayed_tabs(&self, slot: &str) -> Option<(&str, Vec<&str>)> {
+        let node = find_node(self.snapshot()?, slot)?;
+        let LayoutNode::Slot { pane_ids, .. } = node else {
+            return None;
+        };
+        let selected = self.selected_pane(node)?;
+        self.is_displayed_pane(selected)
+            .then(|| (selected, pane_ids.iter().map(PaneId::as_str).collect()))
+    }
     pub fn presented_floats(&self) -> &[FloatingEntry] {
         if self.maximized_slot.is_some() {
             &[]
