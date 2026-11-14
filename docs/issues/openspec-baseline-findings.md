@@ -400,6 +400,14 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   movement showed scattered text. The view now takes the PTY's grid at once; the first layout still sizes it
   and reports the pane's size (`a_pty_size_reaches_the_emulator_before_the_first_layout`). A server without
   `pty-size-v1` sends no size, so its replay is still parsed at the view's own grid.
+- **A pane shown again is first reported at its size from before it was hidden** (found on 2026-11-14, read
+  in the code, not observed). The native worker keeps a session's last measured size while the session stays
+  routed (`sizes`, `crates/splitty-client-core/src/native_workspace/source.rs`) and `reconcile` reports a
+  shown pane as soon as it has one. A pane hidden with its Screen or behind a maximized slot and shown again
+  after the window changed size is reported at the old size until the window measures it, so its PTY can
+  change size twice. Dropping the measured size with the `hide`, as a route refresh does, would leave the
+  first report to the measurement. The background tabs of a shown tab group are not affected: they follow
+  the shown tab's size and are not hidden.
 - **Fixed (2026-11-12): a scratchpad on a host's Screen was never saved and lost its text at once.** The native
   window's gate for commands to a host (`Remotes::command`, `native_workspace/remote.rs`) did not list
   `SetScratchpad`, so every save from a pane of a remote Screen was refused before it reached the host; the
