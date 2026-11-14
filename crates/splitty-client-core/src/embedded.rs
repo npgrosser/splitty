@@ -80,6 +80,13 @@ impl EmbeddedService {
         ))
     }
 
+    /// Take every opening slot of this service's streams, as the streams a
+    /// window opens together at its start do, until the result is dropped.
+    #[cfg(test)]
+    pub(crate) fn hold_openings(&self) -> Vec<splitty_server::native::client::Pending> {
+        std::iter::from_fn(|| self.connector.admit().ok()).collect()
+    }
+
     pub(crate) async fn api_stream(&self) -> io::Result<crate::api_stream::ApiStream> {
         self.api_stream_with_context(self.connector.context()).await
     }

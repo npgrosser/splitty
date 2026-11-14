@@ -17,6 +17,9 @@ const MAX_TEXT: usize = 16 * 1024;
 const MAX_TARGET: usize = 4096;
 const MAX_QUEUED_ANSWERS: usize = 16;
 const POLL: Duration = Duration::from_secs(1);
+/// The service refused to open the stream for now: its admission has no
+/// queue, and a window opens several streams at once when it connects.
+const REOPEN: Duration = Duration::from_millis(250);
 
 /// One question OpenSSH asked the local service: a password or passphrase,
 /// or with `confirm` a host key to trust. The text is the service's and SSH's,
@@ -57,6 +60,8 @@ pub(super) struct RuntimeSshPrompts<'a> {
     answers: VecDeque<(String, Option<String>)>,
     read_due: bool,
     next_poll: Instant,
+    /// Opening was refused while the service was busy; it is tried again then.
+    reopen_at: Option<Instant>,
     /// The stream could not be opened or a read failed; nothing is shown.
     stopped: bool,
     known: Arc<Vec<SshPrompt>>,
@@ -74,6 +79,7 @@ impl<'a> RuntimeSshPrompts<'a> {
             answers: VecDeque::new(),
             read_due: !notified,
             next_poll: Instant::now(),
+            reopen_at: None,
             stopped: false,
             known: Arc::default(),
         };
@@ -84,6 +90,7 @@ impl<'a> RuntimeSshPrompts<'a> {
     }
     fn open(&mut self) {
         if self.stream.is_none() && self.job.is_none() && self.setup.is_none() && !self.stopped {
+            self.reopen_at = None;
             let context = splitty_transport::queue::Context::default();
             self.setup = Some(Box::pin(
                 self.service.api_stream_with_context(context.clone()),
@@ -128,6 +135,12 @@ impl<'a> RuntimeSshPrompts<'a> {
                 return std::future::pending().await;
             }
             if self.job.is_none() && self.stream.is_none() {
+                if self.setup.is_none() {
+                    if let Some(at) = self.reopen_at {
+                        tokio::time::sleep_until(at).await;
+                        self.open();
+                    }
+                }
                 let Some(setup) = &mut self.setup else {
                     return std::future::pending().await;
                 };
@@ -136,6 +149,11 @@ impl<'a> RuntimeSshPrompts<'a> {
                 self.setup_context = None;
                 match result {
                     Ok(stream) => self.stream = Some(stream),
+                    // Busy, not broken: what is due stays due for the retry.
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        self.reopen_at = Some(Instant::now() + REOPEN);
+                        continue;
+                    }
                     Err(_) => {
                         if let Some(list) = self.stop() {
                             return list;
@@ -330,6 +348,45 @@ mod tests {
             }
         }
         worker.shutdown().unwrap();
+    }
+
+    // remote-hosts, A password question reaches the native window, asked
+    // while the window connects: the service is still opening the window's
+    // other streams and refuses this one for the moment, and the question is
+    // shown once it accepts.
+    #[tokio::test]
+    async fn a_stream_refused_while_the_service_is_busy_is_opened_again() {
+        let embedded = crate::EmbeddedService::isolated();
+        let held = embedded.hold_openings();
+        let service = crate::owned_service::OwnedService::from(embedded);
+        let mut prompts = RuntimeSshPrompts::new(&service, true);
+        let target = format!("busy-{}@client-core", uuid::Uuid::new_v4().simple());
+        let answer = splitty_remote::askpass::testing::ask(&target, "demo@host's password:");
+        prompts.changed();
+        // The refused opening is behind a retry, not a stop.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), prompts.next_update())
+                .await
+                .is_err()
+        );
+        assert!(prompts.reopen_at.is_some() && !prompts.stopped);
+        drop(held);
+        let id = loop {
+            let list = next(&mut prompts).await;
+            if let Some(prompt) = list.iter().find(|prompt| prompt.target == target) {
+                break prompt.id.clone();
+            }
+        };
+        prompts.answer(id.clone(), None).unwrap();
+        loop {
+            let list = next(&mut prompts).await;
+            if list.iter().all(|prompt| prompt.id != id) {
+                break;
+            }
+        }
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap(), None);
+        prompts.finish().await.unwrap();
+        service.close().await.unwrap();
     }
 
     // remote-hosts, Older local service: without the capability the questions
