@@ -301,6 +301,14 @@ Hardening candidates, not open holes.
 - **Old WSL backends are never removed.** The Windows app unpacks every new archive next to the previous ones in
   `~/.local/share/splitty/desktop/` and only moves the `<version>` link (`windows_wsl.rs`, `provision_backend`);
   four leftovers of 0.1.0 builds were found in one distribution. Uninstalling Splitty leaves them too.
+- **A local Windows setup builds its four server payloads one after another** (found on 2026-11-14).
+  `packaging/windows/build.ps1` runs `build-wsl-payload.sh` for `aarch64`, `darwin-aarch64` and
+  `darwin-x86_64` and then for `x86_64`, each a release build of the workspace's own crates of about a minute;
+  with the Windows app that is most of the six to seven minutes of a setup. A release changes the version of
+  every crate, so none of it is reused from the build before. The first three do not depend on each other and
+  could run at once (each target has its own directory under `target/`), and a switch that leaves out the
+  payloads a machine's hosts do not need would shorten a local build further; a host of a left-out system
+  would then need the release's setup.
 
 ### processes and sockets on macOS
 
