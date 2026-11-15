@@ -17,7 +17,7 @@ views {
 
   view containers of splitty {
     title 'Containers'
-    description 'The crates, the web frontend, the native desktop app and the stores, with the planned MCP server.'
+    description 'The crates, the native desktop app and the stores, with the planned MCP server.'
     include *
     style element.tag = #external {
       color muted

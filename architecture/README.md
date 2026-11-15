@@ -1,7 +1,7 @@
 # Splitty architecture model
 
 The module-level map of Splitty in the [LikeC4](https://likec4.dev) DSL: the people and external
-systems, the containers (the Rust crates, the web frontend, the native desktop app, the stores), and
+systems, the containers (the Rust crates, the native desktop app, the stores), and
 the components of each crate with the dependencies allowed between them. `check/` compares the
 model with the code in both directions, so it can be trusted without reading imports. Concepts
 (ops model, shadow mode, the two protocol paths, server modes) are explained in
@@ -66,7 +66,7 @@ finds the components of a capability.
 
 **Containers are the crates.** `splitty-core`, `splitty-server`,
 `splitty-client-core` and `splitty-gpui` are containers,
-next to the web frontend and the stores. The core is a container of its own,
+next to the stores. The core is a container of its own,
 although it is only ever linked into the `splitty` binary and the native desktop app. That way each
 crate's components sit in one place, and a relationship into the core reads as the use of a
 library.
