@@ -52,3 +52,7 @@ To be decided when the change is next. Likely new: `plugins` (manifest, installa
 - What data-only means exactly, and what an approval covers (plugin, version, server).
 - Distribution: a catalog file, pinned revisions, updates.
 - Which contributions the web shells draw.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client and its DOM/Svelte extension surfaces are gone. Native views and client-core are the UI targets; scripted web panes require an embedded engine without service authority. The server, native protocol and private control socket remain the integration boundaries.

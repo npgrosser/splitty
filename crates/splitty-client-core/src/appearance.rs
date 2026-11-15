@@ -17,14 +17,13 @@ mod terminal_preferences;
 pub use remembered::{AppearanceMemory, RememberedAppearance};
 pub use terminal_preferences::TerminalPreferences;
 
-/// The family of the terminal font the web client bundles.
+/// The family of the bundled terminal font.
 pub const TERMINAL_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
-/// That font's data, compiled in from the web client's source, so the native
-/// client needs neither the server's embedded web build nor a font on disk.
+/// The bundled terminal font, compiled into the native client.
 pub fn terminal_font_data() -> Option<std::borrow::Cow<'static, [u8]>> {
     Some(std::borrow::Cow::Borrowed(include_bytes!(
-        "../../../frontend/public/JetBrainsMonoNerdFontMono-Regular.ttf"
+        "../assets/JetBrainsMonoNerdFontMono-Regular.ttf"
     )))
 }
 

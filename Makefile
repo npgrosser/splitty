@@ -1,38 +1,19 @@
-FRONTEND_SRC := $(shell find frontend/src frontend/public -type f 2>/dev/null) \
-                frontend/index.html frontend/package.json frontend/vite.config.ts
 UNAME   := $(shell uname -s)
 BUILD   := build
 COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 
-FRONTEND_STAMP := frontend/.build-stamp
-
-.PHONY: dev clean test icons native-package \
+.PHONY: clean test icons native-package \
        install-no-gui uninstall-no-gui uninstall-config
-
-# --- Frontend ---
-
-frontend/node_modules: frontend/package.json frontend/pnpm-lock.yaml
-	cd frontend && pnpm install
-	@touch $@
-
-$(FRONTEND_STAMP): frontend/node_modules $(FRONTEND_SRC)
-	cd frontend && pnpm run build
-	@touch $@
 
 # --- Build targets ---
 
 $(BUILD):
 	mkdir -p $@
 
-$(BUILD)/splitty: $(FRONTEND_STAMP) | $(BUILD)
+$(BUILD)/splitty: | $(BUILD)
 	SPLITTY_COMMIT=$(COMMIT) SPLITTY_BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
 		cargo build --release -p splitty-server
 	cp target/release/splitty $@
-
-# --- Run targets ---
-
-dev:
-	cargo watch -i frontend/ -x 'run -p splitty-server -- serve'
 
 # --- Test ---
 
@@ -75,6 +56,5 @@ icons:
 # --- Clean ---
 
 clean:
-	rm -rf $(BUILD) $(FRONTEND_STAMP)
-	rm -rf frontend/dist
+	rm -rf $(BUILD)
 	cargo clean

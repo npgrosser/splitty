@@ -14,7 +14,7 @@ backend archive in `resources\`.
 - Windows 10/11 x64 with WSL 2 and Ubuntu or Debian
 - Visual Studio 2022 Build Tools with **Desktop development with C++** and a
   Windows 10/11 SDK
-- Rust stable (MSVC), Git for Windows, Node.js 24, and pnpm 11 on Windows
+- Rust stable (MSVC) and Git for Windows
 - NSIS 3 (`makensis.exe` on `PATH` or in its default install directory) and
   the pinned libghostty-vt, either
   as `GHOSTTY_VT_DIR` or built by `scripts\bootstrap-libghostty-vt.py`
@@ -46,7 +46,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -Dist
 ```
 
 Omit `-Distro Ubuntu` to use the default WSL distribution. During quick local
-iteration, `-SkipTests` skips the frontend check and desktop unit tests:
+iteration, `-SkipTests` skips desktop unit tests:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -SkipTests

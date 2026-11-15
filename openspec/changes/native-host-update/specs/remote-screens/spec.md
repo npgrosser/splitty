@@ -3,12 +3,13 @@
 ## MODIFIED Requirements
 
 ### Requirement: Host Update
-`/ws/remote` SHALL accept `update=1`; an authorized native main host connection SHALL support the corresponding explicit intent. A client SHALL request it only after the user confirms the versions and keeper-session behavior. An older native daemon may be updated only with verified instance identity, session keepers and the matching installed replacement. An eligible legacy daemon SHALL use Confirmed Legacy Daemon Migration instead. A missing replacement, newer daemon, absent session keepers or blocked legacy migration SHALL stop nothing and return an actionable failure. No update SHALL deliberately end sessions.
+An authorized native main host connection SHALL support an explicit update intent. A client SHALL request it only after the user confirms the versions and keeper-session behavior. An older native daemon may be updated only with verified instance identity, session keepers and the matching installed replacement. An eligible legacy daemon SHALL use Confirmed Legacy Daemon Migration instead. A missing replacement, newer daemon, absent session keepers or blocked legacy migration SHALL stop nothing and return an actionable failure. No update SHALL deliberately end sessions.
 
 The intent SHALL apply to one connection attempt and be consumed before a potentially mutating command; reconnect and ambiguous completion SHALL NOT replay it. Successful replacement SHALL report update progress and require a fresh handshake for the intended native daemon. A daemon already running the intended version SHALL remain running. Migration offers SHALL be structured metadata rather than inferred from message text; blocked legacy migration SHALL use `migration_unavailable` and SHALL NOT offer an ordinary update that cannot succeed.
 
+The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix, comparing numeric prerelease identifiers numerically and ignoring build metadata; an invalid version SHALL NOT authorize a replacement. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching prepared replacement required by the shared replacement plan. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
 
-The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix and ignoring build metadata. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching prepared replacement required by the shared replacement plan. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
+The `update` metadata in `remote.ready` and in an `incompatible` `remote.error` SHALL be the whole plan for an ordinary update: `available`, `keepsSessions`, and `toVersion` when available. An available update SHALL keep every session of the host, so it ends no screen and no pane; the connection drops for a moment. A window SHALL offer an ordinary update only when `available` and `keepsSessions` are both true, SHALL name `toVersion` as the version the host gets, and SHALL NOT count or name screens or panes that end. With a hub that sends no `toVersion` the window SHALL name its local server's version instead.
 
 The experimental native workspace SHALL retain actionable update metadata from its assigned host, including when `remote.ready` is followed by an unsupported workspace capability. An ordinary confirmation SHALL use the assigned local backend's version; missing, malformed or contradictory metadata SHALL NOT authorize an update. Native confirmation SHALL identify the host, observed and replacement versions, keeper preservation and connection interruption. A legacy session count SHALL describe the observation, not reserve those sessions.
 
@@ -35,6 +36,27 @@ A confirmed native update SHALL retain open remote Screen references and await o
 #### Scenario: Newer or unparseable host version
 - **WHEN** the daemon version is newer, equal in precedence, or unparseable
 - **THEN** update availability is false and the window offers no ordinary update
+
+#### Scenario: Confirming an update
+- **WHEN** the hub reports `update` with `available` and `keepsSessions` true and `toVersion` `0.4.0` for `me@192.0.2.10`
+- **THEN** the window asks to update `me@192.0.2.10` to `0.4.0`, says that its sessions keep running and names no screens or panes that end
+
+#### Scenario: Availability without kept sessions
+- **WHEN** a hub reports `available` true with `keepsSessions` false
+- **THEN** the window offers no ordinary update
+
+#### Scenario: Prerelease progression
+- **WHEN** a host daemon runs `0.2.0-dev.9` and the hub runs `0.2.0-dev.10`, with all other update requirements met
+- **THEN** the hub reports an available update
+
+#### Scenario: Stable release follows its prereleases
+- **WHEN** a host daemon runs `0.2.0-dev.1` and the hub runs `0.2.0`, with all other update requirements met
+- **THEN** the hub reports an available update
+- **AND** a hub of `0.2.0-dev.1` reports none for a daemon of `0.2.0`
+
+#### Scenario: Build metadata only
+- **WHEN** the hub's and the daemon's versions differ only in build metadata
+- **THEN** the hub reports no available update
 
 #### Scenario: Native offer survives workspace capability rejection
 - **WHEN** the assigned host reports an actionable ordinary update in `remote.ready` and then lacks `workspace-catalog-v1`

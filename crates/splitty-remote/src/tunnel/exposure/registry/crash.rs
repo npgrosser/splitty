@@ -124,7 +124,7 @@ fn crash_boundaries() {
             .prefix(".exposure-crash-")
             .tempdir_in(env!("CARGO_MANIFEST_DIR"))
             .unwrap();
-        let address = TcpListener::bind("127.0.0.1:0")
+        let address = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap();
@@ -194,7 +194,9 @@ fn crash_boundaries() {
             terminated(coordinator.child.id())
         });
         assert!(
-            observer.bind(address).is_err(),
+            observer
+                .record_gateway(address.port(), std::process::id())
+                .is_err(),
             "{phase}: coordinator death cannot release the destination"
         );
         if let Some(worker) = &coordinator.worker {
@@ -214,14 +216,14 @@ fn crash_boundaries() {
             .unwrap();
         let _entered = runtime.enter();
         if phase == "afterPublication" {
-            drop(
-                observer
-                    .bind(address)
-                    .expect("observed published worker exit permits reuse"),
-            );
+            observer
+                .record_gateway(address.port(), std::process::id())
+                .expect("observed published worker exit permits reuse");
         } else {
             assert!(
-                observer.bind(address).is_err(),
+                observer
+                    .record_gateway(address.port(), std::process::id())
+                    .is_err(),
                 "an ambiguous unpublished generation stays reserved after the fixture worker exits"
             );
         }

@@ -2,7 +2,7 @@
 
 ## Why
 
-The native window lacked functions the web client has: a command palette and a shortcut list, images in terminals, viewer panes, notices for activity, automatic port forwarding, sharing local ports with a host, and floating or maximized groups on remote Screens. Each of them has a web reference and, where one exists, a main spec. The native interface may differ from the web client's; the functions may not.
+The native window lacked functions available in the removed web client's last release: a command palette and a shortcut list, images in terminals, viewer panes, notices for activity, automatic port forwarding, sharing local ports with a host, and floating or maximized groups on remote Screens. Each of them has that historical release as a reference and, where one exists, a main spec. The native interface may differ from the web client's; the functions may not.
 
 ## What changes
 
@@ -21,8 +21,12 @@ The native window lacked functions the web client has: a command palette and a s
 
 ## Not in this change
 
-Suggested changes and the finer points of annotations listed in the tasks, rendered HTML documents, syntax highlighting, Sixel and iTerm2 images (the terminal library has neither), templates and moving panes between Screens on remote hosts, the web client's remaining settings sections, system notifications on Windows, a destination directory for dropped files and drops onto a scratchpad.
+Suggested changes and the finer points of annotations listed in the tasks, rendered HTML documents, syntax highlighting, Sixel and iTerm2 images (the terminal library has neither), templates and moving panes between Screens on remote hosts, settings sections present in the removed web client's last release, system notifications on Windows, a destination directory for dropped files and drops onto a scratchpad.
 
 ## Impact
 
 `splitty-client-core`: `hub/shares.rs`, `native_workspace/{auto_forward,shares,viewers}.rs`, `document.rs`, `notifications.rs`, `settings.rs`, `ports.rs`. `splitty-gpui`: `workspace/{palette,viewer}.rs`, the terminal engine's image reading and the terminal's painting, the ports panel, notices and settings. No protocol or server change.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: Parity is measured against the removed web client's last release and the applicable main specs, not a live frontend in this tree. Native behavior and protocol compatibility remain the implementation targets.

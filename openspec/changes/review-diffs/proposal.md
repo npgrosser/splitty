@@ -28,3 +28,7 @@ To be decided when the change is next. Likely candidates:
 - Server: read-only `git` calls in the repository with fixed arguments, paths after `--`, and repository settings that could run commands turned off (`--no-ext-diff`, `--no-textconv`, `core.fsmonitor` off, no pager); size limits per file and per diff; reading through the window's connection like `viewer.read`.
 - Frontend: a diff view (CodeMirror's merge view), the file list, annotations per side.
 - Open questions: the default comparison, and whether to offer "everything since this pane opened" through a baseline taken then; binary and very large diffs; renames; whether a round spans the files of one diff pane or several panes.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client and CodeMirror view are gone. The diff view, file list and annotations need native presentation; bounded read-only git execution and source-scoped document reads remain applicable.

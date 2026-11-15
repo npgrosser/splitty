@@ -100,9 +100,6 @@ struct Shared {
     connector: Arc<dyn Connector>,
     state: Mutex<State>,
     lanes: Mutex<HashMap<Key, Weak<AsyncMutex<()>>>>,
-    /// Browser adapters sharing this service may each own a listener. Register
-    /// all of them before admitting forwarding, not just the last one built.
-    reserved: Mutex<HashSet<u16>>,
 }
 
 pub struct Reverses {
@@ -133,19 +130,9 @@ impl Reverses {
                     restoring: HashSet::new(),
                 }),
                 lanes: Mutex::new(HashMap::new()),
-                reserved: Mutex::new(HashSet::new()),
             }),
             operations: Mutex::new(Vec::new()),
         }
-    }
-
-    /// The local server listens on `port`, which is never shared.
-    pub fn reserve(&self, port: u16) {
-        self.shared
-            .reserved
-            .lock()
-            .expect("reserved listener ports")
-            .insert(port);
     }
 
     /// Share `local` here as `port` of `target`, on the user's request.
@@ -157,7 +144,6 @@ impl Reverses {
     ) -> Result<ReverseInfo, ForwardError> {
         let (target, key) = key(target, port)?;
         let local = check_port(local)?;
-        self.shared.check_reserved(local)?;
         self.ordered(key, move |shared, key| async move {
             shared.open_ordered(&target, &key, Some(local), true).await
         })
@@ -201,9 +187,6 @@ impl Reverses {
     ) -> Result<SavedReverse, ForwardError> {
         let (_, key) = key(target, port)?;
         let local = local.map(check_port).transpose()?;
-        if let Some(local) = local {
-            self.shared.check_reserved(local)?;
-        }
         let lane = self.shared.lane(&key);
         let _ordered = lane.lock().await;
         let mut state = lock(&self.shared.state);
@@ -223,7 +206,6 @@ impl Reverses {
         if let Some(local) = local {
             row.local = local;
         }
-        self.shared.check_reserved(row.local)?;
         state.store.put(row.clone())?;
         if prior.is_some_and(|prior| prior.local != row.local) {
             state.errors.remove(&key);
@@ -338,18 +320,6 @@ impl Drop for Reverses {
 }
 
 impl Shared {
-    fn check_reserved(&self, local: u16) -> Result<(), ForwardError> {
-        if self
-            .reserved
-            .lock()
-            .expect("reserved listener ports")
-            .contains(&local)
-        {
-            return Err(ForwardError::LocalPortReserved { port: local });
-        }
-        Ok(())
-    }
-
     async fn stop_ordered(&self, key: &Key) -> Result<(), ForwardError> {
         let slot = {
             let mut state = lock(&self.state);
@@ -441,7 +411,6 @@ impl Shared {
             let local = local
                 .or_else(|| saved.as_ref().map(|row| row.local))
                 .ok_or_else(|| ForwardError::Invalid("a local port is required".into()))?;
-            self.check_reserved(local)?;
             if state
                 .slots
                 .keys()
@@ -906,16 +875,12 @@ mod tests {
     #[tokio::test]
     async fn the_own_port_and_invalid_ports_are_refused_without_ssh() {
         let dir = tempfile::tempdir().expect("dir");
-        let host = ScriptedHost::new(dir.path());
+        let port = super::super::testing::free_port();
+        let host = ScriptedHost::new(dir.path()).with_reserved_share(port);
         let reverses = manager(&host, dir.path());
-        reverses.reserve(9800);
         assert!(matches!(
-            reverses.open("vm", 9800, 9800).await,
-            Err(ForwardError::LocalPortReserved { port: 9800 })
-        ));
-        assert!(matches!(
-            reverses.save("vm", 9800, Some(9800)).await,
-            Err(ForwardError::LocalPortReserved { port: 9800 })
+            reverses.open("vm", 9800, i64::from(port)).await,
+            Err(ForwardError::LocalPortReserved { port: refused }) if refused == port
         ));
         assert!(matches!(
             reverses.open("vm", 0, 11434).await,

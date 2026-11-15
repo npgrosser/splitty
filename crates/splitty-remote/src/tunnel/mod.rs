@@ -1,6 +1,4 @@
-//! Native connections to a host's daemon, shared by desktop helpers and the
-//! explicit browser gateway. Installation, capability checks and reconnection
-//! use SSH exec pipes; deliberate port forwards remain separate owned workers.
+//! Host update policy and deliberately forwarded ports over owned SSH workers.
 
 pub mod exposure;
 mod forward;
@@ -8,35 +6,25 @@ mod reverse;
 mod supervisor;
 
 pub use forward::{
-    check_forward_address, parse_forwards, reserve, reserve_exact, Forward, ForwardError,
-    PortForward, PortTunnel, PortTunnelError,
+    check_forward_address, reserve, reserve_exact, Forward, PortForward, PortTunnel,
+    PortTunnelError,
 };
 pub use reverse::{
     parse_prepared, prepare_command, socket_path, ReverseTunnel, ReverseTunnelError, HEARTBEAT,
     MAX_SOCKET_PATH, RELAY_FAILED, RELAY_READY,
 };
-pub use supervisor::{
-    backoff, connect, migration_offer, older, supervise, update_plan, Connected, Event, Progress,
-    Remote, Step, UpdatePlan, GIVE_UP_AFTER, PREPARE_TIMEOUT,
-};
+pub use supervisor::{backoff, migration_offer, older, update_plan, UpdatePlan, PREPARE_TIMEOUT};
 
 use std::io;
 use std::net::TcpListener;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
 use splitty_transport::worker::Worker;
 
-use crate::bridge::NativeBridge;
-use crate::handshake::{self, HandshakeError, RunningDaemon};
-use crate::install::{self, InstallError, Payload, Server};
-use crate::ssh::{run_checked, Ssh, SshError};
-use splitty_transport::{
-    admission,
-    budget::{Charged, ConnectionBudget, Lease},
-    negotiation, wire,
-};
+use crate::install::InstallError;
+use crate::ssh::SshError;
+use splitty_transport::budget::{Charged, ConnectionBudget, Lease};
 
 /// Why talking to the host failed.
 #[derive(Debug, thiserror::Error)]
@@ -267,6 +255,7 @@ fn from_ssh(host: &str, error: SshError) -> RemoteError {
     from_ssh_budgeted(host, error, &ConnectionBudget::default())
 }
 
+#[cfg(test)]
 fn from_ssh_budgeted(host: &str, error: SshError, budget: &ConnectionBudget) -> RemoteError {
     match error {
         SshError::Spawn(error) => RemoteError::Spawn(error),
@@ -314,27 +303,6 @@ fn ssh_retryable(error: &SshError) -> bool {
         ),
         _ => false,
     }
-}
-
-fn percent_encode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                char::from(b).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-/// The URL that opens a session on the tunnel's local end. `host` is only shown
-/// by the UI (the title bar's remote indicator); it never directs traffic.
-pub fn session_url(port: u16, code: &str, host: &str) -> String {
-    format!(
-        "http://127.0.0.1:{port}/?bootstrap={code}&host={}",
-        percent_encode(host)
-    )
 }
 
 /// A local port held open until the tunnel takes it over.
@@ -391,248 +359,6 @@ impl PortReservation {
     }
 }
 
-/// The local ports of a tunnel, each held until its `ssh` takes it over: the
-/// daemon's, and one per forward.
-/// Where the server for a host's kernel (`uname -s`) and architecture
-/// (`uname -m`) comes from, such as [`install::payload_for`].
-pub type PayloadFor = fn(&str, &str) -> Result<Option<Payload>, InstallError>;
-
-/// The host as reached with the system `ssh`, and the server to run there.
-pub struct SshRemote {
-    ssh: Ssh,
-    /// This client's version, the server the host gets.
-    version: &'static str,
-    payload_for: PayloadFor,
-    /// `splitty` from the host's `PATH` until [`Remote::prepare`] found or
-    /// installed this version.
-    server: Mutex<Server>,
-    /// The version of the server that answered the last handshake.
-    answered: Mutex<Option<std::sync::Arc<Charged<String>>>>,
-    protocol: u32,
-    assignment: admission::Assignment,
-}
-
-impl SshRemote {
-    pub fn new(
-        ssh: Ssh,
-        version: &'static str,
-        protocol: u32,
-        payload_for: PayloadFor,
-        assignment: admission::Assignment,
-    ) -> Self {
-        Self {
-            ssh: ssh.into_stdio_only(),
-            version,
-            payload_for,
-            server: Mutex::new(Server::Path),
-            answered: Mutex::new(None),
-            protocol,
-            assignment,
-        }
-    }
-
-    fn server(&self) -> Server {
-        self.server
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    async fn install(&self, on_install: impl FnOnce(&str) + Send) -> Result<(), RemoteError> {
-        let prepared = install::prepare(&self.ssh, self.version, self.payload_for, |probe| {
-            on_install(&probe.arch)
-        })
-        .await?;
-        *self
-            .server
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = prepared.server;
-        Ok(())
-    }
-
-    async fn handshake(&self) -> Result<Charged<handshake::Handshake>, RemoteError> {
-        handshake::handshake(&self.ssh, &self.server(), true)
-            .await
-            .map_err(|error| match error {
-                HandshakeError::Ssh(error) => {
-                    from_ssh_budgeted(self.host(), error, &self.ssh.context().budget)
-                }
-                HandshakeError::Invalid {
-                    host,
-                    detail,
-                    allocation,
-                } => RemoteError::InvalidAnswer {
-                    host,
-                    detail,
-                    allocation,
-                },
-            })
-    }
-}
-
-impl Remote for SshRemote {
-    type Client = NativeBridge;
-    type Pending = (admission::Carrier, admission::Opening);
-
-    fn host(&self) -> &str {
-        self.ssh.target().as_str()
-    }
-
-    fn version(&self) -> &str {
-        self.version
-    }
-
-    fn protocol(&self) -> u32 {
-        self.protocol
-    }
-    fn context(&self) -> splitty_transport::queue::Context {
-        self.ssh.context()
-    }
-
-    fn admit(&self) -> Result<Self::Pending, RemoteError> {
-        let admission = admission::Admission::global();
-        let carrier = admission.carrier().map_err(|error| {
-            RemoteError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error))
-        })?;
-        let opening = admission.begin(self.assignment.clone()).map_err(|error| {
-            RemoteError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error))
-        })?;
-        Ok((carrier, opening))
-    }
-
-    async fn prepare(&self, on_install: impl FnOnce(&str) + Send) -> Result<(), RemoteError> {
-        self.install(on_install).await
-    }
-
-    /// The handshake, which starts a missing private daemon. When the
-    /// installed server is gone (a rebuilt container), it is installed again
-    /// once.
-    async fn daemon(&self) -> Result<Charged<RunningDaemon>, RemoteError> {
-        let answer = match self.handshake().await {
-            Err(RemoteError::SplittyMissing { .. })
-                if matches!(self.server(), Server::Installed { .. }) =>
-            {
-                self.install(|_| {}).await?;
-                self.handshake().await?
-            }
-            answer => answer?,
-        };
-        *self
-            .answered
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(std::sync::Arc::new(
-            self.ssh
-                .context()
-                .budget
-                .charge(answer.server.version.len() + 256, false, || {
-                    answer.server.version.clone()
-                })
-                .map_err(|error| {
-                    RemoteError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error))
-                })?,
-        ));
-        if !answer.server.transport_versions.contains(&wire::VERSION) {
-            return Err(RemoteError::InvalidAnswer {
-                allocation: None,
-                host: self.host().into(),
-                detail: "the answering server does not support native transport v1".into(),
-            });
-        }
-        match &answer.daemon.daemon {
-            Some(_) if answer.daemon.running => {
-                Ok(answer.map(|answer| answer.daemon.daemon.expect("validated daemon")))
-            }
-            _ => {
-                let (answer, lease) = answer.into_parts();
-                Err(RemoteError::NoDaemon {
-                    host: self.host().to_owned(),
-                    server: answer.server.path,
-                    allocation: Some(Box::new(lease)),
-                })
-            }
-        }
-    }
-
-    fn server_version(&self) -> Option<std::sync::Arc<Charged<String>>> {
-        self.answered
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    async fn stop_daemon(&self, daemon: &RunningDaemon) -> Result<(), RemoteError> {
-        let instance = daemon
-            .instance
-            .as_deref()
-            .ok_or_else(|| RemoteError::InvalidAnswer {
-                allocation: None,
-                host: self.host().into(),
-                detail: "legacy daemon has no verified instance; explicitly migrate it on the host"
-                    .into(),
-            })?;
-        let command = self
-            .server()
-            .command()
-            .word("daemon")
-            .word("stop")
-            .word("--if-instance")
-            .value(instance);
-        run_checked(&self.ssh, &command, None)
-            .await
-            .map(|_| ())
-            .map_err(|error| from_ssh_budgeted(self.host(), error, &self.ssh.context().budget))
-    }
-
-    async fn migrate_legacy(&self, daemon: &RunningDaemon) -> Result<(), RemoteError> {
-        let Some(handshake::LegacyMigration::Ready { token, .. }) = &daemon.legacy_migration else {
-            return Err(RemoteError::InvalidAnswer {
-                allocation: None,
-                host: self.host().into(),
-                detail: "legacy migration is unavailable".into(),
-            });
-        };
-        let command = self
-            .server()
-            .command()
-            .word("remote-migrate")
-            .word("--expected")
-            .value(token);
-        run_checked(&self.ssh, &command, None)
-            .await
-            .map(|_| ())
-            .map_err(|error| from_ssh_budgeted(self.host(), error, &self.ssh.context().budget))
-    }
-
-    async fn open_bridge(
-        &self,
-        daemon: &RunningDaemon,
-        pending: Self::Pending,
-    ) -> Result<NativeBridge, RemoteError> {
-        NativeBridge::open_with_ssh(
-            &self.ssh,
-            &self.server(),
-            pending,
-            negotiation::Expected {
-                instance: daemon.instance.as_deref(),
-                purpose: &wire::Purpose::Direct,
-                mux_protocol: daemon.protocol,
-                preparation: wire::HANDSHAKE_TIMEOUT,
-            },
-        )
-        .await
-        .map_err(
-            |error| match crate::bridge::ssh_failure(self.host(), &error) {
-                Some(failure) => {
-                    from_ssh_budgeted(self.host(), failure, &self.ssh.context().budget)
-                }
-                None => RemoteError::Native(error),
-            },
-        )
-    }
-}
-
-/// How long an `ssh` whose output ended gets to exit, so that its status and
-/// diagnostics name the failure.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 
 async fn wait_for_forward(child: &mut Worker, local_port: u16) -> io::Result<()> {
@@ -671,241 +397,10 @@ async fn wait_for_forward(child: &mut Worker, local_port: u16) -> io::Result<()>
     ))
 }
 
-/// Prepare and open a native connection. The caller owns any browser gateway
-/// or deliberate forwarding separately; no browser credential crosses SSH.
-pub async fn open(
-    ssh: Ssh,
-    version: &'static str,
-    protocol: u32,
-    payload_for: PayloadFor,
-    assignment: admission::Assignment,
-    on_progress: impl FnMut(Charged<Progress>) + Send,
-) -> Result<(SshRemote, Connected<NativeBridge>), RemoteError> {
-    let owner = ssh.owner_context();
-    let remote = SshRemote::new(ssh, version, protocol, payload_for, assignment);
-    let connected = match owner {
-        None => connect(&remote, on_progress).await?,
-        Some(owner) => {
-            let attempt = supervisor::attempts(&remote, on_progress);
-            tokio::pin!(attempt);
-            match tokio::time::timeout(PREPARE_TIMEOUT, &mut attempt).await {
-                Ok(result) => result?,
-                Err(_) => {
-                    owner.close();
-                    if let Ok(connected) = attempt.await {
-                        let _ = connected.client.finish().await;
-                    }
-                    return Err(RemoteError::PreparationTimeout);
-                }
-            }
-        }
-    };
-    Ok((remote, connected))
-}
-
-/// One line of `splitty connect --json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "event", rename_all = "camelCase")]
-pub enum ConnectEvent {
-    /// A step of [`connect`].
-    Progress { step: Step, message: String },
-    /// Something the user should know, such as a daemon of another version.
-    Notice { message: String },
-    /// The tunnel is verified and the first session URL obtained.
-    Ready { url: String, port: u16 },
-    /// A port of the host forwarded to `local` here, one per forward after
-    /// `ready`.
-    Forward {
-        remote: u16,
-        local: u16,
-        url: String,
-        /// The local port asked for, which the text output names when `local`
-        /// differs.
-        #[serde(skip)]
-        asked: u16,
-    },
-    /// The tunnel dropped; it is being rebuilt.
-    Lost { message: String },
-    /// An attempt to rebuild it failed; the next follows in `retry_in` seconds.
-    Retry {
-        message: String,
-        #[serde(rename = "retryIn")]
-        retry_in: u64,
-    },
-    /// The same daemon is reachable again.
-    Restored,
-    /// A restarted or moved daemon needs a new session.
-    Url { url: String },
-    /// The command ends with status 1.
-    Failed {
-        message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        hint: Option<String>,
-    },
-    /// The command ends with status 0.
-    Closed,
-}
-
-impl From<Progress> for ConnectEvent {
-    fn from(progress: Progress) -> Self {
-        match progress {
-            Progress::Step { step, message } => ConnectEvent::Progress { step, message },
-            Progress::Notice { message } => ConnectEvent::Notice { message },
-        }
-    }
-}
-
-impl From<Forward> for ConnectEvent {
-    fn from(forward: Forward) -> Self {
-        ConnectEvent::Forward {
-            remote: forward.remote,
-            local: forward.local,
-            url: forward.url(),
-            asked: forward.asked,
-        }
-    }
-}
-
-impl From<Failure> for ConnectEvent {
-    fn from(Failure { message, hint, .. }: Failure) -> Self {
-        ConnectEvent::Failed { message, hint }
-    }
-}
-
-impl ConnectEvent {
-    /// The supervisor's `event` for the tunnel to `host`.
-    pub fn from_event(host: &str, event: Event) -> Self {
-        match event {
-            Event::Lost { reason } => ConnectEvent::Lost {
-                message: format!("SSH tunnel lost ({reason}). Reconnecting to {host}..."),
-            },
-            Event::RetryFailed { error, retry_in } => {
-                let mut message = format!("Reconnect failed: {error}");
-                if let Some(hint) = error.hint() {
-                    message.push('\n');
-                    message.push_str(&hint);
-                }
-                ConnectEvent::Retry {
-                    message,
-                    retry_in: retry_in.as_secs(),
-                }
-            }
-            Event::Restored => ConnectEvent::Restored,
-            Event::Replaced { .. } => ConnectEvent::Restored,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn native_setup_rechecks_missing_and_replaced_hosts_and_stops_only_the_checked_instance()
-    {
-        use std::os::unix::fs::PermissionsExt;
-        for mode in [
-            "missing",
-            "stale",
-            "stale_handshake",
-            "update",
-            "auth_bridge",
-        ] {
-            let directory = tempfile::tempdir().unwrap();
-            let program = directory.path().join("ssh");
-            std::fs::write(&program, include_str!("../../tests/native_ssh.py")).unwrap();
-            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-            std::fs::write(
-                directory.path().join("native_bridge.py"),
-                include_str!("../../tests/native_bridge.py"),
-            )
-            .unwrap();
-            std::fs::write(directory.path().join("mode"), mode).unwrap();
-            let ssh = Ssh::new(crate::ssh::SshTarget::parse("user@host").unwrap())
-                .with_test_program(program);
-            let result = open(
-                ssh,
-                "0.1.30",
-                1,
-                |_, _| Ok(None),
-                admission::Assignment::new(admission::Backend::new(), admission::Domain::new()),
-                |_| {},
-            )
-            .await;
-            match result {
-                Ok((_remote, mut connected)) => {
-                    assert_ne!(mode, "auth_bridge");
-                    let welcome = connected.client.recv().await.unwrap();
-                    assert_eq!(
-                        welcome.frame.application().unwrap().1,
-                        br#"{"type":"mux.welcome"}"#
-                    );
-                    drop(welcome);
-                    let (result, ended) = connected.client.finish().await;
-                    result.unwrap();
-                    assert!(ended.status.unwrap().success(), "{}", ended.stderr);
-                }
-                Err(error) => {
-                    assert_eq!(mode, "auth_bridge", "{error}");
-                    assert!(!error.retryable());
-                    assert!(matches!(error, RemoteError::Ssh(_)));
-                }
-            }
-            let calls: Vec<Vec<String>> = std::fs::read_to_string(directory.path().join("calls"))
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            for args in &calls {
-                for flag in [
-                    "-T",
-                    "-a",
-                    "-x",
-                    "ClearAllForwardings=yes",
-                    "ControlMaster=no",
-                    "ControlPath=none",
-                    "ControlPersist=no",
-                    "ForkAfterAuthentication=no",
-                    "StdinNull=no",
-                ] {
-                    assert!(
-                        args.iter().any(|arg| arg == flag),
-                        "{mode}: missing {flag}: {args:?}"
-                    );
-                }
-                let command = args.last().unwrap();
-                if !command.contains("splitty-probe") {
-                    assert!(
-                        command.starts_with(
-                            r#"'/home/it'\''s me/.local/share/splitty/remote/0.1.30/splitty' "#
-                        ),
-                        "{command}"
-                    );
-                }
-                assert!(!command.contains("--port"));
-            }
-            let commands: Vec<_> = calls.iter().map(|args| args.last().unwrap()).collect();
-            assert_eq!(
-                commands
-                    .iter()
-                    .filter(|command| command.contains("daemon stop"))
-                    .count(),
-                usize::from(mode == "update")
-            );
-            assert_eq!(
-                commands
-                    .iter()
-                    .filter(|command| command.contains("remote-handshake"))
-                    .count(),
-                if ["missing", "stale", "stale_handshake", "update"].contains(&mode) {
-                    2
-                } else {
-                    1
-                }
-            );
-        }
-    }
+    use splitty_transport::wire;
 
     fn failed(status: i32, stderr: &str) -> SshError {
         SshError::Failed {
@@ -1052,19 +547,6 @@ mod tests {
         assert_eq!(budget.used(), 0);
     }
 
-    /// `host` is shown by the title bar; it must arrive as one opaque value.
-    #[test]
-    fn the_session_url_carries_the_encoded_target() {
-        assert_eq!(
-            session_url(9800, "abc", "user@host"),
-            "http://127.0.0.1:9800/?bootstrap=abc&host=user%40host"
-        );
-        assert_eq!(
-            session_url(9800, "abc", "user@[2001:db8::1]:2222"),
-            "http://127.0.0.1:9800/?bootstrap=abc&host=user%40%5B2001%3Adb8%3A%3A1%5D%3A2222"
-        );
-    }
-
     #[test]
     fn a_reservation_holds_its_port_until_released() {
         let reservation = PortReservation::acquire().expect("acquire");
@@ -1148,7 +630,7 @@ mod tests {
 
         let gave_up = RemoteError::GaveUp {
             host: "vm".into(),
-            after: GIVE_UP_AFTER,
+            after: Duration::from_secs(600),
             last: Box::new(host_key_failed()),
         }
         .failure();
@@ -1221,142 +703,10 @@ mod tests {
         );
     }
 
-    fn json(event: ConnectEvent) -> String {
-        serde_json::to_string(&event).expect("serialize")
-    }
-
-    /// The machine-readable lines a launcher parses (`cli`, Remote Connect
-    /// Machine-Readable Output).
-    #[test]
-    fn connect_events_encode_as_one_object_with_an_event_field() {
-        assert_eq!(
-            json(
-                Progress::Step {
-                    step: Step::Started,
-                    message: "Started".into()
-                }
-                .into()
-            ),
-            r#"{"event":"progress","step":"started","message":"Started"}"#
-        );
-        for (step, name) in [
-            (Step::Install, "install"),
-            (Step::Daemon, "daemon"),
-            (Step::Started, "started"),
-            (Step::Tunnel, "tunnel"),
-        ] {
-            assert_eq!(
-                serde_json::to_value(step).expect("step"),
-                serde_json::json!(name)
-            );
-        }
-        assert_eq!(
-            json(
-                Progress::Notice {
-                    message: "n".into()
-                }
-                .into()
-            ),
-            r#"{"event":"notice","message":"n"}"#
-        );
-        assert_eq!(
-            json(ConnectEvent::Ready {
-                url: "http://127.0.0.1:9811/?bootstrap=x&host=vm".into(),
-                port: 9811
-            }),
-            r#"{"event":"ready","url":"http://127.0.0.1:9811/?bootstrap=x&host=vm","port":9811}"#
-        );
-        assert_eq!(
-            json(
-                Forward {
-                    remote: 3000,
-                    local: 41234,
-                    asked: 3000
-                }
-                .into()
-            ),
-            r#"{"event":"forward","remote":3000,"local":41234,"url":"http://localhost:41234"}"#
-        );
-        assert_eq!(
-            json(ConnectEvent::from_event(
-                "vm",
-                Event::Lost {
-                    reason: "ssh exited with 255".into()
-                }
-            )),
-            r#"{"event":"lost","message":"SSH tunnel lost (ssh exited with 255). Reconnecting to vm..."}"#
-        );
-        assert_eq!(
-            json(ConnectEvent::from_event(
-                "vm",
-                Event::RetryFailed {
-                    error: RemoteError::Forward("no".into()),
-                    retry_in: Duration::from_secs(4)
-                }
-            )),
-            r#"{"event":"retry","message":"Reconnect failed: no","retryIn":4}"#
-        );
-        assert_eq!(
-            json(ConnectEvent::from_event("vm", Event::Restored)),
-            r#"{"event":"restored"}"#
-        );
-        assert_eq!(
-            json(ConnectEvent::from_event(
-                "vm",
-                Event::Replaced {
-                    instance: "0123456789abcdef0123456789abcdef".into()
-                }
-            )),
-            r#"{"event":"restored"}"#
-        );
-        assert_eq!(
-            json(host_key_failed().failure().into()),
-            r#"{"event":"failed","message":"Failed to reach the remote daemon: ssh to vm failed: Host key verification failed.","hint":"Run `ssh vm` once in a terminal and check the fingerprint."}"#
-        );
-        assert_eq!(
-            json(RemoteError::Forward("x".into()).failure().into()),
-            r#"{"event":"failed","message":"Failed to open SSH tunnel: x"}"#
-        );
-        assert_eq!(json(ConnectEvent::Closed), r#"{"event":"closed"}"#);
-    }
-
-    /// A failed reconnect keeps the instruction of its cause.
-    #[test]
-    fn a_retry_keeps_the_hint_of_its_failure() {
-        let ConnectEvent::Retry { message, .. } = ConnectEvent::from_event(
-            "vm",
-            Event::RetryFailed {
-                error: host_key_failed(),
-                retry_in: Duration::from_secs(1),
-            },
-        ) else {
-            panic!("a retry");
-        };
-        assert!(message.starts_with("Reconnect failed: ssh to vm failed"));
-        assert!(message.ends_with("check the fingerprint."), "{message}");
-    }
-
     #[test]
     fn give_up_times_read_as_minutes_or_seconds() {
-        assert_eq!(describe(&GIVE_UP_AFTER), "10 minutes");
+        assert_eq!(describe(&Duration::from_secs(600)), "10 minutes");
         assert_eq!(describe(&Duration::from_secs(60)), "1 minute");
         assert_eq!(describe(&Duration::from_secs(90)), "90 seconds");
-    }
-
-    fn assert_send<T: Send>(_: &T) {}
-    #[test]
-    fn the_native_flow_can_run_as_a_task() {
-        let target = crate::ssh::SshTarget::parse("host").unwrap();
-        let assignment =
-            admission::Assignment::new(admission::Backend::new(), admission::Domain::new());
-        let flow = open(
-            Ssh::stdio_only(target),
-            "0.1.30",
-            1,
-            install::payload_for,
-            assignment,
-            |_| {},
-        );
-        assert_send(&flow);
     }
 }

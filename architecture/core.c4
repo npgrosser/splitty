@@ -44,13 +44,7 @@ model {
       }
     }
 
-    auth = component 'auth' {
-      description 'The process token: generation, owner-only persistence, constant-time validation, single-use codes.'
-      metadata {
-        module 'splitty_core::auth'
-        spec 'access-control'
-      }
-    }
+
 
     template = component 'template' {
       description 'Saved layout templates as YAML files, validation and pure command/restore-mode retention.'
@@ -111,7 +105,6 @@ model {
       }
     }
 
-    auth -> config 'config_dir_override, ensure_private_dir, write_private_file'
     config -> shell_profiles 'ShellSettings, detection and reconciliation'
     template -> config 'config_dir, ensure_private_dir'
     mux -> template 'Template model and validation for pure apply and extraction'

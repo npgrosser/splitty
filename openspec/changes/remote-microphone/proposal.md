@@ -13,8 +13,8 @@ The workaround today is to forward a local PulseAudio socket over a separate SSH
 - **Microphone per host, opt-in**: a host setting, off by default, enables the microphone for that host's sessions. It holds for all screens, panes and connections to the host; nothing is set up per pane.
 - **A recorder on the host, nothing installed**: Splitty's install directory on the host (`~/.local/share/splitty/remote/<version>/`) holds `rec` and `sox` as links to the installed `splitty` binary, shipped in the payload like the shell integration. On enabled hosts, that directory comes first on the `PATH` of Splitty's sessions. No package is installed and nothing is written outside the install directory; other shells and SSH logins on the host do not see it. Started as `rec`, the binary answers `rec --version` and `sox --version` without touching a microphone. Started for raw output to stdout (the form Claude Code uses: `rec -q --buffer 1024 -t raw -r 16000 -e signed -b 16 -c 1 -`, optionally with a `silence` effect), it asks the host's server for audio through the control socket. It writes the PCM it receives to stdout until it is stopped (SIGTERM) or the window ends the capture. Other invocations go to a real `sox` if one is installed and fail otherwise.
 - **The focused pane gets the microphone**: the server sends the request to the windows attached to the session that announced microphone support. Only a window that has focus and shows that session in its focused pane takes it. Otherwise the recorder fails at once, and the tool reports that no audio is available. Switching between two agent panes needs no step, because the pane the user holds the key in is the one that records. A request from the newly focused pane takes the microphone over from the previous one instead of failing as busy, since Claude Code's focus mode stops the old pane's recorder and starts the new one's almost at the same moment.
-- **Capture in the window**: the window opens the microphone only between the request and its end and converts to the requested format. It streams the audio over the existing connection (local server, hub, bridge). The pane shows a recording mark for exactly that time, and losing focus ends the capture. The input device is an app setting.
-- **Desktop shells**: Electron allows audio capture for the app's own origin (today only notifications and sanitized clipboard writes). Tauri answers the webview's microphone permission request for the app on each platform.
+- **Capture in the native window**: the app opens the microphone only between the request and its end and converts to the requested format. It streams the audio over the existing connection (local server, hub, bridge). The pane shows a recording mark for exactly that time, and losing focus ends the capture. The input device is an app setting.
+- **Native platform permissions**: the app requests OS microphone access and owns capture device lifetime on Windows, macOS and Linux.
 
 Out of scope:
 - Local panes: Claude Code records locally there already (WSLg on Windows, its native module on macOS and Linux).
@@ -40,11 +40,13 @@ To be decided when the change is next. Likely candidates:
 
 - **Host**: the recorder command (part of the `splitty` binary), a directory for it on the sessions' `PATH` on enabled hosts, the control endpoint that streams audio.
 - **Server and hub**: routing a request to one window and the audio back, through the hub and the native bridge.
-- **Frontend**: microphone capture and resampling, the recording mark, the host setting.
-- **Desktop shells**: microphone permission in Electron and in Tauri on Windows (WebView2), macOS (WKWebView, usage description) and Linux (WebKitGTK).
+- **Native app and client-core**: microphone capture and resampling, the recording mark, focus/consent state and the host setting.
+- **Native platform permissions**: the app requests OS microphone access and owns capture device lifetime on Windows, macOS and Linux.
 - **Security**: a new direction of trust, since a process on the host triggers a capture device on the user's machine. That is equivalent to a local process with microphone access, bounded to the focused pane on an enabled host.
 
 ## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: Capture belongs in the native app, with native OS permissions and device lifetime. Browser capture, WebView permissions and frontend modules are no longer implementation targets. Requests remain connection-scoped through the hub, native session stream and owner control socket; consent, focus, cancellation and bounded audio delivery still need design.
 
 - 2026-11-13, `remove-electron-shell`: the Electron shell (`frontend-electron/`) is removed. What this change says about Electron, its main process, preload or packaged assets no longer applies; the desktop shell around the web frontend is Tauri, and the native app (`crates/splitty-gpui`) is the default desktop app.
 - 2026-11-15, `remove-tauri-shell`: the Tauri shell (`crates/splitty-tauri`) is removed; the native app (`crates/splitty-gpui`) is the only desktop app, and the web frontend runs only in a browser. What this change says about Tauri, WebView2, WKWebView, WebKitGTK, `tauri.conf.json`, `navigation.rs` or remote windows no longer applies.

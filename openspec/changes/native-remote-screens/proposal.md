@@ -34,3 +34,7 @@ None.
 Implementation also updates the relevant client-core, GPUI, transport/server-native architecture descriptions and `docs/architecture.md`. No new crate, independent mux tree, server policy engine or persistence format is needed. Use `spec-driven` because this adds user-visible behavior and spans model, runtime, transport diagnostics and native presentation.
 
 **Dependency:** complete and integrate `native-source-routing` first, including its GPUI stale-delivery/callback tests. This proposal does not overlap that implementation.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

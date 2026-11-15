@@ -6,9 +6,7 @@ The app has two kinds of themes, chosen separately in the settings:
 - a **terminal palette** for what terminals show: the 16 ANSI colors,
   background, foreground, cursor and selection.
 
-Both come with the app and can be added as files. The
-[browser UI](cli.md#browser-ui) has its own theme files (`*.toml`), which the
-app does not read.
+Both come with the app and can be added as files.
 
 ## What ships
 
@@ -38,10 +36,6 @@ system. Settings, Terminal:
   not matter, so Tokyo Night gets TokyoNight) and the Splitty palette of that
   mode where there is none.
 
-The browser UI follows the same terminal settings with its own theme files: a
-palette it has no theme of that name for shows the UI theme's terminal colors
-there.
-
 ## Adding themes
 
 Put files into `themes/` in the configuration directory
@@ -55,7 +49,7 @@ named there.
 | File | Read as |
 |---|---|
 | `*.json` | UI themes: a GPUI Kit theme set |
-| `*.toml` | ignored (browser UI themes) |
+| `*.toml` | ignored |
 | anything else | terminal palette: a Ghostty theme file, named by its file name |
 
 Settings store a theme by an identifier made from its name: lowercase, with

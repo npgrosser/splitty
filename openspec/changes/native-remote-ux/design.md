@@ -350,3 +350,7 @@ personal. Outbound local preferences add optional `enabled` writes and
 The browser uses Kit controls, a retained focus trap and a virtualized per-host
 catalog. At narrow widths the searchable host collection moves above the detail.
 Screen and host dragging reuse the existing motion and reduced-motion policy.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

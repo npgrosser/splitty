@@ -1,4 +1,4 @@
-//! Shared bounded HTTP client for owner/scoped Unix sockets and explicit TCP.
+//! Shared bounded HTTP client for owner/scoped Unix sockets.
 mod agent_guide;
 pub mod attach;
 pub mod comments;
@@ -8,7 +8,6 @@ pub mod editor;
 pub mod jobs;
 pub mod panes;
 pub mod review;
-pub mod socket;
 pub mod viewer;
 pub use discovery::{discover, ServerInfo, Transport};
 use serde_json::{json, Value};
@@ -53,23 +52,15 @@ pub async fn request_within(
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
-    let (builder, url, token) = match &server.transport {
-        Transport::LocalSocket(socket) => (
-            builder.unix_socket(socket.clone()),
-            format!("http://localhost{path}"),
-            None,
-        ),
-        Transport::Tcp { addr, token } => (builder, format!("http://{addr}{path}"), Some(token)),
-    };
+    let Transport::LocalSocket(socket) = &server.transport;
+    let builder = builder.unix_socket(socket.clone());
+    let url = format!("http://localhost{path}");
     let client = builder
         .build()
         .map_err(|e| CliError::Request(e.to_string()))?;
     let method = reqwest::Method::from_bytes(method.as_bytes())
         .map_err(|e| CliError::Request(e.to_string()))?;
     let mut request = client.request(method, url);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
     if let Some(body) = body {
         request = request.json(&body);
     }
@@ -186,10 +177,9 @@ mod tests {
 
     #[tokio::test]
     async fn response_wait_has_a_deadline_beyond_supported_long_poll() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind");
-        let addr = listener.local_addr().expect("addr");
+        let directory = tempfile::tempdir().expect("fixture");
+        let socket = directory.path().join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind");
         let (ready, received) = tokio::sync::oneshot::channel();
         let worker = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
@@ -209,10 +199,7 @@ mod tests {
         let client = tokio::spawn(async move {
             api_get(
                 &ServerInfo {
-                    transport: Transport::Tcp {
-                        addr: addr.to_string(),
-                        token: "test".into(),
-                    },
+                    transport: Transport::LocalSocket(socket.to_string_lossy().into_owned()),
                     source: "test",
                 },
                 "/api/jobs",

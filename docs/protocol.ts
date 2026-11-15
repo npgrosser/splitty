@@ -1,16 +1,11 @@
 /**
- * Splitty Protocol Specification
- *
- * Defines ALL data types exchanged between Client and Server.
- * This file is the canonical reference — both Go backend and TypeScript
- * frontend are derived from these types.
- *
- * Transport: Single WebSocket connection per client.
- * Encoding: JSON (binary frames for terminal output may come later).
- *
- * Architecture: Single-Attach. One client per screen at a time.
- * The client is autonomous for layout decisions. The server is the
- * source of truth for persistent state.
+ * Splitty wire reference for native clients, the CLI and the terminal service.
+ * Rust protocol types are authoritative where this reference differs.
+ * Each client connection carries JSON session/mux messages and binary terminal
+ * output in native transport frames. The owner control socket carries its
+ * restricted operation set with HTTP framing over a private Unix socket.
+ * The server owns workspace state and PTY lifetime. Connections have independent
+ * attachments; several clients may observe and modify the same Screen.
  */
 
 // ============================================================================
@@ -33,18 +28,15 @@
 // 1. DOMAIN MODEL
 //
 // The domain model describes the server-side state. The client renders it
-// via dockview but never persists it — the server owns this data.
+// from server state; the server owns persistence.
 // ============================================================================
 
 // --- Ownership ---
 
 /**
- * Determines what happens to sessions when the attached client disconnects.
- *
- * - "client-owned": Sessions die with the client (default for desktop app).
- * - "server-owned": Sessions survive client disconnect (default for `splitty serve` / remote).
- *
- * Set per Screen, not per Session.
+ * Legacy per-Screen ownership labels retained in the wire reference.
+ * Session lifetime follows the service mode: embedded sessions end with the
+ * service; daemon sessions survive client disconnects in keepers.
  */
 type OwnershipMode = "client-owned" | "server-owned";
 
@@ -281,7 +273,7 @@ interface SessionState {
   exitCode?: number;
   /**
    * The session's scratchpad (session-scratchpad), at most 64 KiB of UTF-8;
-   * absent while empty. Only screen snapshots over the WebSocket carry it:
+   * absent while empty. Only screen snapshots over a client connection carry it:
    * GET /api/mux/state and /api/mux/screen/{id} leave it out.
    */
   scratchpad?: string;
@@ -294,7 +286,7 @@ interface SessionState {
   /**
    * The session's root program status record (ProgramStatusRecord), absent
    * while it holds none. Only GET /api/mux/state and /api/mux/screen/{id}
-   * carry it; screen snapshots over the WebSocket leave it out, where
+   * carry it; screen snapshots over a client connection leave it out, where
    * ProgramStatusChanged carries the records.
    */
   programStatus?: ProgramStatusRecord;
@@ -407,7 +399,7 @@ interface JobControlError {
 // ============================================================================
 // 2. CLIENT → SERVER MESSAGES
 //
-// Sent by the client over WebSocket. Two categories:
+// Sent by the client over a client connection. Two categories:
 // - Session messages: PTY I/O (input, resize, create, close)
 // - Mux messages: Layout operations (split, move, etc.)
 // ============================================================================
@@ -426,7 +418,7 @@ interface SessionCreate {
   dir?: string;
   root?: string;
   restoreMode?: string;
-  /** Dockview panel ID. Injected as SPLITTY_PANE_ID into the session's env. */
+  /** Client-generated pane ID. Injected as SPLITTY_PANE_ID into the session's env. */
   panelId?: string;
   /** Screen ID. Injected as SPLITTY_SCREEN_ID into the session's env. */
   screenId?: string;
@@ -568,7 +560,7 @@ interface UploadCancel {
 // --- Mux Messages (new in Milestone 1) ---
 
 /**
- * Sent once on WebSocket connect. Initiates the handshake.
+ * Sent once when a client connection opens. Initiates the handshake.
  * If clientId is provided (from localStorage), server checks if this
  * client was the last one attached → determines if snapshot is needed.
  */
@@ -741,7 +733,7 @@ type ClientMessage =
 // discriminated by `type`. Every JSON event has `id` (unique event ID for
 // dedup) and `timestamp` (Unix ms). Session-scoped events add `sessionId`.
 //
-// Terminal output is the only exception: it uses binary WebSocket frames
+// Terminal output is the only exception: it uses native Binary frames
 // for performance (see Section 9: Wire Format).
 //
 // Design principle: the server sends facts. The frontend decides
@@ -798,7 +790,7 @@ interface SessionAttached extends SessionEvent {
 /**
  * PTY output data.
  *
- * Logically part of the event stream but transported as binary WebSocket
+ * Logically part of the event stream but transported as native Binary
  * frames for performance. See Section 9: Wire Format.
  */
 interface SessionOutput {
@@ -975,7 +967,7 @@ interface SessionExited extends SessionEvent {
 // --- Mux Events ---
 
 /**
- * Sent on WebSocket connect. Tells the client:
+ * Sent when a client connection opens. Tells the client:
  * - Its assigned clientId (store in localStorage for reconnect)
  * - Available screens with their attach status
  *
@@ -1052,7 +1044,7 @@ interface MuxPaneSpawned extends ServerEvent {
 }
 
 /**
- * A parsed native/browser layout op was rejected, sent to its client only.
+ * A parsed client layout op was rejected, sent to its client only.
  * The window resyncs screenId for every reported operation, including resize,
  * move, float and workspace operations without a new pane. No failure nudge
  * is sent to others. select_tab retains its documented silent exception.
@@ -1235,7 +1227,7 @@ type ServerMessage =
 // commands (server-initiated, results in MuxNudge to client).
 //
 // Client-initiated ops include concrete layout values (sizes, positions)
-// because the client's UI library (dockview) computed them.
+// because the client computed them.
 // Server-initiated ops (from CLI) may omit these values — the server
 // applies its own default policy.
 // ============================================================================
@@ -1331,7 +1323,7 @@ interface MoveFloatOp {
  * Move a pane within the root layout: into the slot `targetSlotId`, or beside
  * the node or pane `targetSplitId` in `direction`. Rejected when the target is
  * missing, is no slot (for `targetSlotId`), or is gone once the pane is taken
- * out. Browser windows send `arrange_panes` for drags; native windows use
+ * out. Native windows use
  * precise move operations. A target-slot move appends and activates, even
  * within the same slot.
  */
@@ -1521,7 +1513,7 @@ interface MoveTabGroupToScreenOp {
 
 /**
  * Replace a session's scratchpad with `text` (empty clears it). Only a window
- * sends it, over the WebSocket; POST /api/mux/op answers 400. Refused for an
+ * sends it, over a client connection; POST /api/mux/op answers 400. Refused for an
  * unknown session or more than 64 KiB of UTF-8. Other clients get `mux.nudge`
  * for the screen; the sender gets nothing. With `ifVersion`
  * ("scratchpad-versions-v1"), only while the session's `scratchpadVersion`
@@ -1582,7 +1574,7 @@ interface OpenViewerOp {
  * Add annotations to a viewer pane, numbered from lastAnnotationNumber + 1,
  * or replace those with the same `id` in their place, keeping their number
  * and replies (servers with "viewer-annotations-v1"). Only a window sends it,
- * over the WebSocket; POST /api/mux/op answers 400. Refused as a whole, with
+ * over a client connection; POST /api/mux/op answers 400. Refused as a whole, with
  * nothing changed, for a pane that is not a viewer pane, fewer than 1 or more
  * than 100 annotations, an `id` of another form or twice in the op, an
  * annotation with a `number` or `replies` (0 and [] read as absent) or that
@@ -1600,7 +1592,7 @@ interface PutAnnotationsOp {
 
 /**
  * Remove annotations of a viewer pane by `id`, with their threads; ids the
- * pane does not hold are ignored. Only a window sends it, over the WebSocket;
+ * pane does not hold are ignored. Only a window sends it, over a client connection;
  * POST /api/mux/op answers 400. Refused, with mux.op_failed and the pane to
  * the sender, for a pane that is not a viewer pane, fewer than 1 or more than
  * 100 ids, or an id of another form. No effect. Applied: other clients get
@@ -1615,7 +1607,7 @@ interface RemoveAnnotationsOp {
 /**
  * Add the user's replies to the thread of annotation `annotationId`, or
  * replace those with the same `id` in their place. Only a window sends it,
- * over the WebSocket; POST /api/mux/op answers 400. Refused as a whole, with
+ * over a client connection; POST /api/mux/op answers 400. Refused as a whole, with
  * mux.op_failed and the pane to the sender, for a pane that is not a viewer
  * pane, an annotation it does not hold, fewer than 1 or more than 50 replies,
  * a reply whose author is not "user" or that names `from`, an `id` of another
@@ -1635,7 +1627,7 @@ interface PutRepliesOp {
 /**
  * Remove replies of either author from the thread of `annotationId` by `id`;
  * ids the thread does not hold, and an annotation the pane no longer holds,
- * are ignored. Only a window sends it, over the WebSocket; POST /api/mux/op
+ * are ignored. Only a window sends it, over a client connection; POST /api/mux/op
  * answers 400. Refused, with mux.op_failed and the pane to the sender, for a
  * pane that is not a viewer pane, fewer than 1 or more than 50 ids, or an id
  * of another form. No effect. Applied: other clients get `mux.nudge` for the
@@ -1659,7 +1651,7 @@ interface RemoveRepliesOp {
  * before and drops it otherwise, and a new entry starts unmarked. A window
  * sends it after it handed a review to a terminal, a file or a scratchpad,
  * and after the server accepted its answer to a wait. Only a window sends
- * it, over the WebSocket; POST /api/mux/op answers 400. Refused, with
+ * it, over a client connection; POST /api/mux/op answers 400. Refused, with
  * mux.op_failed and the pane to the sender, for a pane that is not a viewer
  * pane, fewer than 1 or more than 5,100 entries, or an id of another form.
  * No effect. Applied: other clients get `mux.nudge` for the screen; the
@@ -1667,7 +1659,7 @@ interface RemoveRepliesOp {
  *
  * An agent's reply and the start and the end of a wait for a review are the
  * server's own operations: they have no wire form here, so no client submits
- * them, over the WebSocket or POST /api/mux/op. Each nudges every client
+ * them, over a client connection or POST /api/mux/op. Each nudges every client
  * (reason "mux_op") and raises the screen revision.
  */
 interface MarkSentOp {
@@ -1721,19 +1713,9 @@ type Operation =
 // ============================================================================
 // 5. CLIENT COMMANDS
 //
-// Server-initiated actions that the client should execute locally.
-// Two use cases:
-//
-// 1. Context menu actions triggered via native menus (Wails desktop app).
-// 2. CLI layout commands (split, close, focus) — the CLI sends a
-//    ClientCommand via POST /api/command, the server broadcasts it to
-//    the attached WS client, and the client applies it in dockview then
-//    mirrors the result as a mux.op. See Flow 4a.
-//
-// Why CLI uses ClientCommands instead of direct mux ops:
-// The client owns dockview panel IDs. A split needs dockview to create
-// the new panel and assign its ID. The client then tells the server the
-// resulting panel ID via a mux.op with newPanelId (client-set ID pattern).
+// Server-initiated actions delivered as command events on a client connection.
+// The native command.send operation retains this payload for compatibility.
+// CLI layout commands apply mux operations through the owner control socket.
 // ============================================================================
 
 type ClientCommand =
@@ -1747,205 +1729,21 @@ type ClientCommand =
 // ============================================================================
 // 6. CONNECTION LIFECYCLE & FLOWS
 //
-// Not types — behavioral spec. Describes the sequences of messages
-// for key scenarios.
-// ============================================================================
-
-/**
- * FLOW 1: Fresh Connect (first visit, no existing screens)
- *
- *   Client                          Server
- *     │                               │
- *     │──── [WebSocket open] ────────>│
- *     │<─── hello { clientId }        │  (legacy, kept for compat)
- *     │──── mux.connect {}            │  (no clientId — first visit)
- *     │<─── mux.welcome {            │
- *     │       clientId: "abc",        │
- *     │       screens: []             │  (no screens exist yet)
- *     │     }                         │
- *     │                               │
- *     │  Client stores clientId in localStorage.
- *     │  Client creates screens locally via mux.op { create_screen }.
- *     │  Client sends mux.ops fire-and-forget as user works.
- *     │                               │
- *     │──── mux.op { create_screen }  │
- *     │──── create { ... }            │  (PTY session)
- *     │<─── created { id }            │
- *     │──── mux.op { split_pane }     │  (fire-and-forget)
- *     │     ...                       │
- */
-
-/**
- * FLOW 2: Reconnect — same client, no one else attached in between
- *
- *   Client                          Server
- *     │                               │
- *     │──── [WebSocket open] ────────>│
- *     │<─── hello { clientId }        │
- *     │──── mux.connect {             │
- *     │       clientId: "abc"         │  (from localStorage)
- *     │     }                         │
- *     │<─── mux.welcome {            │
- *     │       clientId: "abc",        │
- *     │       screens: [              │
- *     │         { id: "s1",           │
- *     │           lastClientId: "abc",│  ← same! client can trust local state
- *     │           attached: false }   │
- *     │       ]                       │
- *     │     }                         │
- *     │                               │
- *     │  Client sees lastClientId == own clientId for screen "s1".
- *     │  → Keeps local dockview state, no snapshot needed.
- *     │  → Just re-attaches to the screen and reconnects PTY streams.
- *     │                               │
- *     │──── mux.attach { screenId: "s1" }
- *     │                               │  (server sees lastClientId match → no snapshot)
- *     │──── attach { id: "sess-1" }   │  (re-subscribe to PTY output)
- *     │<─── attached { id: "sess-1" } │  (scrollback replay follows)
- *     │<─── output { data: ... }      │  (buffered output since disconnect)
- */
-
-/**
- * FLOW 3: Reconnect — different client was attached in between
- *
- *   Client                          Server
- *     │                               │
- *     │──── mux.connect {             │
- *     │       clientId: "abc"         │
- *     │     }                         │
- *     │<─── mux.welcome {            │
- *     │       clientId: "abc",        │
- *     │       screens: [              │
- *     │         { id: "s1",           │
- *     │           lastClientId: "xyz",│  ← different! local state is stale
- *     │           attached: false }   │
- *     │       ]                       │
- *     │     }                         │
- *     │                               │
- *     │  Client sees lastClientId != own clientId for screen "s1".
- *     │  → Must load server state.
- *     │                               │
- *     │──── mux.attach { screenId: "s1" }
- *     │<─── mux.screen_snapshot {     │  (server sends full screen state)
- *     │       screen: { ... }         │
- *     │     }                         │
- *     │                               │
- *     │  Client discards local state for this screen.
- *     │  Client rebuilds dockview layout from snapshot.
- *     │  Client attaches to all PTY sessions listed in the screen.
- */
-
-/**
- * FLOW 4a: CLI layout commands (split, close, focus) via ClientCommand
- *
- * Layout commands go through the client because the client owns panel IDs
- * (dockview assigns them). The CLI tells the client WHAT to do, and the
- * client does it autonomously, then mirrors the result as a mux.op.
- *
- *   Client                CLI               Server
- *     │                    │                   │
- *     │                    │── POST /api/command
- *     │                    │   { type: "pane.split",
- *     │                    │     direction: "right" }
- *     │                    │                   │── broadcasts to WS client
- *     │                    │<── 200 { sent: 1 }│
- *     │<── command {       │                   │
- *     │      type: "pane.split",               │
- *     │      direction: "right"                │
- *     │    }               │                   │
- *     │                    │                   │
- *     │  Client executes split in dockview.
- *     │  Client generates new pane ID ("terminal-5").
- *     │  Client mirrors result to server:
- *     │                    │                   │
- *     │── mux.op {         │                   │
- *     │     split_pane,    │                   │
- *     │     paneId: "terminal-3",              │
- *     │     newPaneId: "terminal-5",           │
- *     │     axis: "horizontal"                 │
- *     │   }                │                   │
- */
-
-/**
- * FLOW 4b: CLI workspace commands (new-screen, switch-screen) via mux.op
- *
- * Workspace commands don't need the client to execute first — the server
- * can create screens and apply effects (SpawnSession) directly.
- *
- *   CLI                              Server
- *     │                                │
- *     │── POST /api/mux/op            │
- *     │   { screenId: "_",            │
- *     │     op: { type: "create_screen",
- *     │           name: "backend" } } │
- *     │                                │── Reducer creates screen
- *     │                                │── SpawnSession effect
- *     │                                │── Nudge attached clients
- *     │<── 200 { ok, revision }       │
- */
-
-/**
- * FLOW 5: Two clients, different screens (Single-Attach per Screen)
- *
- *   Client A is attached to screen "backend".
- *   Client B connects and wants screen "frontend".
- *
- *   Client B                         Server
- *     │                               │
- *     │──── mux.connect {             │
- *     │       clientId: "xyz"         │
- *     │     }                         │
- *     │<─── mux.welcome {            │
- *     │       clientId: "xyz",        │
- *     │       screens: [              │
- *     │         { id: "backend",      │
- *     │           attached: true },   │  ← Client A is here
- *     │         { id: "frontend",     │
- *     │           attached: false }   │  ← free
- *     │       ]                       │
- *     │     }                         │
- *     │                               │
- *     │──── mux.attach {              │
- *     │       screenId: "frontend"    │  ← attaches to free screen, works fine
- *     │     }                         │
- *     │<─── mux.screen_snapshot {}    │
- *     │                               │
- *     │──── mux.attach {              │
- *     │       screenId: "backend"     │  ← tries busy screen
- *     │     }                         │
- *     │<─── mux.busy {               │  ← rejected
- *     │       screenId: "backend"     │
- *     │     }                         │
- *     │                               │
- *     │  Client B works on "frontend". Client A works on "backend".
- *     │  Both are connected to the same server simultaneously.
- */
-
-/**
- * FLOW 6: Client disconnect behavior (Ownership Model)
- *
- *   Client disconnects (WebSocket closes)
- *     │
- *     Server checks each screen the client was attached to:
- *     │
- *     ├── client-owned screens:
- *     │     → Kill all PTY sessions in these screens
- *     │     → Remove screens from state
- *     │     → Same as today's behavior (Connection.Close())
- *     │
- *     └── server-owned screens:
- *           → Detach PTY output streams (stop sending to this client)
- *           → Sessions keep running
- *           → Scrollback continues to buffer in RAM
- *           → Screen state preserved, marked as not attached
- *           → lastClientId updated to this client's ID
- */
-
+// After native negotiation the service sends mux.welcome. The client requests
+// screen snapshots with mux.resync and membership with mux.workspace_resync.
+// Layout intents are mux.op; the server runs their effects and announces spawned
+// sessions with mux.pane_spawned. The client attaches to those sessions; size
+// and replay precede attached, followed by live output.
+// Reconnect obtains current state and new attachments without replaying input
+// or uncertain mutations. Disconnect drops this connection's subscriptions;
+// session lifetime follows the embedded service or daemon, not the view.
+// CLI operations go through POST /api/mux/op on the owner control socket.
 // ============================================================================
 // 7. HTTP API (for CLI)
 //
-// CLI commands use HTTP, not WebSocket (one-shot, no persistent connection).
-// All endpoints require token auth.
+// CLI commands use HTTP framing over the private owner control socket.
+// Paths outside its route set name native catalog mappings only; no TCP
+// listener serves them. See native-operations.json for scopes and roles.
 // ============================================================================
 
 /**
@@ -2000,10 +1798,8 @@ type ClientCommand =
 /**
  * POST /api/command
  *
- * Send a ClientCommand to all connected WS clients. Used by CLI for
- * layout commands (split, close, focus) that need client-side execution.
- * The client applies the change in dockview and mirrors the result as
- * a mux.op. See Flow 4a.
+ * Native catalog mapping for command.send; not routed on the owner socket.
+ * Sends a ClientCommand to connected clients that handle command events.
  *
  * Request:
  *   ClientCommand (e.g. { type: "pane.split", direction: "right" })
@@ -2105,28 +1901,28 @@ type ClientCommand =
 /**
  * 8.1 Client-Set IDs
  *
- * Panel and screen IDs are generated by the client (dockview assigns them,
- * e.g. "terminal-1", "screen-3"). The client includes them in mux.ops via
- * the newPanelId and screenId fields. The server uses them as-is.
+ * Pane and screen IDs are generated by the client. It includes them in
+ * mux.ops via newPaneId and screenId. The server uses them as-is.
  *
  * If omitted (e.g. CLI-initiated ops), the server generates IDs.
  *
- * This eliminates round-trip latency: the client creates a dockview panel
+ * This eliminates round-trip latency: the client creates a pane view
  * and assigns its ID before the server even processes the op.
  */
 
 /**
  * 8.2 Shadow Mode (Phase A)
  *
- * Current operational mode. Dockview remains the client's source of truth.
- * The server tracks layout state in parallel via fire-and-forget mux.ops.
+ * The server applies mux.ops through the pure reducer and owns layout state.
+ * Clients project snapshots and send layout intents without an acknowledgement
+ * for accepted ops.
  *
  * Key properties:
  * - No ACK for accepted mux.ops; the server answers only with the
  *   mux.pane_spawned events an op causes, and with mux.op_failed when it
  *   rejects an op that would create a pane, an arrange_panes or an
  *   annotation op
- * - Every op runs its effects, from the WebSocket as from the CLI
+ * - Every op runs its effects, from a client connection as from the CLI
  *   (POST /api/mux/op): the server spawns and kills pane sessions, and the
  *   client attaches to a spawned session after mux.pane_spawned
  * - Every connected client may change every screen; ops apply in arrival
@@ -2160,7 +1956,7 @@ type ClientCommand =
  * (GET /api/mux/neighbor) which power `splitty focus left/right/up/down`.
  *
  * Pure function: LayoutNode → PaneRect[]. Computed on demand, not stored.
- * Uses the same 90° cone filter as the frontend's findNeighborGroup().
+ * Uses a 90° cone filter.
  */
 
 /**
@@ -2187,102 +1983,38 @@ type ClientCommand =
 // ============================================================================
 // 9. WIRE FORMAT
 //
-// How messages are encoded on the WebSocket transport.
+// Application messages inside native transport frames (transport v1 below).
 // ============================================================================
 
 /**
- * 9.1 Two Frame Types
- *
- * The WebSocket carries two types of frames:
- *
- * - Text frames: JSON-encoded ServerEvent objects.
- *   Dispatched by the frontend via `JSON.parse()` → switch on `type`.
- *
- * - Binary frames: Raw terminal output (the hot path).
- *   Format: [1 byte: session ID length] [N bytes: session ID] [payload bytes]
- *   Bypasses JSON entirely for zero-overhead PTY output forwarding.
- *
- * The frontend distinguishes them trivially:
- *
- *   ws.onmessage = (e) => {
- *     if (typeof e.data === "string") {
- *       dispatch(JSON.parse(e.data));   // ServerEvent
- *     } else {
- *       const [sessionId, bytes] = decodeBinaryFrame(e.data);
- *       terminal.write(sessionId, bytes);
- *     }
- *   };
- *
- * 9.2 Why Not All Binary?
- *
- * Binary frames work because output has no structure — raw bytes go 1:1
- * into the terminal emulator. Structured events (title, bell, size)
- * need JSON serialization regardless. Wrapping JSON inside a binary frame
- * adds complexity with no performance benefit.
- *
- * 9.3 Event ID and Timestamp
- *
- * Generated server-side. Event IDs use `generate_event_id()` (random,
- * not sequential). Timestamps use `SystemTime::now()` as Unix ms.
- * Output frames do NOT carry id/timestamp (binary, no JSON).
+ * Native Text frames contain UTF-8 JSON events, dispatched by their type.
+ * Native Binary frames contain terminal output:
+ * [1 byte: session ID length] [N bytes: session ID] [payload bytes].
+ * Dispatch Text to the message handler and Binary to the attached session's
+ * terminal. Both keep application ordering and delivery accounting.
+ * Event IDs and timestamps belong to JSON events; binary output has neither.
+ * The enclosing native frame includes its generation and receipt as described
+ * under Native transport v1 below.
  */
 
 // ============================================================================
-// 10. REMOTE SCREEN HUB
+// 10. NATIVE HOST STREAM
 //
-// `GET /ws/remote?ticket=<ticket>&target=<[user@]host[:port]>[&update=1]`
-// gives the window a WebSocket to a host's daemon through the local server.
-// It needs the same Origin, Sec-Fetch-Site and single-use ticket as `/ws` and
-// is not served on the control socket.
-//
-// `update=1` (only this value) updates the host: when its daemon already ran
-// and runs another version than the local server, the hub stops it with
-// `daemon stop` on the host, which ends all its sessions, and the handshake
-// then starts the local server's version. A daemon of the local server's
-// version, or one this socket's handshake started, is left alone. A client
-// sends it only after the user confirmed what ends on the host.
-//
-// Before the relay, the hub sends only RemoteHubMessage text messages:
-// RemoteProgress per step, then exactly one RemoteReady, or a RemoteError
-// after which it closes the socket (code 1000, the error code as reason).
-// RemoteProgress exists only on this browser socket: the gateway translates
-// the native host stream's transport Progress reports (Native transport v1
-// below), each step once and in order, and forwards no RemoteProgress text of
-// the host stream. A native host stream carries the steps only as Progress
-// frames before acceptance; its first text is RemoteReady. A hub of the
-// previous release repeats them as RemoteProgress text before RemoteReady,
-// which every reader ignores.
-// After RemoteReady every message is the host daemon's own, relayed
-// unchanged in both directions (text as text, binary as binary): its
-// mux.welcome first, then the messages of sections 2 and 3 in the wire
-// format of section 9.
-// The hub sends nothing of its own any more; a client drops any `remote.*`
-// message after RemoteReady. Messages the client sends before RemoteReady
-// are relayed after it (at most 64).
-//
-// When the host side ends (the bridge or its ssh), the hub closes the socket
-// with code 4001 (REMOTE_HOST_LOST): retry. Closing the socket ends the
-// socket's ssh; the host's daemon and its sessions keep running. Every socket
-// has an SSH connection of its own.
+// The local service's hub prepares a host over SSH and opens a native stream to
+// its daemon. Preparation steps arrive as transport Progress frames before
+// acceptance, then RemoteReady precedes the daemon's mux.welcome. RemoteError
+// reports a failed preparation. Older hubs may send remote.progress text before
+// remote.ready; native readers ignore that historical progress form.
+// After readiness, daemon text and binary messages are relayed unchanged.
+// Each stream owns its SSH connection. Closing it detaches the client while
+// the daemon and its keeper-backed sessions continue. Reconnect is client-owned.
+// An explicit, confirmed update intent applies to one attempt only and requires
+// verified instance identity, keepers and the matching installed replacement.
 // ============================================================================
 
-/** Close code of a relaying `/ws/remote` socket whose host side ended. */
-const REMOTE_HOST_LOST = 4001;
-
-/** A step before the relay, in this order; also the `phase` of a native
- *  Progress report of a host stream. `install` only when the server is
- *  uploaded now; `update` only with `update=1` when the daemon of another
- *  version is stopped; `started` only when this socket's handshake started
- *  the daemon (after `update`, always). */
+/** Ordered preparation phases; install/update/started occur only when needed. */
 type RemoteStep = "install" | "daemon" | "update" | "started" | "bridge";
 
-interface RemoteProgress {
-  type: "remote.progress";
-  step: RemoteStep;
-  /** For the user, e.g. "Installing Splitty 0.1.0 on vm1 (x86_64)..." or
-   *  "Stopping Splitty 0.0.9 on vm1...". */
-  message: string;
-}
 
 /**
  * The hub's plan for an ordinary update of the host's daemon. An available
@@ -2371,16 +2103,14 @@ interface LegacyMigrationOffer {
   sessions: number;
 }
 
-type RemoteHubMessage = RemoteProgress | RemoteReady | RemoteError;
+type RemoteHubMessage = RemoteReady | RemoteError;
 
 /**
  * GET /api/remote/hosts
  *
  * The known hosts of the user the server runs as, for a host picker: the
- * recent hosts (recorded when a `/ws/remote` socket or `splitty connect`
- * became ready), most recent first, then the `Host` names of `~/.ssh/config`
- * not already listed. Authenticated like the other `/api` routes; not on the
- * control socket.
+ * recent hosts (recorded when a hub host stream became ready), most recent first, then the `Host` names of `~/.ssh/config`
+ * not already listed. Native host.list only; not on the control socket.
  *
  * Response:
  *   200 KnownHost[]
@@ -2402,8 +2132,8 @@ interface KnownHost {
  * DELETE /api/remote/hosts  { target: string }
  *
  * Local display names and removal tombstones in remote-host-preferences.json,
- * shared by the local server's clients. All routes require API auth and
- * origin/Fetch Metadata checks and are absent from the control socket.
+ * shared by the local server's clients. The native operations require a local main connection and are absent
+ * from the control socket.
  * GET has no side effects; missing/corrupt files yield an empty document,
  * invalid saved rows are skipped. Files are owner-only and atomically replaced.
  *
@@ -2454,8 +2184,8 @@ interface RemoteHostPreference {
  * list, by SSH target, in remote-host-order.json beside the preferences (a
  * file of its own: the preference reader rejects unknown fields). Local
  * screens always come first; hosts not listed follow the listed ones in the
- * order their screens first appear. Same authentication, origin checks,
- * control-socket absence, lock and private atomic writes as host preferences;
+ * order their screens first appear. Same native role checks, control-socket absence, lock and private atomic
+ * writes as host preferences;
  * never contacts a host.
  *
  * PUT replaces the whole order: at most 256 targets, each passing SSH target
@@ -2483,9 +2213,9 @@ interface RemoteHostOrder {
  *
  * The client's list of open remote screens, remembered across restarts by
  * the local server in `remote-screens.json` in its configuration directory
- * (owner-only, replaced atomically), so every window and browser profile on
- * the machine and an embedded server share it. Authenticated like the other
- * `/api` routes; not on the control socket.
+ * (owner-only, replaced atomically), shared by windows and embedded servers
+ * using that configuration directory. Native local main operations only;
+ * not on the control socket.
  *
  * GET returns the list; a missing, unreadable or corrupted file is an empty
  * list, and entries of a hand-edited file that break the rules below are
@@ -2554,8 +2284,7 @@ interface RememberedHostScreens {
  * Windows report observations with hub.catalog.observe and read the merged
  * directory (remote.directory.get); these routes remain for older clients,
  * under the same rules. They only read/write local metadata; neither contacts a host nor
- * creates or opens a screen. Authentication and origin/Fetch Metadata guards
- * are the same as for the other API routes; absent from the control socket.
+ * creates or opens a screen. Native local main role checks apply; absent from the control socket.
  *
  * GET returns the last 20 updated hosts, most recent update first (including
  * ties within a second). A missing, unreadable, malformed or wrong-version
@@ -2611,7 +2340,7 @@ interface CatalogScreen {
  * POST   /api/remote/forwards OpenRemoteForward -> 200 RemoteForward
  * DELETE /api/remote/forwards RemoteForwardKey -> 204
  *
- * Ordinary API authentication and Host/Origin/Fetch Metadata guards apply;
+ * Native local main role checks apply;
  * neither forwarding endpoint is exposed on the control socket.
  *
  * One owned, foreground ssh -N -T -a -x per mapping, from
@@ -2679,7 +2408,7 @@ interface RemoteForward {
   remote: number;
   /** The port here. */
   local: number;
-  /** `http://localhost:<local>`, never `127.0.0.1`, whose cookies are Splitty's. */
+  /** `http://localhost:<local>`; the announced hostname stays localhost. */
   url: string;
   state: "up" | "down";
 }
@@ -2848,7 +2577,7 @@ type ReverseForwardConflictCode =
 //
 // Explicit "Open Folder in" submenu action on a hub terminal, never a server
 // command. The native app builds and dispatches the folder URI in its own
-// process; the browser client in the click handler. Both take the fields below:
+// process, using the fields below:
 //   remote folder: { target, cwd, editor? }
 //   local folder:  { editor, cwd, wslDistro? }
 // Editor is "vscode" (remote default), "zed" or, for remote folders only,
@@ -2860,8 +2589,7 @@ type ReverseForwardConflictCode =
 // The UI rechecks their identity at click time. The native app independently
 // validates inputs and generates only fixed folder URIs, never accepting an
 // arbitrary URI, executable or command string. Generic openers stay HTTP(S).
-// Browsers generate and dispatch the URI synchronously during the user click.
-// No new HTTP endpoint or WebSocket message.
+// Dispatch requires a deliberate click and revalidated local intent.
 interface RemoteEditorFolder {
   /** SSH alias/hostname/IPv4 with optional username. For VS Code and Zed, ports/IPv6 need an alias and VS Code also rejects all-hex aliases; sftp takes ports and bracketed IPv6 as given. */
   target: string;
@@ -2888,12 +2616,11 @@ interface LocalEditorFolder {
 
 // Settings API: GET/PATCH /api/home/settings includes drawer.pinned (boolean,
 // default false), persisted as pinned under [drawer] in config.toml. Clients
-// restore it before mounting the workspace; it is independent of the page origin
-// and of the OS-assigned backend port used by desktop app restarts.
+// restore it before mounting the workspace, from their assigned local service.
 
 
 // Confirmed external-editor requests (editor-open-v1 in mux.welcome).
-// POST /api/editor/open or native editor.open; authenticated browser/native UI
+// POST /api/editor/open or native editor.open; native UI
 // or owner socket, never grants.
 // Resolves on the originating server; only regular files/folders are accepted.
 export interface EditorOpenRequest {
@@ -2916,8 +2643,8 @@ export type EditorServerMessage =
 // These messages are transient, connection-bound, and have no generic event ID.
 
 // Files offered to the windows of a session (file-offer-v1 in mux.welcome),
-// by `splitty download <file>` in a pane. POST /api/file/offer, authenticated
-// Native file.offer, authenticated HTTP or owner socket, never grants.
+// by `splitty download <file>` in a pane. POST /api/file/offer on the owner
+// socket or native file.offer, never grants.
 // The server opens the regular file
 // (links followed, at most 512 MiB) and keeps it open: the window reads the
 // file as it was at offer time.
@@ -3095,19 +2822,6 @@ export type ReviewServerMessage = {
 // {cwd,editor,target?,wslDistro?,kind?:"file"|"folder"}; kind defaults to
 // folder for old callers.
 
-// GET /api/client-assignment: browser-gateway-only, authenticated by its local
-// session cookie or owner bearer after Host/Origin/Fetch Metadata guards.
-// Cache-Control: no-store. Available while the fixed backend reconnects; no
-// upstream request. Queries cannot change this assignment. The browser reads
-// it before constructing its workspace. All subsequent API/ticket requests send
-// X-Splitty-Gateway with this public ID (the isolated cookie name, not its secret).
-// A mismatch returns 409 + X-Splitty-Gateway-Changed: 1 before dispatch; the page
-// revokes pending delivery and reloads. CLI callers without the header retain
-// ordinary authentication. Tickets are valid only at their issuing gateway.
-export type BrowserClientAssignment =
-  | { gateway: string; role: "main" }
-  | { gateway: string; role: "remote"; target: string };
-
 /** Public desktop document assignment, returned only after native caller and
  * readiness checks. The private shell proof/capsule is not part of this value.
  * handle/document are opaque; query parameters never construct them or select
@@ -3129,7 +2843,7 @@ export interface NativeDocumentAssignment {
 // Argument strings are data for the named operation, never routing authority.
 // Every argument but body is a string; countArguments are decimal strings of a
 // non-negative integer (job.logs: tail, limit, waitMs). body has the same domain
-// schema/validation as the mapped browser endpoint; over HTTP it needs a JSON
+// schema/validation as the mapped operation; on the control socket it needs a JSON
 // Content-Type (application/json or application/*+json), else 415. An argument
 // or body that does not decode is answered in the operation's errors style:
 // plain 422 {error}, job 400 {code: "invalid_request", error}, viewer
@@ -3261,7 +2975,7 @@ export interface RemoteHandshakeV2 {
  * client. A fresh native handshake verifies successful replacement.
  */
 
-/** Owner Unix socket only, excluded from the browser and native UI catalog.
+/** Owner Unix socket only, excluded from the native UI catalog.
  * POST /api/daemon/stop compares this immutable instance with the accepting
  * daemon before asking that daemon to shut itself down. A mismatch is 409;
  * success is {stopping: instance}. No PID signal or alternate backend fallback.
@@ -3304,7 +3018,7 @@ export const NativeFrameKind = {
 } as const;
 export interface NativeHello {
   transportVersion: 1;
-  // Only a main broker or authenticated local gateway may request this on the
+  // Only a main broker may request this on the
   // private owner endpoint. Direct/SSH remote carriers reject it before effects.
   // ownerInstance pins the local hub before it opens the separate host stream.
   openHost?: { ownerInstance: string; target: string; update: boolean };
@@ -3367,7 +3081,7 @@ export interface NativeClosed {
 }
 
 // GET /api/mux/status and native mux.status describe the terminal service.
-// A browser gateway reports its own address at startup, not in this object.
+// listenAddr is always null; retained for released native clients.
 export interface ServiceStatus {
   serverMode: "embedded" | "daemon";
   capabilities: string[];

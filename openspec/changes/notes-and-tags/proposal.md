@@ -43,3 +43,7 @@ Open questions for the design:
 - Should notes also be shown as an overlay or sidebar, or is the pane kind enough?
 - Tag input: free text, or autocomplete from existing tags?
 - Should the CLI path (`splitty note "quick thought" --tags splitty`) be part of the first version? It decides whether `cli`, `control-api` and `access-control` are touched at all.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client, dockview and WebSocket transport are gone. Design note editing in native views and carry operations over native connections or a deliberately scoped control API; persistence and note/tag domain rules remain. Earlier textarea, DOM and frontend routing proposals are historical.

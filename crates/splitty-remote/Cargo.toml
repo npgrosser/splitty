@@ -7,7 +7,8 @@ license.workspace = true
 publish = false
 
 [features]
-# Publishes SSH questions the way an askpass helper does, for other crates' tests.
+# Publishes SSH questions the way an askpass helper does, and records browser
+# gateway claims in the exposure registry, for tests.
 testing = []
 
 [dependencies]
@@ -30,6 +31,8 @@ nix = { version = "0.29", features = ["fs", "user"] }
 sha2 = "0.10"
 
 [dev-dependencies]
+# The `testing` helpers for this crate's own integration tests.
+splitty-remote = { path = ".", features = ["testing"] }
 tempfile = "3"
 # Paused time for the supervisor's backoff and give-up tests.
 tokio = { workspace = true, features = ["test-util"] }

@@ -47,6 +47,8 @@ To be decided when the change is next. Likely candidates:
 
 ## Carried-over design notes
 
+- 2026-11-15, `remove-browser-access`: No browser window, Splitty origin, session cookie or Frontend Security Headers remain. The frame/header design above needs an embedded engine and its own script, navigation, network and permission isolation, with a bounded data-only channel. Native inert viewers remain the default; removed gateway protections cannot be credited to the new design.
+
 - 2026-11-06, `splitty-open`: the inert rendering (sanitizer, shadow root, no inline scripts, CSS sanitizer, `data:` images only) is specified in `access-control` as "Rendered Documents Are Inert", including that rendering needs no change to Frontend Security Headers. This change is the first to change that, and only for the sandboxed frame.
 - 2026-11-06, `viewer-renderers` (draft): renderers that run a document's code were left out there because they need an opaque-origin sandbox, which `frame-src 'none'` and the desktop shells' guards forbid today.
 - Security findings (`docs/security/findings.md`): SR-01 removed same-origin web content (`/proxy/{port}`), which could reach the window's DOM, session and terminal API; SR-02 keeps `frame-src 'none'` as its regression guard; SR-27 added native navigation guards and keeps non-packaged origins out of the shells. None of these may be weakened for anything but the opaque-origin frame document, and the tests that pin them (`webview_routes_are_absent_even_with_a_valid_token`, `app_document_carries_a_strict_csp`) keep guarding the rest.

@@ -52,3 +52,7 @@ Open questions for the design:
 - Echo detection: the roadmap suggests `clientId` plus an op id. There is no op id on the wire today.
 - PTY size: decided in `pty-size-policy`; whether roles should override it (an observer that never counts) is open.
 - Who is primary, how is that chosen, and what happens when the primary disconnects?
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client, dockview and browser reconnect path are gone. Evaluate multiple native windows and splitty attach over native connections; keep server PTY sizing, shared subscriptions, connection-scoped input and authoritative layout reconciliation. Earlier web implementation references are historical.

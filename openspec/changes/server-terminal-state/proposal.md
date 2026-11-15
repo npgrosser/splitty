@@ -63,3 +63,7 @@ To be decided when the change is next. Likely:
 - **Images.** Whether kitty graphics and sixel output survive a snapshot, which a byte replay gives while they are still in the buffer.
 - **Job logs.** Whether a job's text log is read from the terminal's lines instead of escape sequences stripped from the byte stream, and what its cursors then count.
 - **Reading a screen.** What the read returns for a pane on a host, how much history one request may return, and whether a caller can wait until the screen shows a given text.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client and its terminal adapters are gone. Snapshot delivery must preserve compatibility with released native clients, the native terminal engine and splitty attach. Server emulation, keeper lifetime and bounded connection delivery remain the design boundaries.

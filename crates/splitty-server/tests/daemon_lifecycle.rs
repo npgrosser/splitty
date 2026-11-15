@@ -121,22 +121,6 @@ impl Sandbox {
         .stdin(Stdio::null())
     }
 
-    #[cfg(target_os = "linux")]
-    fn fake_ssh_to(&self, remote: &Sandbox) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let bin = self.home.path().join("ssh-bin");
-        fs::create_dir(&bin).unwrap();
-        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_splitty"), bin.join("splitty")).unwrap();
-        let quote = splitty_remote::ssh::quote;
-        let script = format!("#!/bin/sh\nfor argument do line=\"$argument\"; done\nprintf '%s\\n' \"$line\" >> {}\nexec env -u SPLITTY_SOCK -u SPLITTY_AGENT_SOCK -u SPLITTY_CONFIG_DIR HOME={} XDG_CONFIG_HOME={} XDG_DATA_HOME={} XDG_RUNTIME_DIR={} /bin/sh -c \"$line\"\n",
-            quote(self.home.path().join("ssh-calls").to_str().unwrap()), quote(remote.home.path().to_str().unwrap()),
-            quote(remote.home.path().join("config").to_str().unwrap()), quote(remote.home.path().join("data").to_str().unwrap()),
-            quote(remote.runtime_dir.to_str().unwrap()));
-        fs::write(bin.join("ssh"), script).unwrap();
-        fs::set_permissions(bin.join("ssh"), fs::Permissions::from_mode(0o700)).unwrap();
-        bin
-    }
-
     fn splitty(&self, args: &[&str]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_splitty"));
         cmd.args(args);
@@ -288,9 +272,8 @@ fn agent_guide_is_offline_even_with_unusable_scope_and_configuration() {
         vec!["agent", "assign", "id", "--job", "job", "--json"],
         vec!["agent", "reclaim", "--job", "job", "--json"],
         vec!["agent", "exec", "id", "--", "/bin/false"],
-        vec!["issue-bootstrap"],
         // cli, Scoped Administrative Commands Are Refused: an agent grant
-        // never reaches a terminal; refused before the token file is read.
+        // never reaches a terminal.
         vec!["attach", "3f9a"],
         vec!["daemon", "stop"],
         vec![
@@ -303,7 +286,6 @@ fn agent_guide_is_offline_even_with_unusable_scope_and_configuration() {
         vec!["remote-bridge", "--transport", "native-v1"],
         vec!["remote-handshake", "--json"],
         vec!["session-keeper"],
-        vec!["serve", "--addr", "127.0.0.1:0"],
     ] {
         assert_eq!(sandbox.scoped(socket, &args).status.code(), Some(2));
     }
@@ -695,10 +677,6 @@ fn managed_jobs_survive_cli_clients_and_resumed_grants() {
         after[pane]["sessionId"], panes[pane]["sessionId"],
         "unrelated user shell changed"
     );
-    assert!(!sandbox
-        .scoped(socket, &["issue-bootstrap"])
-        .status
-        .success());
     assert!(!sandbox.scoped(socket, &["daemon", "stop"]).status.success());
     assert_eq!(
         sandbox
@@ -933,6 +911,10 @@ fn start_status_control_command_stop() {
     fs::create_dir_all(sandbox.config_dir()).unwrap();
     fs::set_permissions(sandbox.config_dir(), fs::Permissions::from_mode(0o755)).unwrap();
 
+    let token_path = sandbox.config_dir().join("auth-token");
+    fs::write(&token_path, b"unused-token-fixture").unwrap();
+    fs::set_permissions(&token_path, fs::Permissions::from_mode(0o644)).unwrap();
+
     let start = sandbox.splitty(&["daemon", "start"]);
     assert!(
         start.status.success(),
@@ -946,6 +928,11 @@ fn start_status_control_command_stop() {
             .mode()
             & 0o777,
         0o700
+    );
+    assert_eq!(fs::read(&token_path).unwrap(), b"unused-token-fixture");
+    assert_eq!(
+        fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+        0o644
     );
     let info = sandbox
         .read_info()
@@ -1254,6 +1241,13 @@ fn owned_native_child_pipes_end_only_their_embedded_sessions() {
     let sandbox = Sandbox::new();
     sandbox.start_daemon();
     let (screen, pane, session) = sandbox.shell();
+    assert_no_tcp_listener(
+        sandbox.read_info().unwrap()["pid"]
+            .as_u64()
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
     let home = sandbox.home.path().display().to_string();
     sandbox.type_line(&screen, &pane, &format!("echo $$ > {home}/persistent-pid"));
     let persistent = sandbox.wait_for("persistent-pid");
@@ -1677,7 +1671,7 @@ fn a_busy_tcp_port_is_irrelevant_and_legacy_listener_flags_are_refused() {
     for flags in [["--addr", addr.as_str()], ["--token", "never-print"]] {
         let out = sandbox.splitty(&["daemon", "start", flags[0], flags[1]]);
         assert_eq!(out.status.code(), Some(2), "{}", sandbox.describe(&out));
-        assert!(stderr(&out).contains("serve --daemon"));
+        assert!(stderr(&out).contains("unexpected argument"));
         assert!(!sandbox.info_path().exists());
     }
     let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
@@ -2397,211 +2391,6 @@ fn remote_handshake_reports_a_daemon_that_cannot_start() {
     assert_eq!(usage["code"], "usage");
 }
 
-// Smoke: real inherited pipes must detach the SSH bridge while the host's
-// keeper remains live; an in-process duplex stream cannot prove process exit.
-#[test]
-fn an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_cleanly() {
-    if !splitty_core::pty::testing::pty_available() {
-        return;
-    }
-    let sandbox = Sandbox::new();
-    let absent = sandbox.splitty(&[
-        "serve",
-        "--daemon",
-        "--addr",
-        "127.0.0.1:0",
-        "--oneshot-token",
-    ]);
-    assert_eq!(absent.status.code(), Some(1));
-    assert!(stderr(&absent).contains("daemon start"));
-    assert!(sandbox.read_info().is_none());
-    assert!(!sandbox.config_dir().join("auth-token").exists());
-    sandbox.start_daemon();
-    let (screen, pane, _) = sandbox.shell();
-    sandbox.type_line(
-        &screen,
-        &pane,
-        &format!("echo $$ > '{}'", sandbox.path("gateway-shell").display()),
-    );
-    let shell = sandbox.wait_for("gateway-shell");
-    let original = sandbox.read_info().unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
-    sandbox
-        .isolate(&mut command)
-        .args([
-            "serve",
-            "--daemon",
-            "--addr",
-            "127.0.0.1:0",
-            "--token",
-            "gateway-owner-token",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut gateway = ChildGuard(command.spawn().unwrap());
-    let mut reader = BufReader::new(gateway.0.stdout.take().unwrap());
-    let mut port = None;
-    let mut bootstrap = None;
-    let mut url = None;
-    for _ in 0..10 {
-        let (line, returned) = read_line_within(reader).expect("browser gateway startup output");
-        reader = returned;
-        if let Some(value) = line.trim().strip_prefix("SPLITTY_PORT=") {
-            port = Some(value.parse::<u16>().unwrap());
-        }
-        if let Some(value) = line.trim().strip_prefix("SPLITTY_BOOTSTRAP=") {
-            bootstrap = Some(value.to_owned());
-        }
-        if let Some(value) = line.trim().strip_prefix("SPLITTY_URL=") {
-            url = Some(value.to_owned());
-        }
-        if port.is_some() && bootstrap.is_some() && url.is_some() {
-            break;
-        }
-    }
-    let port = port.unwrap();
-    assert_eq!(
-        url.unwrap(),
-        format!(
-            "http://127.0.0.1:{port}/?bootstrap={}&desktop=1",
-            bootstrap.as_ref().unwrap()
-        )
-    );
-    assert_eq!(
-        process_inventory::tcp_listeners(gateway.0.id()),
-        [std::net::SocketAddr::from(([127, 0, 0, 1], port))]
-    );
-    assert_no_tcp_listener(original["pid"].as_u64().unwrap().try_into().unwrap());
-    drop(reader); // Text readiness output has no ownership of this gateway.
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let base = format!("http://127.0.0.1:{port}");
-    let missing_address = sandbox.splitty(&["issue-bootstrap"]);
-    assert_eq!(missing_address.status.code(), Some(1));
-    assert!(stderr(&missing_address).contains("--addr"));
-    let minted = sandbox.splitty(&[
-        "issue-bootstrap",
-        "--addr",
-        &format!("127.0.0.1:{port}"),
-        "--token",
-        "gateway-owner-token",
-    ]);
-    assert!(minted.status.success(), "{}", sandbox.describe(&minted));
-    let minted = stdout(&minted)
-        .trim()
-        .strip_prefix("SPLITTY_BOOTSTRAP=")
-        .unwrap()
-        .to_owned();
-    assert_ne!(Some(&minted), bootstrap.as_ref());
-    runtime.block_on(async {
-        let response = http
-            .post(format!("{base}/api/session"))
-            .json(&serde_json::json!({"bootstrap":minted}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-    });
-    let cookie = runtime.block_on(async {
-        let response = http
-            .post(format!("{base}/api/session"))
-            .json(&serde_json::json!({"bootstrap":bootstrap.unwrap()}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        response.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned()
-    });
-    let status = || {
-        runtime.block_on(async {
-            let response = http
-                .get(format!("{base}/api/mux/status"))
-                .header("cookie", &cookie)
-                .send()
-                .await
-                .unwrap();
-            let code = response.status();
-            (code, response.json::<serde_json::Value>().await.unwrap())
-        })
-    };
-    assert_eq!(status().1["instance"], original["instance"]);
-    let wrong = sandbox.splitty(&["daemon", "stop", "--if-instance", &"0".repeat(32)]);
-    assert_eq!(wrong.status.code(), Some(75));
-    assert_eq!(
-        sandbox.read_info().unwrap()["instance"],
-        original["instance"]
-    );
-    let stopped = sandbox.splitty(&[
-        "daemon",
-        "stop",
-        "--if-instance",
-        original["instance"].as_str().unwrap(),
-    ]);
-    assert!(stopped.status.success(), "{}", sandbox.describe(&stopped));
-    sandbox.start_daemon();
-    let replacement = sandbox.read_info().unwrap();
-    assert_ne!(replacement["instance"], original["instance"]);
-    let deadline = Instant::now() + READ_TIMEOUT;
-    loop {
-        let (code, body) = status();
-        if code == reqwest::StatusCode::OK {
-            assert_eq!(body["instance"], replacement["instance"]);
-            break;
-        }
-        assert_eq!(code, reqwest::StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert!(
-            Instant::now() < deadline,
-            "gateway did not rediscover the daemon"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    assert_eq!(
-        process_inventory::tcp_listeners(gateway.0.id()),
-        [std::net::SocketAddr::from(([127, 0, 0, 1], port))]
-    );
-    assert_no_tcp_listener(replacement["pid"].as_u64().unwrap().try_into().unwrap());
-    kill(
-        Pid::from_raw(i32::try_from(gateway.0.id()).unwrap()),
-        Signal::SIGTERM,
-    )
-    .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = gateway.0.try_wait().unwrap() {
-            assert!(status.success());
-            break;
-        }
-        assert!(Instant::now() < deadline, "gateway did not stop");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        sandbox.read_info().unwrap()["instance"],
-        replacement["instance"]
-    );
-    assert!(
-        kill(Pid::from_raw(shell.trim().parse().unwrap()), None).is_ok(),
-        "gateway shutdown leaves the kept shell running"
-    );
-    assert!(!sandbox.config_dir().join("auth-token").exists());
-    assert!(
-        std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err(),
-        "the browser listener ends with its command"
-    );
-}
-
 #[test]
 fn remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions() {
     if !splitty_core::pty::testing::pty_available() {
@@ -3227,226 +3016,6 @@ fn attach_without_a_daemon_hands_over_to_a_starting_daemon() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success());
-}
-
-// Smoke: the actual CLI owns stdout, its HTTP listener and multiple exec
-// workers; in-process routing cannot prove stable cookies/URL across their
-// replacement or that browser credentials never reach host commands.
-#[test]
-#[cfg(target_os = "linux")]
-fn connect_keeps_its_local_gateway_and_cookie_when_the_native_host_is_replaced() {
-    if !splitty_core::pty::testing::pty_available() {
-        return;
-    }
-    let local = Sandbox::new();
-    local.start_daemon();
-    let remote = Sandbox::new();
-    remote.start_daemon();
-    let local_record = fs::read(local.info_path()).unwrap();
-    let first = remote.read_info().unwrap();
-    let (screen, pane, _) = remote.shell();
-    remote.type_line(
-        &screen,
-        &pane,
-        &format!(
-            "echo $$ > '{}'",
-            remote.home.path().join("connect-shell").display()
-        ),
-    );
-    let shell = remote.wait_for("connect-shell");
-    let bin = local.fake_ssh_to(&remote);
-    let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
-    local
-        .isolate(&mut command)
-        .args(["connect", "test-host", "--no-open", "--json"])
-        .env(
-            "PATH",
-            std::env::join_paths(
-                std::iter::once(bin.clone())
-                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-            )
-            .unwrap(),
-        )
-        .stdout(Stdio::piped())
-        .stderr(File::create(local.home.path().join("connect.stderr")).unwrap());
-    let mut connect = ChildGuard(command.spawn().unwrap());
-    let (send, lines) = mpsc::channel();
-    let stdout = connect.0.stdout.take().unwrap();
-    let output = std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if send.send(line.unwrap()).is_err() {
-                break;
-            }
-        }
-    });
-    let mut events = Vec::<serde_json::Value>::new();
-    let ready = loop {
-        let line = lines
-            .recv_timeout(READ_TIMEOUT)
-            .expect("connect startup event");
-        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
-        events.push(event.clone());
-        assert_ne!(
-            event["event"],
-            "failed",
-            "{event}; {}",
-            fs::read_to_string(local.home.path().join("connect.stderr")).unwrap()
-        );
-        if event["event"] == "ready" {
-            break event;
-        }
-    };
-    let url = reqwest::Url::parse(ready["url"].as_str().unwrap()).unwrap();
-    let port = url.port().unwrap();
-    assert_eq!(ready["port"], port);
-    assert_eq!(
-        process_inventory::tcp_listeners(connect.0.id()),
-        [std::net::SocketAddr::from(([127, 0, 0, 1], port))]
-    );
-    let bootstrap = url
-        .query_pairs()
-        .find(|(name, _)| name == "bootstrap")
-        .unwrap()
-        .1
-        .into_owned();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let http = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-    let base = format!("http://127.0.0.1:{port}");
-    let cookie = runtime.block_on(async {
-        let response = http
-            .post(format!("{base}/api/session"))
-            .json(&serde_json::json!({"bootstrap":bootstrap}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        response.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned()
-    });
-    let status = || {
-        runtime.block_on(async {
-            let response = http
-                .get(format!("{base}/api/mux/status"))
-                .header("cookie", &cookie)
-                .send()
-                .await
-                .unwrap();
-            (
-                response.status(),
-                response.json::<serde_json::Value>().await.unwrap(),
-            )
-        })
-    };
-    assert_eq!(status().1["instance"], first["instance"]);
-    let local_pid = local.read_info().unwrap()["pid"].as_u64().unwrap();
-    assert_no_tcp_listener(u32::try_from(local_pid).unwrap());
-    assert_no_tcp_listener(u32::try_from(first["pid"].as_u64().unwrap()).unwrap());
-    let stopped = remote.splitty(&[
-        "daemon",
-        "stop",
-        "--if-instance",
-        first["instance"].as_str().unwrap(),
-    ]);
-    assert!(stopped.status.success(), "{}", remote.describe(&stopped));
-    // Reconnect itself must start the absent host daemon, without a second URL.
-    let restored = loop {
-        let line = lines
-            .recv_timeout(READ_TIMEOUT)
-            .expect("connect restoration event");
-        let event: serde_json::Value = serde_json::from_str(&line).unwrap();
-        events.push(event.clone());
-        assert_ne!(event["event"], "failed", "{event}");
-        assert_ne!(event["event"], "ready", "gateway must not be replaced");
-        assert_ne!(
-            event["event"], "url",
-            "existing browser credentials remain valid"
-        );
-        if event["event"] == "restored" {
-            break event;
-        }
-    };
-    assert_eq!(restored["event"], "restored");
-    let replacement = remote.read_info().unwrap();
-    assert_ne!(replacement["instance"], first["instance"]);
-    let deadline = Instant::now() + READ_TIMEOUT;
-    loop {
-        let (code, body) = status();
-        if code == reqwest::StatusCode::OK {
-            assert_eq!(body["instance"], replacement["instance"]);
-            break;
-        }
-        assert_eq!(code, reqwest::StatusCode::SERVICE_UNAVAILABLE, "{body}");
-        assert!(Instant::now() < deadline);
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    assert_eq!(
-        process_inventory::tcp_listeners(connect.0.id()),
-        [std::net::SocketAddr::from(([127, 0, 0, 1], port))]
-    );
-    assert_no_tcp_listener(replacement["pid"].as_u64().unwrap().try_into().unwrap());
-    kill(
-        Pid::from_raw(i32::try_from(connect.0.id()).unwrap()),
-        Signal::SIGTERM,
-    )
-    .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = connect.0.try_wait().unwrap() {
-            assert!(status.success());
-            break;
-        }
-        assert!(Instant::now() < deadline, "connect did not stop");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    output.join().unwrap();
-    events.extend(
-        lines
-            .try_iter()
-            .map(|line| serde_json::from_str(&line).unwrap()),
-    );
-    assert_eq!(events.last().unwrap()["event"], "closed");
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event["event"] == "ready")
-            .count(),
-        1
-    );
-    let calls = fs::read_to_string(local.home.path().join("ssh-calls")).unwrap();
-    for forbidden in [
-        "issue-bootstrap",
-        "/api/bootstrap",
-        "/api/ws-ticket",
-        "--port",
-        &bootstrap,
-        &cookie,
-    ] {
-        assert!(
-            !calls.contains(forbidden),
-            "browser credentials and port hints do not reach host commands"
-        );
-    }
-    assert_eq!(fs::read(local.info_path()).unwrap(), local_record);
-    assert_eq!(
-        remote.read_info().unwrap()["instance"],
-        replacement["instance"]
-    );
-    assert!(kill(Pid::from_raw(shell.trim().parse().unwrap()), None).is_ok());
-    assert!(!local.config_dir().join("auth-token").exists());
-    assert!(!remote.config_dir().join("auth-token").exists());
-    assert!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err());
 }
 
 /// Smoke: only inherited pipes to an actual child demonstrate app ownership,
@@ -4270,4 +3839,765 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
     assert_eq!(sandbox.keeper_sockets(), 0);
     sandbox.assert_shared_parents_unchanged();
     eprintln!("PROVED historical rollback current→{expected}→current: current and historical keeper executables both retain original shell PID, private state, session and keeper inode; unrelated process survives; exact processes exited");
+}
+
+// ── access-control: the owner's control socket ──────────────────────────────
+//
+// Smoke: these run `splitty daemon start` and reach its control socket as a
+// pane's CLI does; only the real process shows the socket's file modes, its
+// peer check and the routes the binary serves there.
+
+#[path = "support/command.rs"]
+#[cfg(target_os = "linux")]
+mod isolated_command;
+#[path = "support/processes.rs"]
+#[cfg(target_os = "linux")]
+mod process_cleanup;
+
+impl Sandbox {
+    /// The running daemon's owner control socket, as daemon.json names it.
+    fn control_socket(&self) -> PathBuf {
+        PathBuf::from(
+            self.read_info().expect("a running daemon")["socket"]
+                .as_str()
+                .expect("socket in daemon.json"),
+        )
+    }
+}
+
+/// Minimal HTTP-over-Unix-socket request, mirroring what the CLI does.
+fn control_request(
+    socket: &std::path::Path,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String) {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(socket).expect("connect to control socket");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+
+    let payload = body.unwrap_or("");
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: splitty\r\nConnection: close\r\n");
+    if body.is_some() {
+        request.push_str("Content-Type: application/json\r\n");
+        request.push_str(&format!("Content-Length: {}\r\n", payload.len()));
+    }
+    request.push_str("\r\n");
+    request.push_str(payload);
+
+    stream.write_all(request.as_bytes()).expect("write");
+
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).ok();
+
+    let status = raw
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    (status, raw)
+}
+
+/// The JSON body of a [`control_request`] response.
+fn control_body(response: &str) -> serde_json::Value {
+    serde_json::from_str(response.split_once("\r\n\r\n").expect("body").1).expect("JSON body")
+}
+
+/// The multiplexer operations the in-shell CLI needs are reachable, with no
+/// credential of any kind — filesystem permissions are the authorisation.
+#[test]
+fn control_socket_serves_mux_operations() {
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let socket = sandbox.control_socket();
+
+    let (status, body) = control_request(&socket, "GET", "/api/mux/status", None);
+    assert_eq!(
+        status, 200,
+        "control socket should answer mux status: {body}"
+    );
+}
+
+/// The heart of SR-05: this channel must not reach anything beyond the
+/// multiplexer. Configuration and shell profiles are executable configuration —
+/// reaching them would let a build script in a pane persist a change that runs
+/// in every future pane, which is the escalation the channel exists to remove.
+#[test]
+fn control_socket_cannot_reach_privileged_endpoints() {
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let socket = sandbox.control_socket();
+
+    let forbidden = [
+        ("GET", "/api/home/settings"),
+        ("GET", "/api/shell-profiles"),
+        ("GET", "/api/home/theme"),
+        ("GET", "/api/templates"),
+        ("GET", "/api/build"),
+        // Minting browser credentials must stay on the token-authenticated path.
+        ("POST", "/api/bootstrap"),
+        ("POST", "/api/ws-ticket"),
+        ("POST", "/api/session"),
+        // A pane process must not open SSH connections or read the user's hosts.
+        ("GET", "/ws/remote?target=vm1"),
+        ("GET", "/api/remote/hosts"),
+    ];
+
+    for (method, path) in forbidden {
+        let (status, _) = control_request(&socket, method, path, Some("{}"));
+        assert_eq!(
+            status, 404,
+            "{method} {path} must not be routable over the control socket",
+        );
+    }
+}
+
+/// The socket and its directory must be private to the owner. This is the
+/// primary authorisation for the channel, so it is asserted rather than assumed.
+#[test]
+fn control_socket_is_private_to_the_owner() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let socket = sandbox.control_socket();
+
+    let dir_mode = fs::metadata(socket.parent().unwrap())
+        .expect("socket dir")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "the socket directory must not be traversable by others"
+    );
+
+    let socket_mode = fs::metadata(&socket).expect("socket").permissions().mode() & 0o777;
+    assert_eq!(
+        socket_mode, 0o600,
+        "the socket itself must not be connectable by others"
+    );
+}
+
+/// A real grant listener has its own ACL and routes, not a wrapper-side filter.
+#[test]
+fn agent_control_socket_is_private_and_only_routes_owned_jobs() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let owner = sandbox.control_socket();
+    let (status, response) = control_request(
+        &owner,
+        "POST",
+        "/api/agents",
+        Some(r#"{"name":"test-agent"}"#),
+    );
+    assert_eq!(status, 200);
+    let grant = control_body(&response);
+    let socket = PathBuf::from(grant["socket"].as_str().expect("socket"));
+    assert_ne!(socket, owner);
+    assert_eq!(
+        fs::metadata(&socket).expect("mode").permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(control_request(&socket, "GET", "/api/jobs", None).0, 200);
+    for path in ["/api/mux/state", "/api/agents", "/api/bootstrap", "/ws"] {
+        assert_eq!(control_request(&socket, "GET", path, None).0, 404);
+    }
+    let (status, _) = control_request(
+        &owner,
+        "POST",
+        &format!(
+            "/api/agents/{}/revoke",
+            grant["agentId"].as_str().expect("id")
+        ),
+        Some("{}"),
+    );
+    assert_eq!(status, 200);
+    assert!(!socket.exists());
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn agent_socket_rejects_another_uid_even_if_file_modes_are_loosened() {
+    use std::os::unix::fs::PermissionsExt;
+    if !nix::unistd::geteuid().is_root() {
+        eprintln!("skipping cross-UID subprocess: requires root; owner modes and route gates are tested separately");
+        return;
+    }
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let owner = sandbox.control_socket();
+    let (_, response) = control_request(
+        &owner,
+        "POST",
+        "/api/agents",
+        Some(r#"{"name":"peer-check"}"#),
+    );
+    let grant = control_body(&response);
+    let socket = PathBuf::from(grant["socket"].as_str().expect("socket"));
+    let home = sandbox.home.path().canonicalize().expect("canonical home");
+    let mut parent = socket.parent();
+    while let Some(path) = parent {
+        if !path.starts_with(&home) {
+            break;
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(0o711)).expect("test traversal");
+        parent = path.parent();
+    }
+    fs::set_permissions(&socket, fs::Permissions::from_mode(0o666)).expect("test socket mode");
+    let script="import socket,sys\ns=socket.socket(socket.AF_UNIX);s.settimeout(5)\ntry:s.connect(sys.argv[1])\nexcept PermissionError:sys.exit(4)\ntry:\n s.sendall(b'GET /api/jobs HTTP/1.1\\r\\nHost: localhost\\r\\n\\r\\n');data=s.recv(1024)\nexcept (ConnectionResetError,BrokenPipeError):data=b''\nsys.exit(1 if data else 0)";
+    let output = Command::new("python3")
+        .args(["-c", script])
+        .arg(&socket)
+        .uid(65534)
+        .gid(65534)
+        .output()
+        .expect("different uid");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "peer gate did not reject: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// control-api: `create_screen` for a screen that still has panes is refused
+/// like any invalid op, and leaves the screen as it was (workspace-model,
+/// Screen Creation).
+#[test]
+fn create_screen_over_a_screen_with_panes_is_rejected() {
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let socket = sandbox.control_socket();
+    let create = |pane: &str| {
+        control_request(
+            &socket,
+            "POST",
+            "/api/mux/op",
+            Some(
+                &serde_json::json!({
+                    "screenId": "s-api",
+                    "op": { "type": "create_screen", "screenId": "s-api", "newPaneId": pane },
+                })
+                .to_string(),
+            ),
+        )
+    };
+
+    let (status, response) = create("p-first");
+    assert_eq!(status, 200, "first create_screen: {response}");
+
+    let (status, response) = create("p-second");
+    assert_eq!(status, 400, "second create_screen: {response}");
+    let body = control_body(&response);
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already exists"),
+        "body: {body}",
+    );
+
+    let (status, response) = control_request(&socket, "GET", "/api/mux/screen/s-api", None);
+    assert_eq!(status, 200, "{response}");
+    let screen = control_body(&response);
+    let panes = screen["panes"].as_object().expect("panes");
+    assert!(
+        panes.contains_key("p-first") && !panes.contains_key("p-second"),
+        "panes: {panes:?}"
+    );
+}
+
+/// A leaking descendant can retain diagnostic descriptors after its command
+/// exits. A real child is needed to prove the inventory remains reachable.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherited_diagnostics_do_not_block_failed_command_inventory() {
+    let fixture = tempfile::tempdir().unwrap();
+    let marker = fixture.path().join("descendant.pid");
+    let child = Command::new("sh")
+        .args(["-c", "sleep 30 & echo $! > \"$1\"; exit 1", "sh"])
+        .arg(&marker)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(File::create(fixture.path().join("stdout")).unwrap())
+        .stderr(File::create(fixture.path().join("stderr")).unwrap())
+        .spawn()
+        .unwrap();
+    let group = child.id();
+    let started = Instant::now();
+    let status = isolated_command::wait(child);
+    let elapsed = started.elapsed();
+    let members = process_cleanup::live_group_members(group);
+    let descendant: u32 = fs::read_to_string(marker).unwrap().trim().parse().unwrap();
+    // End the deliberately leaked fixture before reporting its assertions.
+    killpg(Pid::from_raw(group.try_into().unwrap()), Signal::SIGKILL).unwrap();
+    process_cleanup::assert_group_exited(group);
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "leader wait inherited a descendant's output lifetime"
+    );
+    assert!(
+        members.contains(&descendant),
+        "the orphan remains visible to the cleanup inventory"
+    );
+}
+
+// ── cli: comments and reviews ───────────────────────────────────────────────
+
+/// A window of the sandbox's daemon: a native connection over its private
+/// client socket, past its welcome.
+struct Window(splitty_server::native::client::Client);
+
+impl Window {
+    async fn open(sandbox: &Sandbox) -> Self {
+        let info: splitty_core::daemon::DaemonInfo =
+            serde_json::from_value(sandbox.read_info().expect("a running daemon")).unwrap();
+        let client = splitty_server::native::client::Connector::default()
+            .local(&info)
+            .await
+            .expect("native window");
+        let mut window = Self(client);
+        window.message_of("mux.welcome").await;
+        window
+    }
+
+    /// The next message of type `kind`, past others.
+    async fn message_of(&mut self, kind: &str) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = self.0.recv().await.expect("open window");
+                if message.frame.kind != splitty_transport::wire::Kind::Text {
+                    continue;
+                }
+                let value: serde_json::Value = message.frame.decode().expect("JSON");
+                if value["type"] == kind {
+                    return value;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no {kind} in time"))
+    }
+
+    fn send(&self, value: serde_json::Value) {
+        self.0
+            .sender()
+            .data(
+                splitty_transport::wire::Kind::Text,
+                value.to_string().as_bytes(),
+            )
+            .expect("send");
+    }
+
+    /// Screen `s-cli` as this window sees it after everything it sent before.
+    async fn screen(&mut self) -> serde_json::Value {
+        self.send(serde_json::json!({"type": "mux.resync", "screenId": "s-cli"}));
+        self.message_of("mux.screen_snapshot").await["screen"].clone()
+    }
+
+    /// The text viewer titled `Plan`, the wait for its review and its record,
+    /// once a `splitty review` waits for it.
+    async fn waiting_review(&mut self) -> (String, String, serde_json::Value) {
+        loop {
+            let screen = self.screen().await;
+            let waiting =
+                screen["panes"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .find_map(|(id, pane)| {
+                        let viewer = &pane["viewer"];
+                        let wait = viewer["reviewWait"]["id"].as_str()?;
+                        (viewer["source"]["title"] == "Plan")
+                            .then(|| (id.clone(), wait.to_owned(), viewer.clone()))
+                    });
+            if let Some(waiting) = waiting {
+                return waiting;
+            }
+            self.message_of("mux.nudge").await;
+        }
+    }
+}
+
+/// `splitty` run in `dir` from the pane `p-agent` of screen `s-cli`, which
+/// finds the daemon through `SPLITTY_SOCK` only.
+fn pane_cli(sandbox: &Sandbox, dir: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
+    command
+        .current_dir(dir)
+        .env_clear()
+        .env("HOME", sandbox.home.path())
+        .env("SPLITTY_SOCK", sandbox.control_socket())
+        .env("SPLITTY_SCREEN_ID", "s-cli")
+        .env("SPLITTY_PANE_ID", "p-agent")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+/// `command` with `args`, run to its end off the runtime's thread.
+async fn run_cli(mut command: Command, args: &[&str]) -> Output {
+    command.args(args);
+    tokio::task::spawn_blocking(move || command.output().expect("splitty"))
+        .await
+        .expect("run")
+}
+
+/// `splitty review <args>` with `text` on standard input, left waiting.
+fn review(sandbox: &Sandbox, dir: &std::path::Path, args: &[&str], text: &str) -> Child {
+    use std::io::Write;
+    let mut child = pane_cli(sandbox, dir)
+        .arg("review")
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("splitty review");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(text.as_bytes())
+        .expect("text");
+    child
+}
+
+async fn finished(child: Child) -> Output {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || child.wait_with_output().expect("splitty review")),
+    )
+    .await
+    .expect("the command ends in time")
+    .expect("wait")
+}
+
+/// cli, Comments Command (Nothing sent yet, Read a sent review, Reply, Two
+/// viewers of one file), Review Command (A plan reviewed, The next revision
+/// of the plan, Approved, Outcome as JSON, The pane closed) and Review Hook
+/// For Claude Code (Changes requested, Outside Splitty): the
+/// real `splitty` in a pane's environment against a real daemon, answered by
+/// a native window. Smoke: only here are the CLI's discovery of the server,
+/// its output and its exit status visible; the endpoints are tested in
+/// process (`http::tests::annotations`, `http::tests::reviews`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_agent_reads_and_answers_a_review_through_the_cli() {
+    use serde_json::json;
+    let sandbox = Sandbox::new();
+    sandbox.start_daemon();
+    let (status, response) = control_request(
+        &sandbox.control_socket(),
+        "POST",
+        "/api/mux/op",
+        Some(
+            &json!({
+                "screenId": "s-cli",
+                "op": {"type": "create_screen", "screenId": "s-cli", "newPaneId": "p-agent"},
+            })
+            .to_string(),
+        ),
+    );
+    assert_eq!(status, 200, "create_screen: {response}");
+    let dir = sandbox.home.path().join("app");
+    fs::create_dir(&dir).expect("app");
+    let dir = dir.canonicalize().expect("canonical");
+    fs::write(
+        dir.join("PLAN.md"),
+        "# Plan\n\nOn failure, retry three times.\n\nThen cache the list.\n",
+    )
+    .expect("plan");
+    let plan = dir.join("PLAN.md").to_str().expect("UTF-8").to_owned();
+    let mut window = Window::open(&sandbox).await;
+
+    let opened = run_cli(pane_cli(&sandbox, &dir), &["open", "PLAN.md"]).await;
+    assert!(opened.status.success(), "{opened:?}");
+    let stdout = String::from_utf8(opened.stdout).expect("UTF-8");
+    let viewer = stdout.trim().rsplit(' ').next().expect("pane").to_owned();
+    assert!(viewer.starts_with("viewer-"), "{stdout}");
+
+    let listed = run_cli(pane_cli(&sandbox, &dir), &["comments", "PLAN.md"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        format!("No comments on {plan}.\n"),
+        "nothing sent yet"
+    );
+
+    let handed_over = json!([
+        {"id": "ann-0000000000000001", "kind": "comment", "body": "Why not five times?",
+         "target": {"view": "source", "quote": "retry three times", "prefix": "On failure, ",
+                    "suffix": ".", "startLine": 3, "endLine": 3}},
+        {"id": "ann-0000000000000002", "kind": "change", "replacement": "compute it on demand",
+         "target": {"view": "source", "quote": "cache the list", "prefix": "Then ",
+                    "suffix": ".", "startLine": 5, "endLine": 5}},
+    ]);
+    window.send(json!({"type": "mux.op", "screenId": "s-cli", "op": {
+        "type": "put_annotations", "paneId": viewer, "annotations": handed_over,
+    }}));
+    // The review held both as they were put.
+    window.send(json!({"type": "mux.op", "screenId": "s-cli", "op": {
+        "type": "mark_sent", "paneId": viewer, "entries": handed_over,
+    }}));
+    let annotations = window.screen().await["panes"][&viewer]["viewer"]["annotations"].clone();
+    assert_eq!(annotations[1]["sent"], true, "{annotations}");
+
+    let listed = run_cli(pane_cli(&sandbox, &dir), &["comments", "PLAN.md"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    let listing = String::from_utf8(listed.stdout).expect("UTF-8");
+    for part in [
+        "# Review of PLAN.md".to_owned(),
+        format!("Document: {plan}\nViewer pane: {viewer}"),
+        "## #1 Line 3, comment\n> retry three times\n\nWhy not five times?".to_owned(),
+        "## #2 Line 5, suggested change\n> cache the list\n\nReplace with:\n```\ncompute it on demand\n```"
+            .to_owned(),
+    ] {
+        assert!(listing.contains(&part), "{part}\n---\n{listing}");
+    }
+
+    let replied = run_cli(
+        pane_cli(&sandbox, &dir),
+        &[
+            "comments",
+            "reply",
+            "PLAN.md",
+            "2",
+            "Switched to on-demand computation.",
+        ],
+    )
+    .await;
+    assert!(replied.status.success(), "{replied:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&replied.stdout),
+        format!("Replied to #2 in {plan}\n")
+    );
+    let thread =
+        window.screen().await["panes"][&viewer]["viewer"]["annotations"][1]["replies"].clone();
+    assert_eq!(thread[0]["author"], "agent", "{thread}");
+    assert_eq!(thread[0]["body"], "Switched to on-demand computation.");
+    assert_eq!(thread[0]["from"]["paneId"], "p-agent", "{thread}");
+    let listed = run_cli(pane_cli(&sandbox, &dir), &["comments", &viewer, "--json"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    let answer: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    assert_eq!(
+        answer["documents"][0]["annotations"][1]["replies"][0]["body"],
+        "Switched to on-demand computation.",
+        "{answer}"
+    );
+
+    window.send(json!({"type": "mux.op", "screenId": "s-cli", "op": {
+        "type": "open_viewer", "paneId": "p-agent", "newPaneId": "viewer-00000000000000aa",
+        "placement": "tab", "source": {"kind": "file", "path": plan},
+    }}));
+    window.screen().await;
+    let refused = run_cli(
+        pane_cli(&sandbox, &dir),
+        &["comments", "reply", "PLAN.md", "1", "Which one?"],
+    )
+    .await;
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        error.contains(&viewer) && error.contains("viewer-00000000000000aa"),
+        "two viewers of one file: {error}"
+    );
+
+    let first = "1. Retry three times.\n2. Cache the list.\n";
+    let changes = "# Review of Plan\n\nVerdict: changes requested\n\n## #1 Line 1, comment\n> Retry three times.\n\nWhy not five times?\n";
+    let child = review(&sandbox, &dir, &["--text", "--title", "Plan"], first);
+    let (plan_pane, wait, record) = window.waiting_review().await;
+    assert_eq!(record["source"]["kind"], "text", "{record}");
+    let mut revision = record["revision"].as_u64().expect("revision");
+    window.send(
+        json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": plan_pane,
+               "waitId": wait, "outcome": "changes_requested", "review": changes}),
+    );
+    assert_eq!(
+        window.message_of("viewer.review_answered").await["accepted"],
+        true
+    );
+    let output = finished(child).await;
+    // Only the binary's exit path shows the status of a request for changes.
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), changes);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&plan_pane),
+        "{output:?}"
+    );
+
+    let revised = "1. Retry five times with backoff.\n2. Cache the list.\n";
+    for (json, printed) in [(false, ""), (true, "{\"outcome\":\"approved\"}\n")] {
+        let args: &[&str] = if json {
+            &["--text", "--title", "Plan", "--json"]
+        } else {
+            &["--text", "--title", "Plan"]
+        };
+        let child = review(&sandbox, &dir, args, revised);
+        let (again, wait, record) = window.waiting_review().await;
+        assert_eq!(again, plan_pane, "the next revision goes to the same pane");
+        let shown = record["revision"].as_u64().expect("revision");
+        assert!(shown > revision, "the pane shows the new text: {record}");
+        revision = shown;
+        window.send(
+            json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": again,
+                   "waitId": wait, "outcome": "approved"}),
+        );
+        assert_eq!(
+            window.message_of("viewer.review_answered").await["accepted"],
+            true
+        );
+        let output = finished(child).await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), printed);
+    }
+
+    // Claude Code's hook: the plan of its event goes to the same pane, and a
+    // request for changes is a denial with the review, with status 0.
+    let event = json!({
+        "hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode",
+        "cwd": dir, "tool_input": {"plan": revised},
+    })
+    .to_string();
+    let child = review(&sandbox, &dir, &["--hook", "claude-code"], &event);
+    let (again, wait, record) = window.waiting_review().await;
+    assert_eq!(again, plan_pane, "{record}");
+    window.send(
+        json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": again,
+               "waitId": wait, "outcome": "changes_requested", "review": changes}),
+    );
+    assert_eq!(
+        window.message_of("viewer.review_answered").await["accepted"],
+        true
+    );
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let decision: serde_json::Value = serde_json::from_slice(&output.stdout).expect("decision");
+    assert_eq!(
+        decision,
+        json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+               "decision": {"behavior": "deny", "message": changes}}})
+    );
+    // Outside a Splitty terminal the hook decides nothing, and only the
+    // binary's exit path shows that it still exits 0.
+    let mut outside = pane_cli(&sandbox, &dir);
+    outside.env_remove("SPLITTY_PANE_ID");
+    let mut child = outside
+        .args(["review", "--hook", "claude-code"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("splitty review");
+    {
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(event.as_bytes())
+            .expect("event");
+    }
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Claude Code asks the user itself"),
+        "{output:?}"
+    );
+
+    let child = review(&sandbox, &dir, &["--text", "--title", "Plan"], revised);
+    let (pane, _, _) = window.waiting_review().await;
+    window.send(
+        json!({"type": "mux.op", "screenId": "s-cli", "op": {"type": "close_pane", "paneId": pane}}),
+    );
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("closed without an answer"),
+        "{output:?}"
+    );
+}
+
+/// Smoke: process exit, filesystem inventory and executable launch probes require
+/// the binary; router tests cannot show that a CLI entry point starts no service.
+#[test]
+fn browser_command_stubs_exit_without_workspace_sockets_credentials_or_ssh() {
+    use std::os::unix::fs::PermissionsExt;
+    for args in [
+        vec!["serve", "--addr", "127.0.0.1:9800", "--open"],
+        vec!["serve", "--desktop-stdio"],
+        vec!["connect", "me@192.0.2.10", "--json"],
+        vec!["issue-bootstrap"],
+    ] {
+        let sandbox = Sandbox::new();
+        let bin = sandbox.home.path().join("probes");
+        fs::create_dir(&bin).unwrap();
+        let called = sandbox.home.path().join("called");
+        for program in ["ssh", "xdg-open", "open", "wslview", "powershell.exe"] {
+            let path = bin.join(program);
+            fs::write(
+                &path,
+                format!("#!/bin/sh\n: > '{}'\nexit 99\n", called.display()),
+            )
+            .unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
+        sandbox.isolate(&mut command);
+        command
+            .args(&args)
+            .env("PATH", &bin)
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().expect("stub");
+        let group = Pid::from_raw(child.id().try_into().unwrap());
+        let output = child.wait_with_output().expect("stub exit");
+        assert_eq!(
+            killpg(group, None),
+            Err(nix::errno::Errno::ESRCH),
+            "stub left a process that could retain a listener"
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{}",
+            sandbox.describe(&output)
+        );
+        let message = if args.contains(&"--json") {
+            assert_eq!(stdout(&output).lines().count(), 1);
+            assert!(output.stderr.is_empty());
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["code"], "removed");
+            value["error"].as_str().unwrap().to_owned()
+        } else {
+            assert!(output.stdout.is_empty());
+            assert_eq!(stderr(&output).lines().count(), 1);
+            stderr(&output)
+        };
+        for hint in [
+            "splitty daemon start",
+            "desktop app",
+            "splitty attach",
+            "ssh -t <host> splitty attach",
+        ] {
+            assert!(message.contains(hint), "{message}");
+        }
+        if args.contains(&"--desktop-stdio") {
+            assert!(message.contains("desktop-backend --transport native-v1 --backend embedded"));
+        }
+        assert!(!called.exists(), "stub launched an external program");
+        assert!(
+            !sandbox.config_dir().exists(),
+            "stub created configuration or workspace"
+        );
+        assert!(
+            !sandbox.runtime_dir.exists(),
+            "stub created socket directory"
+        );
+        assert!(!sandbox.run_dir().exists(), "stub created daemon endpoints");
+    }
 }

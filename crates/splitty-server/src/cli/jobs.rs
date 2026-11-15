@@ -1,15 +1,11 @@
 //! User-facing job commands. CLI invocations are clients, never job supervisors.
-use super::{CliError, ServerInfo, Transport};
+use super::{CliError, ServerInfo};
 use clap::{Args, Subcommand};
 use serde_json::{json, Value};
 use splitty_core::ids::JobId;
 
 #[derive(Args, Clone)]
 pub struct Common {
-    #[arg(long, global = true)]
-    addr: Option<String>,
-    #[arg(long, global = true)]
-    token: Option<String>,
     #[arg(long, global = true)]
     json: bool,
 }
@@ -275,7 +271,7 @@ async fn execute(command: Commands) -> Result<(Value, i32, Option<String>), Fail
             return Err(usage("--screen/--pane require tab or split placement"));
         }
     }
-    let server = super::discover(common.addr.as_deref(), common.token.as_deref())?;
+    let server = super::discover()?;
     execute_at(command, server).await
 }
 
@@ -284,9 +280,7 @@ async fn execute_at(
     server: ServerInfo,
 ) -> Result<(Value, i32, Option<String>), Failure> {
     let common = command.common().clone();
-    if command.is_admin()
-        && (server.source == "agent" || matches!(server.transport, Transport::Tcp { .. }))
-    {
+    if command.is_admin() && server.source == "agent" {
         return Err(usage(
             "agent administration requires the owner control socket",
         ));
@@ -767,15 +761,11 @@ mod tests {
                 },
             ),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let addr = listener.local_addr().expect("address");
+        let directory = tempfile::tempdir().expect("fixture");
+        let socket = directory.path().join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("listener");
         let server = ServerInfo {
-            transport: Transport::Tcp {
-                addr: addr.to_string(),
-                token: "test".into(),
-            },
+            transport: crate::cli::Transport::LocalSocket(socket.to_string_lossy().into_owned()),
             source: "test",
         };
         let task = tokio::spawn(async move {
@@ -802,15 +792,11 @@ mod tests {
                 },
             ),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let addr = listener.local_addr().expect("address");
+        let directory = tempfile::tempdir().expect("fixture");
+        let socket = directory.path().join("api.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("listener");
         let server = ServerInfo {
-            transport: Transport::Tcp {
-                addr: addr.to_string(),
-                token: "test".into(),
-            },
+            transport: crate::cli::Transport::LocalSocket(socket.to_string_lossy().into_owned()),
             source: "test",
         };
         let task = tokio::spawn(async move {

@@ -1,34 +1,21 @@
-//! `splitty connect` and the remote screen hub against a real OpenSSH server.
+//! The remote screen hub against a real OpenSSH server.
 //!
-//! Why a smoke test: only OpenSSH shows what the forward arguments,
-//! `GatewayPorts`, `ExitOnForwardFailure` and a killed connection really do,
-//! and only the binary shows what `connect` prints. The supervisor's rules
-//! (same daemon, restarted daemon, backoff, giving up) are covered in-process
-//! in `splitty_remote::tunnel::supervisor`. Likewise only a real SSH
-//! connection and a real host daemon show the hub's relay end to end, and
-//! only real daemons that `update=1` stops and starts on the host; its
-//! messages, error codes, relay rules and when it updates are covered
-//! in-process with a scripted host (`splitty_server::http`'s tests). The
-//! hub's port forwards are covered in-process the same way; only real `ssh`
-//! shows that their arguments forward on `127.0.0.1` alone, that the
-//! configuration's forwards are not cleared at their expense, and that a
-//! killed one comes back. Reverse forwards likewise: only real `ssh -R` and
-//! `sshd` show that the remote end is an owner-only Unix socket, that the
-//! host's `GatewayPorts yes` opens nothing beyond loopback, and that the
-//! host's relay reaches a local service and ends with its connection.
+//! Smoke tests exercise the binary's owner backend, installed host daemon,
+//! real SSH forwarding, reconnects, askpass and session preservation. Scripted
+//! in-process connectors cannot establish these process and network outcomes.
 //!
 //! The SSH lab gives each test a host of its own without root:
 //! - an unprivileged user and network namespace, so the host has its own
-//!   loopback independently of the local browser gateway;
+//!   loopback independently of the local hub;
 //! - `sshd -i`, one per connection, started inside that namespace by the
 //!   client's `ProxyCommand` through `nsenter`, with throwaway keys;
 //! - a `ForceCommand` that gives the host its own `HOME` and XDG directories and
 //!   runs the command through `sh -c`, as a login shell would;
-//! - a wrapper `ssh` first in `PATH` that adds `-F <lab config>`, so `connect`
+//! - a wrapper `ssh` first in `PATH` that adds `-F <lab config>`, so the hub
 //!   runs the plain `ssh` it always runs. The lab config sets `GatewayPorts yes`
 //!   (and so does the host's `sshd_config`), and names two hosts that fail: one
 //!   nothing listens for, and one whose host key is unknown;
-//! - a configuration directory of the client's own, so `connect` records its
+//! - a configuration directory of the client's own, so the hub records its
 //!   recent hosts there and never in the user's;
 //! - servers the test starts on the host's loopback with `nsenter`, which only
 //!   a forward reaches from this side.
@@ -50,17 +37,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 use tempfile::TempDir;
 
-#[path = "support/command.rs"]
-mod isolated_command;
-#[path = "support/processes.rs"]
-mod process_cleanup;
 #[path = "support/listeners.rs"]
 mod process_inventory;
 
@@ -254,28 +237,6 @@ impl Lab {
                 which("ssh").expect("ssh").display()
             ),
         );
-        // `connect --no-open` must not open anything; these would record it.
-        for opener in [
-            "xdg-open",
-            "gio",
-            "gnome-open",
-            "kde-open",
-            "wslview",
-            "open",
-        ] {
-            write_executable(
-                &d.join("client-bin").join(opener),
-                &format!("#!/bin/sh\necho \"$@\" >> {d_str}/opened\n"),
-            );
-        }
-
-        // Current open-rs delegates WSL URLs through an environment variable
-        // to PowerShell before trying Unix openers. Keep the smoke private.
-        write_executable(
-            &d.join("client-bin/powershell.exe"),
-            &format!("#!/bin/sh\nprintf '%s\\n' \"$OPEN_RS_TARGET\" >> {d_str}/opened\n"),
-        );
-
         let mut holder = Command::new("unshare")
             .args([
                 "--user",
@@ -470,204 +431,6 @@ server.serve_forever()
         }
     }
 
-    /// A dev service outside pane discovery, in the existing host namespace.
-    /// Python stdlib only: HTTP, application auth, and a bounded RFC6455 exchange
-    /// carrying an HMR-style update (not a test of Vite's module replacement).
-    /// Optional TLS needs Python ssl and OpenSSL >= 1.1.1 (`req -addext`). Missing
-    /// OpenSSL is reported as TLS UNRUN; a present but broken tool fails the test.
-    fn marker_on_host(&self, python: &Path, marker: &str, openssl: Option<&Path>) -> HostServer {
-        let directory = tempfile::Builder::new()
-            .prefix("browser-service-")
-            .tempdir_in(self.dir.path())
-            .expect("browser service directory");
-        if let Some(openssl) = openssl {
-            let generated = Command::new(openssl)
-                .args([
-                    "req",
-                    "-x509",
-                    "-newkey",
-                    "rsa:2048",
-                    "-nodes",
-                    "-days",
-                    "1",
-                    "-subj",
-                    "/CN=localhost",
-                    "-addext",
-                    "subjectAltName=DNS:localhost",
-                    "-keyout",
-                    "key.pem",
-                    "-out",
-                    "cert.pem",
-                ])
-                .current_dir(directory.path())
-                .output()
-                .expect("TLS fixture: openssl req");
-            assert!(
-                generated.status.success(),
-                "TLS fixture: certificate generation failed"
-            );
-        }
-        let mut child = Command::new("nsenter")
-            .arg("--target")
-            .arg(self.holder.id().to_string())
-            .args(["--user", "--net", "--mount", "--root", "--preserve-credentials"])
-            .arg(format!("--wdns={}", directory.path().display()))
-            .arg(python)
-            .args(["-I", "-u", "-c"])
-            .arg(
-                r#"
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import base64, hashlib, json, struct, sys
-marker = sys.argv[1]
-body = marker.encode('ascii')
-class Handler(BaseHTTPRequestHandler):
-    protocol_version = 'HTTP/1.1'
-    def setup(self):
-        self.request.settimeout(5)
-        super().setup()
-    def clean(self):
-        return ('splitty-session' not in self.headers.get('Cookie', '')
-                and self.headers.get('Authorization', '') in ('', 'Bearer app-' + marker)
-                and self.headers.get('Host', '').startswith('localhost:'))
-    def reply(self, status, data):
-        self.send_response(status)
-        self.send_header('Content-Type', 'text/plain; charset=utf-8')
-        self.send_header('Content-Length', str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-    def do_POST(self):
-        if not self.clean():
-            self.send_error(403)
-            return
-        if self.path != '/api/echo?mode=raw%2Fbytes':
-            self.send_error(404)
-            return
-        if self.headers.get('Authorization') != 'Bearer app-' + marker:
-            self.reply(401, b'app-auth-required')
-            return
-        length = int(self.headers.get('Content-Length', '0'))
-        if not 0 < length <= 4096:
-            self.send_error(400)
-            return
-        self.reply(200, body + b'\n' + self.rfile.read(length))
-    def frame(self, opcode, data):
-        head = bytes([0x80 | opcode])
-        head += bytes([len(data)]) if len(data) < 126 else b'\x7e' + struct.pack('!H', len(data))
-        self.wfile.write(head + data)
-        self.wfile.flush()
-    def receive(self):
-        head = self.rfile.read(2)
-        assert len(head) == 2 and head[0] & 0xf0 == 0x80 and head[1] & 0x80
-        length = head[1] & 0x7f
-        if length == 126:
-            length = struct.unpack('!H', self.rfile.read(2))[0]
-        else:
-            assert length < 126
-        assert length <= 4096
-        mask = self.rfile.read(4)
-        data = self.rfile.read(length)
-        assert len(mask) == 4 and len(data) == length
-        return head[0] & 0x0f, bytes(value ^ mask[i % 4] for i, value in enumerate(data))
-    def do_GET(self):
-        if not self.clean():
-            self.send_error(403)
-            return
-        if self.path == '/':
-            self.reply(200, body)
-            return
-        if self.path == '/favicon.ico':
-            self.reply(204, b'')
-            return
-        if (self.path != '/hmr?mode=raw%2Fupdate'
-                or self.headers.get('Upgrade', '').lower() != 'websocket'
-                or self.headers.get('Sec-WebSocket-Version') != '13'
-                or self.headers.get('Sec-WebSocket-Protocol') != 'splitty-hmr'
-                or self.headers.get('Origin') != 'http://' + self.headers.get('Host', '')):
-            self.send_error(400)
-            return
-        key = self.headers['Sec-WebSocket-Key']
-        accept = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-        self.send_response(101)
-        self.send_header('Upgrade', 'websocket')
-        self.send_header('Connection', 'Upgrade')
-        self.send_header('Sec-WebSocket-Accept', accept)
-        self.send_header('Sec-WebSocket-Protocol', 'splitty-hmr')
-        self.end_headers()
-        self.frame(1, json.dumps({'type': 'connected', 'marker': marker}).encode())
-        assert self.receive() == (1, b'change:src/App.tsx')
-        self.frame(1, json.dumps({'type': 'update', 'path': '/src/App.tsx', 'marker': marker}).encode())
-        opcode, payload = self.receive()
-        assert opcode == 2 and payload == bytes(range(256))
-        self.frame(2, payload)
-        opcode, payload = self.receive()
-        assert opcode == 8 and payload == struct.pack('!H', 1000) + b'checked'
-        self.frame(8, payload)
-        self.close_connection = True
-    def log_message(self, *args):
-        pass
-server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
-if sys.argv[2] == 'tls':
-    import ssl
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain('cert.pem', 'key.pem')
-    server.socket = context.wrap_socket(server.socket, server_side=True)
-print('SPLITTY_PORT=' + str(server.server_port), flush=True)
-server.serve_forever()
-"#,
-            )
-            .arg(marker)
-            .arg(if openssl.is_some() { "tls" } else { "plain" })
-            .current_dir(directory.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(fs::File::create(directory.path().join("marker.stderr")).unwrap()))
-            .spawn()
-            .expect("browser BLOCKED: cannot spawn namespace marker service");
-        let lines = read_lines(child.stdout.take().expect("marker service stdout"));
-        let mut service = HostServer {
-            child,
-            port: 0,
-            _directory: directory,
-        };
-        service.port = lines
-            .recv_timeout(WAIT)
-            .unwrap_or_else(|error| {
-                panic!(
-                    "browser marker service startup: {error}; {}",
-                    fs::read_to_string(service._directory.path().join("marker.stderr"))
-                        .unwrap_or_default()
-                )
-            })
-            .strip_prefix("SPLITTY_PORT=")
-            .and_then(|port| port.parse().ok())
-            .expect("browser BLOCKED: marker service port");
-        assert!(
-            service.port >= 1024 && service.port != 44877,
-            "browser BLOCKED: reserved service port"
-        );
-        service
-    }
-
-    /// `splitty connect` with the lab's `ssh`, its output line by line.
-    fn connect(&self, extra: &[&str]) -> Connect {
-        self.connect_with(extra, &[])
-    }
-
-    fn connect_with(&self, extra: &[&str], env: &[(&str, &Path)]) -> Connect {
-        let mut child = self
-            .client(&["connect", HOST])
-            .args(extra)
-            .envs(env.iter().map(|(key, value)| (*key, *value)))
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("splitty connect");
-        let lines = read_lines(child.stdout.take().expect("stdout"));
-        Connect { child, lines }
-    }
-
     /// Where the lab's host keeps the installed server of this version.
     fn installed_server(&self) -> PathBuf {
         self.dir.path().join(format!(
@@ -689,16 +452,18 @@ server.serve_forever()
         path
     }
 
-    fn opened(&self) -> Option<String> {
-        fs::read_to_string(self.dir.path().join("opened")).ok()
-    }
-
     /// The `splitty` under test on the client, with the lab's `ssh` and its
     /// own configuration directory.
     fn client(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
+        let mut command = self.client_command(env!("CARGO_BIN_EXE_splitty"));
+        command.args(args);
         command
-            .args(args)
+    }
+
+    /// `program` on the client, in the environment of [`Lab::client`].
+    fn client_command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+        let mut command = Command::new(program);
+        command
             // A developer's own payload must not leak into the test.
             .env_remove("SPLITTY_REMOTE_PAYLOAD")
             .env("XDG_CONFIG_HOME", self.dir.path().join("client-config"))
@@ -949,143 +714,6 @@ fn read_lines(stdout: ChildStdout) -> mpsc::Receiver<String> {
     rx
 }
 
-/// A running `splitty connect`.
-struct Connect {
-    child: Child,
-    lines: mpsc::Receiver<String>,
-}
-
-impl Connect {
-    /// The lines up to and including the first one that starts with `prefix`.
-    fn until(&self, prefix: &str) -> Vec<String> {
-        let mut seen = Vec::new();
-        loop {
-            match self.lines.recv_timeout(WAIT) {
-                Ok(line) => {
-                    let done = line.starts_with(prefix);
-                    seen.push(line);
-                    if done {
-                        return seen;
-                    }
-                }
-                Err(_) => panic!(
-                    "no line starting with {prefix:?}; stdout so far:\n{}",
-                    seen.join("\n")
-                ),
-            }
-        }
-    }
-
-    /// The next line.
-    fn next(&self) -> String {
-        self.lines
-            .recv_timeout(WAIT)
-            .unwrap_or_else(|_| panic!("no further line"))
-    }
-
-    fn url(lines: &[String]) -> String {
-        lines
-            .iter()
-            .find_map(|line| line.strip_prefix("SPLITTY_URL="))
-            .unwrap_or_else(|| panic!("no SPLITTY_URL in:\n{}", lines.join("\n")))
-            .to_owned()
-    }
-
-    /// The `ssh` processes this `connect` started.
-    fn ssh_children(&self) -> Vec<i32> {
-        ssh_children_of(self.child.id())
-    }
-
-    fn assert_native_gateway(&self, port: u16) {
-        assert_eq!(
-            process_inventory::tcp_listeners(self.child.id()),
-            [std::net::SocketAddr::from(([127, 0, 0, 1], port))]
-        );
-        let children = self.ssh_children();
-        assert!(
-            !children.is_empty(),
-            "the connected gateway owns an SSH bridge"
-        );
-        for pid in children {
-            assert!(
-                process_inventory::tcp_listeners(pid.try_into().unwrap()).is_empty(),
-                "native SSH child {pid} opened a TCP listener"
-            );
-        }
-    }
-
-    fn tunnel_pid(&self) -> i32 {
-        let tunnels: Vec<_> = self
-            .ssh_children()
-            .into_iter()
-            .filter(|pid| {
-                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|args| {
-                    args.windows(b"remote-bridge".len())
-                        .any(|part| part == b"remote-bridge")
-                })
-            })
-            .collect();
-        assert_eq!(
-            tunnels.len(),
-            1,
-            "exactly one ssh should hold the tunnel: {tunnels:?}"
-        );
-        tunnels[0]
-    }
-
-    fn kill_tunnel(&self) {
-        kill(Pid::from_raw(self.tunnel_pid()), Signal::SIGKILL).expect("kill ssh");
-    }
-
-    fn kill_forward(&self, remote: u16) -> i32 {
-        let suffix = format!(":localhost:{remote}");
-        let workers: Vec<_> = self
-            .ssh_children()
-            .into_iter()
-            .filter(|pid| {
-                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|args| {
-                    args.split(|byte| *byte == 0)
-                        .any(|arg| arg.ends_with(suffix.as_bytes()))
-                })
-            })
-            .collect();
-        assert_eq!(workers.len(), 1, "one owned forward worker for {remote}");
-        kill(Pid::from_raw(workers[0]), Signal::SIGKILL).unwrap();
-        workers[0]
-    }
-
-    /// SIGTERM, the exit status and every line printed after the ones read.
-    fn terminate(mut self) -> (std::process::ExitStatus, String) {
-        kill(Pid::from_raw(self.child.id() as i32), Signal::SIGTERM).expect("SIGTERM");
-        let status = self.child.wait().expect("wait");
-        // Until the reader has seen the end of the output.
-        let mut rest = Vec::new();
-        while let Ok(line) = self.lines.recv_timeout(WAIT) {
-            rest.push(line);
-        }
-        (status, rest.join("\n"))
-    }
-}
-
-impl Drop for Connect {
-    /// SIGTERM first, so `connect` ends its tunnel's `ssh`; a SIGKILL alone
-    /// would leave that `ssh` running, holding a connection into the lab.
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
-            return; // an already-reaped numeric PID is no longer owned
-        }
-        let _ = kill(Pid::from_raw(self.child.id() as i32), Signal::SIGTERM);
-        for _ in 0..50 {
-            if matches!(self.child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 /// A minimal HTTP/1.1 exchange with the tunnel's local end.
 fn http(
     port: u16,
@@ -1120,40 +748,6 @@ fn http(
     (status, response)
 }
 
-/// Exchange the URL's bootstrap code for a session cookie.
-fn sign_in(url: &str) -> (u16, String) {
-    let port: u16 = url
-        .strip_prefix("http://127.0.0.1:")
-        .and_then(|rest| rest.split('/').next())
-        .and_then(|port| port.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected URL {url}"));
-    let code = url
-        .split_once("bootstrap=")
-        .and_then(|(_, rest)| rest.split('&').next())
-        .expect("bootstrap code");
-    let (status, response) = http(
-        port,
-        "POST",
-        "/api/session",
-        None,
-        Some(&format!("{{\"bootstrap\":\"{code}\"}}")),
-    );
-    assert_eq!(
-        status, 200,
-        "bootstrap exchange through the tunnel:\n{response}"
-    );
-    let cookie = response
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("set-cookie: ")
-                .or_else(|| line.strip_prefix("Set-Cookie: "))
-        })
-        .and_then(|value| value.split(';').next())
-        .unwrap_or_else(|| panic!("no session cookie in:\n{response}"))
-        .to_owned();
-    (port, cookie)
-}
-
 /// Every listener on `port` in this network namespace, as `/proc/net/tcp`
 /// addresses (`0100007F` is 127.0.0.1, `00000000` every interface).
 fn listeners(port: u16) -> Vec<String> {
@@ -1168,360 +762,6 @@ fn listeners(port: u16) -> Vec<String> {
             (local.ends_with(&suffix) && *state == "0A").then(|| local.to_string())
         })
         .collect()
-}
-
-#[test]
-fn connect_reconnects_and_hands_over_sessions_through_real_ssh() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    lab.start_daemon();
-
-    let connect = lab.connect(&["--no-open"]);
-    let lines = connect.until("Browser gateway active.");
-    let url = Connect::url(&lines);
-    assert!(
-        url.ends_with(&format!("&host={HOST}")),
-        "the URL names the host: {url}"
-    );
-
-    let port = reqwest::Url::parse(&url).unwrap().port().unwrap();
-    // GatewayPorts yes in the client's config, yet only the owned gateway listens.
-    assert_eq!(
-        listeners(port),
-        [format!("0100007F:{port:04X}")],
-        "the forward must listen on 127.0.0.1 only"
-    );
-
-    connect.assert_native_gateway(port);
-    // Capture the supervised bridge before the first API call opens its own
-    // persistent shared carrier. Both are legitimate remote-bridge processes;
-    // only the supervised one drives the reconnect events asserted below.
-    let tunnel = connect.tunnel_pid();
-    let (port, cookie) = sign_in(&url);
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(status, 200, "{response}");
-
-    // The ssh process dies; the same daemon is still there.
-    assert!(connect.ssh_children().contains(&tunnel));
-    kill(Pid::from_raw(tunnel), Signal::SIGKILL).expect("kill supervised ssh");
-    let lines = connect.until("SSH tunnel restored.");
-    assert!(
-        !lines.iter().any(|line| line.starts_with("SPLITTY_URL=")),
-        "no new URL for the same daemon:\n{}",
-        lines.join("\n")
-    );
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(
-        status, 200,
-        "the browser's session works again:\n{response}"
-    );
-
-    connect.assert_native_gateway(port);
-
-    // A new host incarnation uses the same local gateway/cookie.
-    kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill host daemon");
-    let lines = connect.until("SSH tunnel restored.");
-    assert!(
-        !lines.iter().any(|line| line.starts_with("SPLITTY_URL=")),
-        "{lines:?}"
-    );
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(status, 200, "{response}");
-
-    connect.assert_native_gateway(port);
-    assert_eq!(lab.opened(), None, "--no-open must not open a browser");
-    let group = connect.child.id();
-    assert!(process_cleanup::live_group_members(group).contains(&group));
-    let tunnels = connect.ssh_children();
-    let (status, rest) = connect.terminate();
-    assert!(
-        status.success(),
-        "SIGTERM ends connect with status 0: {status}\n{rest}"
-    );
-    assert!(rest.contains("Closing tunnel..."), "{rest}");
-    process_cleanup::assert_group_exited(group);
-    for pid in tunnels {
-        assert!(
-            !Path::new(&format!("/proc/{pid}")).exists()
-                || fs::read_to_string(format!("/proc/{pid}/stat"))
-                    .is_ok_and(|stat| stat.contains(") Z ")),
-            "the tunnel's ssh process must end with connect"
-        );
-    }
-}
-
-#[test]
-fn a_host_without_splitty_is_reported() {
-    let Some(lab) = lab() else { return };
-    let out = lab
-        .client(&["connect", HOST, "--no-open"])
-        .stdin(Stdio::null())
-        .output()
-        .expect("splitty connect");
-    assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains(&format!("splitty is not installed on {HOST}")),
-        "{}",
-        describe(&out)
-    );
-    assert!(
-        !lab.recent_hosts().exists(),
-        "a failed connect records nothing"
-    );
-}
-
-/// Every line of `connect --json`'s standard output, each a JSON object with
-/// an `event`.
-fn json_events(lines: &[String]) -> Vec<serde_json::Value> {
-    lines
-        .iter()
-        .map(|line| {
-            let event: serde_json::Value =
-                serde_json::from_str(line).unwrap_or_else(|e| panic!("not JSON ({e}): {line:?}"));
-            assert!(event["event"].is_string(), "no event: {line}");
-            event
-        })
-        .collect()
-}
-
-/// `cli`, Remote Connect Machine-Readable Output (Connected, Interrupted) and
-/// Remote Connect Recent Hosts (Target recorded), with `remote-hosts --json`.
-#[test]
-fn connect_json_reports_progress_the_session_and_its_end() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    let connect = lab.connect(&["--no-open", "--json"]);
-    let events = json_events(&connect.until(r#"{"event":"ready""#));
-
-    let steps: Vec<&str> = events
-        .iter()
-        .filter(|event| event["event"] == "progress")
-        .map(|event| event["step"].as_str().expect("a step"))
-        .collect();
-    assert_eq!(steps, ["daemon", "started", "tunnel"], "{events:?}");
-    let ready = events.last().expect("ready");
-    let port = ready["port"].as_u64().expect("port");
-    let url = ready["url"].as_str().expect("url");
-    let code = url
-        .strip_prefix(&format!("http://127.0.0.1:{port}/?bootstrap="))
-        .and_then(|rest| rest.strip_suffix(&format!("&host={HOST}")))
-        .unwrap_or_else(|| panic!("unexpected URL {url}"));
-    assert!(
-        code.len() == 32 && code.bytes().all(|b| b.is_ascii_hexdigit()),
-        "{url}"
-    );
-    let (port, cookie) = sign_in(url);
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(status, 200, "{response}");
-
-    // Recorded once the URL was obtained, before it was printed.
-    let recent: serde_json::Value =
-        serde_json::from_slice(&fs::read(lab.recent_hosts()).expect("recent hosts")).expect("JSON");
-    assert_eq!(recent["version"], 1, "{recent}");
-    assert_eq!(recent["hosts"][0]["target"], HOST, "{recent}");
-    let mode = fs::metadata(lab.recent_hosts())
-        .expect("mode")
-        .permissions()
-        .mode();
-    assert_eq!(mode & 0o777, 0o600);
-
-    // The host picker's list: the recent host, then `~/.ssh/config`.
-    let home = lab.dir.path().join("client-home");
-    fs::create_dir_all(home.join(".ssh")).expect(".ssh");
-    fs::write(
-        home.join(".ssh/config"),
-        format!("Host api.devpod {HOST}\n"),
-    )
-    .expect("config");
-    let hosts = lab
-        .client(&["remote-hosts", "--json"])
-        .env("HOME", &home)
-        .output()
-        .expect("remote-hosts");
-    assert!(hosts.status.success(), "{}", describe(&hosts));
-    let hosts: serde_json::Value = serde_json::from_slice(&hosts.stdout).expect("one array");
-    assert_eq!(
-        hosts,
-        serde_json::json!([
-            {"target": HOST, "source": "recent", "lastConnected": recent["hosts"][0]["lastConnected"]},
-            {"target": "api.devpod", "source": "ssh-config"},
-        ])
-    );
-
-    let (status, rest) = connect.terminate();
-    assert!(
-        status.success(),
-        "SIGTERM ends with status 0: {status}\n{rest}"
-    );
-    let rest: Vec<String> = rest.lines().map(str::to_owned).collect();
-    let after = json_events(&rest);
-    assert_eq!(
-        after.last(),
-        Some(&serde_json::json!({"event": "closed"})),
-        "{rest:?}"
-    );
-}
-
-#[test]
-fn connect_opens_only_its_locally_issued_launch_url_by_default() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    let connect = lab.connect(&["--json"]);
-    let events = json_events(&connect.until(r#"{"event":"ready""#));
-    let url = events.last().unwrap()["url"].as_str().unwrap();
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if let Some(opened) = lab.opened() {
-            assert_eq!(opened.trim(), url);
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "default browser launcher was not called"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let (status, _) = connect.terminate();
-    assert!(status.success());
-}
-
-/// `cli`, Remote Connect Machine-Readable Output (Unknown host key) and
-/// Remote Connect Recent Hosts (Failed connect).
-#[test]
-fn connect_json_reports_why_it_failed_and_records_nothing() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    for target in [NOWHERE, NEW_KEY] {
-        let stdout = lab.dir.path().join("failed-connect.stdout");
-        let stderr = lab.dir.path().join("failed-connect.stderr");
-        let child = lab
-            .client(&["connect", target, "--json", "--no-open"])
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(fs::File::create(&stdout).unwrap())
-            .stderr(fs::File::create(&stderr).unwrap())
-            .spawn()
-            .expect("splitty connect");
-        let group = child.id();
-        let status = isolated_command::wait(child);
-        let out = Output {
-            status,
-            stdout: fs::read(stdout).unwrap(),
-            stderr: fs::read(stderr).unwrap(),
-        };
-        process_cleanup::assert_group_exited(group);
-        assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
-        let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        let events = json_events(&lines);
-        let failed = events.last().expect("an event");
-        assert_eq!(failed["event"], "failed", "{}", describe(&out));
-        let message = failed["message"].as_str().expect("message");
-        assert!(
-            message.starts_with(&format!(
-                "Failed to reach the remote host: ssh to {target} failed"
-            )),
-            "{message}"
-        );
-        if target == NEW_KEY {
-            let hint = failed["hint"].as_str().expect("a hint");
-            assert!(
-                hint.contains(&format!("Run `ssh {NEW_KEY}` once")),
-                "{hint}"
-            );
-            assert!(hint.contains("fingerprint"), "{hint}");
-        } else {
-            assert!(failed.get("hint").is_none(), "{failed}");
-        }
-    }
-    assert!(
-        !lab.recent_hosts().exists(),
-        "a failed connect records nothing"
-    );
-}
-
-/// Only the real SSH/proxy process tree can establish cleanup after a
-/// permanent reconnect failure; the host daemon remains independently owned.
-#[test]
-fn permanent_reconnect_failure_releases_gateway_and_all_local_descendants() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    let mut connect = lab.connect(&["--json", "--no-open"]);
-    let events = json_events(&connect.until(r#"{"event":"ready""#));
-    let url = reqwest::Url::parse(events.last().unwrap()["url"].as_str().unwrap()).unwrap();
-    let port = url.port().unwrap();
-    connect.assert_native_gateway(port);
-    let group = connect.child.id();
-    let before = process_cleanup::live_group_members(group);
-    assert!(
-        before.contains(&group) && before.len() > 1,
-        "real descendants must be observed before failure"
-    );
-    let daemon = host_daemon_pid(&lab);
-    let daemon_birth = fs::read_to_string(format!("/proc/{daemon}/stat"))
-        .unwrap()
-        .rsplit_once(") ")
-        .unwrap()
-        .1
-        .split_whitespace()
-        .nth(19)
-        .unwrap()
-        .to_owned();
-    fs::write(lab.dir.path().join("known_hosts"), "").unwrap();
-    connect.kill_tunnel();
-    let failed = json_events(&connect.until(r#"{"event":"failed""#));
-    assert_eq!(failed.last().unwrap()["event"], "failed");
-    let deadline = Instant::now() + WAIT;
-    let status = loop {
-        if let Some(status) = connect.child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "failed connect did not exit");
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert!(!status.success());
-    process_cleanup::assert_group_exited(group);
-    assert!(
-        listeners(port).is_empty(),
-        "failed reconnect retained its browser listener"
-    );
-    let stat = fs::read_to_string(format!("/proc/{daemon}/stat"))
-        .expect("host daemon survives gateway failure");
-    let fields: Vec<_> = stat
-        .rsplit_once(") ")
-        .unwrap()
-        .1
-        .split_whitespace()
-        .collect();
-    assert!(
-        !matches!(fields[0], "Z" | "X"),
-        "host daemon must remain alive"
-    );
-    assert_eq!(
-        fields[19], daemon_birth,
-        "the independent daemon was not replaced"
-    );
-}
-
-#[test]
-fn connect_starts_a_daemon_on_a_host_without_one() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    let connect = lab.connect(&["--no-open"]);
-    let lines = connect.until("Browser gateway active.");
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == &format!("Started a private Splitty daemon on {HOST}.")),
-        "{lines:?}"
-    );
-    let url = Connect::url(&lines);
-    let (port, cookie) = sign_in(&url);
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(status, 200, "{response}");
 }
 
 /// The host's daemon, as its daemon.json names it.
@@ -1551,73 +791,6 @@ fn host_daemon_pid(lab: &Lab) -> i32 {
         .as_i64()
         .and_then(|pid| i32::try_from(pid).ok())
         .expect("pid")
-}
-
-#[test]
-fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
-    let Some(lab) = lab() else { return };
-    let payload = lab.payload();
-    let installed = lab.installed_server();
-
-    // A host without Splitty: install, start the daemon, connect.
-    let connect = lab.connect_with(&["--no-open"], &[("SPLITTY_REMOTE_PAYLOAD", &payload)]);
-    let lines = connect.until("Browser gateway active.");
-    let text = lines.join("\n");
-    assert!(
-        text.contains(&format!(
-            "Installing Splitty {} on {HOST} (",
-            env!("CARGO_PKG_VERSION")
-        )),
-        "{text}"
-    );
-    assert!(
-        text.contains(&format!("Started a private Splitty daemon on {HOST}")),
-        "{text}"
-    );
-    assert!(
-        installed.is_file(),
-        "server installed at {}",
-        installed.display()
-    );
-    assert!(installed.with_file_name("shell-integration").is_dir());
-    let url = Connect::url(&lines);
-    let (port, cookie) = sign_in(&url);
-
-    // A reboot: the daemon is gone and the tunnel drops. connect starts the
-    // daemon again while keeping the local gateway and browser session. Native
-    // EOF closes the bridge itself; there may already be no SSH child to kill.
-    kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill the daemon");
-    let lines = connect.until("SSH tunnel restored.");
-    assert!(
-        !lines.iter().any(|line| line.starts_with("SPLITTY_URL=")),
-        "the gateway origin survives reboot"
-    );
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(status, 200, "{response}");
-
-    // A rebuilt container: server and daemon are gone. connect installs the
-    // server again and starts the daemon.
-    kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill the daemon");
-    fs::remove_dir_all(lab.dir.path().join("home/.local/share/splitty"))
-        .expect("remove the server");
-    let lines = connect.until("SSH tunnel restored.");
-    assert!(installed.is_file(), "the server is installed again");
-    assert!(!lines.iter().any(|line| line.starts_with("SPLITTY_URL=")));
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
-    assert_eq!(status, 200, "{response}");
-    let (status, rest) = connect.terminate();
-    assert!(status.success(), "{status}\n{rest}");
-
-    // Connecting again reuses the installed server and the running daemon.
-    let again = lab.connect_with(&["--no-open"], &[("SPLITTY_REMOTE_PAYLOAD", &payload)]);
-    let lines = again.until("Browser gateway active.");
-    assert!(
-        !lines
-            .iter()
-            .any(|l| l.starts_with("Installing") || l.starts_with("Started")),
-        "{}",
-        lines.join("\n")
-    );
 }
 
 #[test]
@@ -1688,229 +861,82 @@ fn health(port: u16) -> String {
         .to_owned()
 }
 
-/// `cli`, Remote Connect Port Forwards (Forward a dev server, Local port busy,
-/// Forwards survive a reconnect), and `access-control`, Forwarded Ports Bound
-/// To Loopback (GatewayPorts in the SSH configuration): servers that listen
-/// only on the host's loopback, reached through the announced local ports.
-#[test]
-fn connect_forwards_ports_of_the_host_through_a_reconnect() {
-    let Some(lab) = lab() else { return };
-    lab.install_splitty();
-    let free = lab.serve_on_host(free_local_port());
-    let busy = lab.serve_on_host(free_local_port());
-    // A local process holds the second server's port here.
-    let _local = TcpListener::bind(("127.0.0.1", busy.port)).expect("hold the port here");
-    let absent = free_local_port();
-    let list = format!("{},{},{}", free.port, busy.port, absent);
-    let config = lab.dir.path().join("client-config/splitty");
-    fs::create_dir_all(&config).unwrap();
-    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
-    let saved_path = config.join("remote-forwards.json");
-    let saved = serde_json::json!({"version":1,"forwards":[{"target":HOST,"remote":free.port,
-        "local":free_local_port(),"label":"paused desktop mapping","enabled":false}]})
-    .to_string();
-    fs::write(&saved_path, &saved).unwrap();
-    fs::set_permissions(&saved_path, fs::Permissions::from_mode(0o600)).unwrap();
+/// A local hub process, whose `ssh` children the tests watch.
+trait HubProcess {
+    fn pid(&self) -> u32;
 
-    let connect = lab.connect(&["--no-open", "--json", "--forward", &list]);
-    connect.until(r#"{"event":"ready""#);
-    // One event per forward, right after `ready`.
-    let forwards = json_events(&[connect.next(), connect.next(), connect.next()]);
-    assert_eq!(
-        forwards[0],
-        serde_json::json!({
-            "event": "forward",
-            "remote": free.port,
-            "local": free.port,
-            "url": format!("http://localhost:{}", free.port),
-        })
-    );
-    assert_eq!(forwards[1]["event"], "forward", "{forwards:?}");
-    assert_eq!(forwards[1]["remote"], busy.port, "{forwards:?}");
-    let moved = forwards[1]["local"]
-        .as_u64()
-        .and_then(|port| u16::try_from(port).ok())
-        .expect("a local port");
-    assert_ne!(moved, busy.port, "the busy port is left alone");
-    assert_eq!(forwards[1]["url"], format!("http://localhost:{moved}"));
-    assert_eq!(forwards[2]["remote"], absent);
-    assert_eq!(forwards[2]["local"], absent);
-    let mut missing = TcpStream::connect(("127.0.0.1", absent)).unwrap();
-    missing.set_read_timeout(Some(WAIT)).unwrap();
-    missing
-        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-        .unwrap();
-    match missing.read(&mut [0]) {
-        Ok(0) => {}
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionReset
-                    | io::ErrorKind::ConnectionAborted
-                    | io::ErrorKind::BrokenPipe
-            ) => {}
-        result => panic!("a missing host service must not return application bytes: {result:?}"),
+    /// The `ssh` processes the hub runs now.
+    fn ssh(&self) -> Vec<i32> {
+        ssh_children_of(self.pid())
     }
+}
 
-    // GatewayPorts yes in the client's config, yet only 127.0.0.1 listens.
-    assert_eq!(
-        listeners(free.port),
-        [format!("0100007F:{:04X}", free.port)],
-        "a forward must listen on 127.0.0.1 only"
-    );
-    assert_eq!(health(free.port), "ok");
-    assert_eq!(health(moved), "ok");
+impl HubProcess for HubServer {
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+}
 
-    // The ssh process dies; the forwards come back on the same ports.
-    connect.kill_tunnel();
-    let lines = connect.until(r#"{"event":"restored""#);
-    assert!(
-        !lines
-            .iter()
-            .any(|line| line.contains(r#""event":"forward""#)),
-        "the forwards are not announced again:\n{}",
-        lines.join("\n")
-    );
-    assert_eq!(health(free.port), "ok");
-    assert_eq!(health(moved), "ok");
-    let previous = connect.kill_forward(busy.port);
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let replaced = connect.ssh_children().into_iter().any(|pid| {
-            pid != previous
-                && fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|args| {
-                    args.split(|byte| *byte == 0)
-                        .any(|arg| arg.ends_with(format!(":localhost:{}", busy.port).as_bytes()))
-                })
-        });
-        if replaced && TcpStream::connect(("127.0.0.1", moved)).is_ok() {
-            break;
-        }
+/// Wait until `hub` runs no `ssh` any more.
+fn wait_without_ssh(hub: &impl HubProcess) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !hub.ssh().is_empty() {
         assert!(
-            Instant::now() < deadline,
-            "forward worker did not rebuild on its reserved port"
+            std::time::Instant::now() < deadline,
+            "the hub still runs ssh: {:?}",
+            hub.ssh()
         );
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
     }
-    assert_eq!(health(moved), "ok");
-    let (status, rest) = connect.terminate();
-    assert!(status.success(), "{status}\n{rest}");
-
-    // The text output: a line per forward between the URL and the tunnel's
-    // line, the moved one with a note.
-    let text = lab.connect(&["--no-open", "--forward", &list]);
-    let lines = text.until("Browser gateway active.");
-    let url = lines
-        .iter()
-        .position(|line| line.starts_with("SPLITTY_URL="))
-        .expect("the URL line");
-    assert_eq!(
-        lines[url + 1],
-        format!(
-            "Forwarding http://localhost:{port} -> {HOST}:{port}",
-            port = free.port
-        ),
-        "{lines:?}"
-    );
-    let note = format!(
-        " -> {HOST}:{port} (local port {port} is not free)",
-        port = busy.port
-    );
-    assert!(
-        lines[url + 2].starts_with("Forwarding http://localhost:")
-            && lines[url + 2].ends_with(&note),
-        "{lines:?}"
-    );
-    assert_eq!(
-        lines[url + 3],
-        format!("Forwarding http://localhost:{absent} -> {HOST}:{absent}")
-    );
-    assert_eq!(lines.len(), url + 5, "{lines:?}");
-    // remote-forwards-persistence, design D2: `connect` never remembers its
-    // forwards; saved mappings belong to the hub.
-    assert_eq!(
-        fs::read_to_string(&saved_path).unwrap(),
-        saved,
-        "CLI forward setup/stop must not read, resume or alter paused desktop mappings"
-    );
 }
 
-/// `cli`, Remote Connect Port Forwards (Invalid entry) and Remote Connect
-/// Machine-Readable Output (Rejected forward list): a list `connect` cannot use
-/// ends it with status 2 before any `ssh` runs. The parsing is covered by unit
-/// tests; only the binary shows its exit status and output. It needs no lab,
-/// only an `ssh` that records being run.
-#[test]
-fn connect_rejects_an_invalid_forward_before_ssh_runs() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let bin = dir.path().join("bin");
-    fs::create_dir(&bin).expect("bin");
-    let ran = dir.path().join("ssh-ran");
-    write_executable(
-        &bin.join("ssh"),
-        &format!("#!/bin/sh\necho \"$@\" >> {}\nexit 255\n", ran.display()),
-    );
-    let mut dirs = vec![bin];
-    dirs.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-    let path = env::join_paths(dirs).expect("PATH");
-
-    for list in ["70000", "0", "3000:", "3000,3000", "8080:3000,8080:5173"] {
-        for json in [false, true] {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
-            command
-                .args(["connect", HOST, "--no-open", "--forward", list])
-                .env("PATH", &path)
-                .env("XDG_CONFIG_HOME", dir.path().join("config"))
-                .stdin(Stdio::null());
-            if json {
-                command.arg("--json");
-            }
-            let out = command.output().expect("splitty connect");
-            assert_eq!(out.status.code(), Some(2), "{list}\n{}", describe(&out));
-            let message = if json {
-                let line = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-                let event: serde_json::Value = serde_json::from_str(&line)
-                    .unwrap_or_else(|e| panic!("one JSON line ({e}): {line:?}"));
-                assert_eq!(event["event"], "failed", "{event}");
-                event["message"].as_str().expect("message").to_owned()
-            } else {
-                String::from_utf8_lossy(&out.stderr).into_owned()
-            };
-            assert!(message.contains("--forward"), "{list}: {message}");
-        }
-    }
-    assert!(
-        !ran.exists(),
-        "ssh must not run: {}",
-        fs::read_to_string(&ran).unwrap_or_default()
-    );
-}
-
-/// A local `splitty serve` acting as the remote screen hub: the lab's `ssh`,
-/// a home and runtime directory of its own, and a browser session.
+/// The remote screen hub as the desktop app runs it: an app-owned
+/// `splitty desktop-backend --transport native-v1 --backend embedded --owner`
+/// over inherited pipes, with the lab's `ssh`, a home and runtime directory
+/// of its own and its standard error in a file. Host streams are the owner's
+/// host-open intents; API calls go over a direct stream of the owner, which
+/// holds the local hub's authority.
+///
+/// Why smoke tests: these need real `ssh`, a real host namespace and the
+/// binary's own askpass and install. An in-process hub uses scripted
+/// connectors (`splitty_server::hub`'s tests).
 struct HubServer {
-    child: Child,
-    port: u16,
-    cookie: String,
+    owner: Arc<splitty_remote::owner::Owner>,
+    /// The backend process, the leader of its own process group.
+    pid: u32,
     stderr: PathBuf,
-    /// Keeps reading the server's output, which it must be able to write.
-    _lines: mpsc::Receiver<String>,
 }
 
 impl HubServer {
-    /// Start it with `payload` as the server it installs on hosts, and sign
-    /// in with its bootstrap code.
-    fn start(lab: &Lab, payload: &Path) -> Self {
+    /// Start it with `payload` as the server it installs on hosts.
+    async fn start(lab: &Lab, payload: &Path) -> Self {
+        Self::start_with(lab, Some(payload)).await
+    }
+
+    /// Start it with `payload`, if any, as the server it installs on hosts.
+    async fn start_with(lab: &Lab, payload: Option<&Path>) -> Self {
         let d = lab.dir.path();
         let home = d.join("client-home");
         let run = d.join("client-run");
         fs::create_dir_all(home.join(".ssh")).expect("client home");
         fs::create_dir_all(&run).expect("client runtime directory");
         fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("chmod");
-        let stderr = d.join("serve.stderr");
-        let mut child = lab
-            .client(&["serve", "--addr", "127.0.0.1:0"])
-            .env("SPLITTY_REMOTE_PAYLOAD", payload)
+        let stderr = d.join("hub.stderr");
+        // The bridge keeps only the end of a backend's standard error; the
+        // shell appends all of it to the file and then becomes the backend.
+        let mut command = lab.client_command("sh");
+        command
+            .args(["-c", r#"file=$1; shift; exec "$@" 2>>"$file""#, "sh"])
+            .arg(&stderr)
+            .arg(env!("CARGO_BIN_EXE_splitty"))
+            .args([
+                "desktop-backend",
+                "--transport",
+                "native-v1",
+                "--backend",
+                "embedded",
+                "--owner",
+            ])
             .env("HOME", &home)
             .env("XDG_DATA_HOME", home.join(".local/share"))
             .env("XDG_RUNTIME_DIR", &run)
@@ -1923,137 +949,240 @@ impl HubServer {
             .env_remove("SPLITTY_SESSION_ID")
             // A separate, owned group lets teardown also end an in-flight
             // ssh/ProxyCommand, even when an assertion unwinds the test.
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(fs::File::create(&stderr).expect("stderr file")))
-            .spawn()
-            .expect("splitty serve");
-        let lines = read_lines(child.stdout.take().expect("stdout"));
-        let mut server = Self {
-            child,
-            port: 0,
-            cookie: String::new(),
-            stderr,
-            _lines: lines,
-        };
-        let (mut port, mut code) = (None, None);
-        let deadline = Instant::now() + WAIT;
-        while port.is_none() || code.is_none() {
-            let line = server
-                ._lines
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .expect("serve printed no port and bootstrap code before its deadline");
-            if let Some(value) = line.strip_prefix("SPLITTY_PORT=") {
-                port = value.trim().parse::<u16>().ok();
-            } else if let Some(value) = line.strip_prefix("SPLITTY_BOOTSTRAP=") {
-                code = Some(value.trim().to_owned());
+            .process_group(0);
+        if let Some(payload) = payload {
+            command.env("SPLITTY_REMOTE_PAYLOAD", payload);
+        }
+        let owner = splitty_remote::owner::Owner::spawn(tokio::process::Command::from(command), 1)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "the hub did not start: {error}\n{}",
+                    fs::read_to_string(&stderr).unwrap_or_default()
+                )
+            });
+        let pid = owner.id().expect("the backend's pid");
+        Self { owner, pid, stderr }
+    }
+
+    /// Open a host stream for `target` as the app's main window does.
+    async fn open(&self, target: &str) -> HubSocket {
+        self.open_with(target, false).await
+    }
+
+    /// [`HubServer::open`], asking the hub to update the host's daemon when
+    /// `update` is set.
+    async fn open_with(&self, target: &str, update: bool) -> HubSocket {
+        use splitty_server::hub::Step;
+
+        let target = splitty_remote::ssh::SshTarget::parse(target).expect("an SSH target");
+        // Each step once, in order: the transport repeats its latest report
+        // as a pulse and reports phases that are no step.
+        let mut progress = Vec::new();
+        let mut last: Option<Step> = None;
+        let opened = tokio::time::timeout(
+            Duration::from_secs(120),
+            self.owner.open_context(
+                Some(target),
+                update,
+                splitty_transport::queue::Context::default(),
+                |report| {
+                    let Some(step) = Step::from_name(&report.phase) else {
+                        return;
+                    };
+                    if last.is_some_and(|last| step <= last) {
+                        return;
+                    }
+                    last = Some(step);
+                    progress.push(serde_json::json!({
+                        "type": "remote.progress", "step": step.name(), "message": report.message,
+                    }));
+                },
+            ),
+        )
+        .await
+        .expect("the host stream opens or fails before its deadline");
+        match opened {
+            Ok(connection) => HubSocket {
+                progress,
+                failure: None,
+                connection: Some(connection),
+            },
+            Err(error) => {
+                let closed = splitty_transport::negotiation::preparation_failure(&error)
+                    .unwrap_or_else(|| {
+                        panic!("the host stream failed without a diagnostic: {error}")
+                    });
+                let failure = serde_json::from_str(&closed.message)
+                    .unwrap_or_else(|e| panic!("not a remote.error ({e}): {}", closed.message));
+                HubSocket {
+                    progress,
+                    failure: Some(failure),
+                    connection: None,
+                }
             }
         }
-        let (port, code) = (port.expect("port"), code.expect("code"));
-        let (_, cookie) = sign_in(&format!("http://127.0.0.1:{port}/?bootstrap={code}"));
-        server.port = port;
-        server.cookie = cookie;
-        server
     }
 
-    /// Open `/ws/remote` for `target` as the UI does: a fresh ticket, the
-    /// server's own origin.
-    async fn open(&self, target: &str) -> HubSocket {
-        self.open_with(target, "").await
+    /// A request to the hub's local API, named as the HTTP API names it, over
+    /// a direct stream of the owner: the status and the JSON body.
+    async fn api(&self, method: &str, path: &str, body: Option<&str>) -> (u16, serde_json::Value) {
+        owner_api(&self.owner, method, path, body).await
     }
 
-    /// [`HubServer::open`] with more of the query, such as `&update=1`.
-    async fn open_with(&self, target: &str, query: &str) -> HubSocket {
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    /// [`HubServer::api`] as a task of its own, on a stream of its own.
+    fn api_task(
+        &self,
+        method: &'static str,
+        path: &'static str,
+        body: Option<String>,
+    ) -> tokio::task::JoinHandle<(u16, serde_json::Value)> {
+        let owner = self.owner.clone();
+        tokio::spawn(async move { owner_api(&owner, method, path, body.as_deref()).await })
+    }
 
-        let (status, response) = http(
-            self.port,
-            "POST",
-            "/api/ws-ticket",
-            Some(&self.cookie),
-            Some("{}"),
-        );
-        assert_eq!(status, 200, "{response}");
-        let ticket: serde_json::Value =
-            serde_json::from_str(response.split_once("\r\n\r\n").expect("body").1).expect("JSON");
-        let ticket = ticket["ticket"].as_str().expect("ticket");
-        let mut request = format!(
-            "ws://127.0.0.1:{}/ws/remote?ticket={ticket}&target={target}{query}",
-            self.port
-        )
-        .into_client_request()
-        .expect("request");
-        let origin = format!("http://127.0.0.1:{}", self.port)
-            .parse()
-            .expect("origin");
-        request.headers_mut().insert("origin", origin);
-        let (socket, _) = tokio::time::timeout(WAIT, tokio_tungstenite::connect_async(request))
+    /// `/api/remote/forwards`.
+    async fn forwards(&self, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
+        self.api(method, "/api/remote/forwards", body).await
+    }
+
+    /// `/api/remote/forward-preferences`.
+    async fn preferences(&self, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
+        self.api(method, "/api/remote/forward-preferences", body)
             .await
-            .expect("WebSocket upgrade before its deadline")
-            .expect("upgrade /ws/remote");
-        HubSocket(socket)
     }
 
-    /// The `ssh` processes the hub runs now.
-    fn ssh(&self) -> Vec<i32> {
-        ssh_children_of(self.child.id())
+    /// `/api/remote/reverse-forwards`.
+    async fn reverses(&self, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
+        self.api(method, "/api/remote/reverse-forwards", body).await
     }
 
     /// Wait until the hub runs no `ssh` any more.
     fn wait_without_ssh(&self) {
-        let deadline = std::time::Instant::now() + WAIT;
-        while !self.ssh().is_empty() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the hub still runs ssh: {:?}",
-                self.ssh()
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_without_ssh(self);
     }
+
+    /// Whether the backend process has ended (it may not be reaped yet).
+    fn ended(&self) -> bool {
+        fs::read_to_string(format!("/proc/{}/stat", self.pid)).map_or(true, |stat| {
+            stat.rsplit_once(") ")
+                .is_some_and(|(_, fields)| fields.starts_with('Z') || fields.starts_with('X'))
+        })
+    }
+}
+
+/// A request to the local API of `owner`'s service, named as the HTTP API
+/// names it, over a direct stream of its own: the status and the JSON body.
+async fn owner_api(
+    owner: &splitty_remote::owner::Owner,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let description = splitty_core::native_api::OPERATIONS
+        .iter()
+        .find(|operation| operation.method == method && operation.path == path)
+        .unwrap_or_else(|| panic!("no operation for {method} {path}"));
+    let mut args = serde_json::Map::new();
+    if let Some(body) = body {
+        args.insert(
+            "body".into(),
+            serde_json::from_str(body).expect("a JSON request body"),
+        );
+    }
+    let mut connection = owner
+        .open_context(
+            None,
+            false,
+            splitty_transport::queue::Context::default(),
+            |_| {},
+        )
+        .await
+        .expect("an API stream of the owner");
+    let reply = connection
+        .request(
+            description.name.into(),
+            args,
+            Some(description.deadline.duration().unwrap_or(WAIT)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{method} {path}: {error}"));
+    let (status, body) = (reply.status, reply.body.clone());
+    drop(reply);
+    connection.finish().await.expect("the API stream ends");
+    let json = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"))
+    };
+    (status, json)
 }
 
 impl Drop for HubServer {
     fn drop(&mut self) {
         if std::thread::panicking() {
             eprintln!(
-                "splitty serve stderr:\n{}",
+                "splitty desktop-backend stderr:\n{}",
                 fs::read_to_string(&self.stderr).unwrap_or_default()
             );
         }
-        // Only this server's group, created at spawn; never process-name
-        // cleanup. The direct child is reaped before its pid can be reused.
-        if let Ok(pid) = i32::try_from(self.child.id()) {
+        // Only this backend's group, created at spawn; never process-name
+        // cleanup. The owner reaps the backend; until then its unreaped pid
+        // keeps the group's number from being reused.
+        if let Ok(pid) = i32::try_from(self.pid) {
             let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.ended() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
-type Message = tokio_tungstenite::tungstenite::Message;
+/// A message of a host stream.
+#[derive(Debug)]
+enum Message {
+    Text(String),
+    Binary(Vec<u8>),
+}
 
-struct HubSocket(
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-);
+/// A host stream of the hub, or why it could not be opened.
+struct HubSocket {
+    /// The `remote.progress` reports of its preparation.
+    progress: Vec<serde_json::Value>,
+    /// The `remote.error` that ended the preparation.
+    failure: Option<serde_json::Value>,
+    connection: Option<splitty_remote::owner::Connection>,
+}
 
 impl HubSocket {
-    async fn next(&mut self) -> Message {
-        use futures::StreamExt;
+    fn connection(&mut self) -> &mut splitty_remote::owner::Connection {
+        self.connection.as_mut().expect("an open host stream")
+    }
 
-        // Keepalive frames arrive whenever the server sends them; a slow
-        // run sees them between the messages the test waits for.
+    /// The next message, or `None` once the stream has ended.
+    async fn try_next(&mut self) -> Option<Message> {
+        use splitty_transport::wire::Kind;
         loop {
-            let message = tokio::time::timeout(WAIT, self.0.next())
+            let message = tokio::time::timeout(WAIT, self.connection().recv())
                 .await
-                .expect("a message in time")
-                .expect("the socket is open")
-                .expect("a message");
-            if !matches!(message, Message::Ping(_) | Message::Pong(_)) {
-                return message;
+                .expect("a message in time")?;
+            let bytes = message.frame.application().expect("an application frame").1;
+            match message.frame.kind {
+                Kind::Text => {
+                    return Some(Message::Text(
+                        String::from_utf8(bytes.to_vec()).expect("UTF-8 text"),
+                    ))
+                }
+                Kind::Binary => return Some(Message::Binary(bytes.to_vec())),
+                // Replies to requests made on this stream.
+                _ => continue,
             }
         }
+    }
+
+    async fn next(&mut self) -> Message {
+        self.try_next().await.expect("the stream is open")
     }
 
     async fn next_json(&mut self) -> serde_json::Value {
@@ -2073,35 +1202,48 @@ impl HubSocket {
         (steps, outcome)
     }
 
-    /// The hub's progress messages and the message that ends them.
+    /// The hub's progress messages and the message that ends them: the
+    /// stream's first message, `remote.ready`, or the `remote.error` that
+    /// refused it.
     async fn progress(&mut self) -> (Vec<serde_json::Value>, serde_json::Value) {
-        let mut progress = Vec::new();
-        loop {
-            let message = self.next_json().await;
-            if message["type"] != "remote.progress" {
-                return (progress, message);
-            }
-            progress.push(message);
+        let progress = std::mem::take(&mut self.progress);
+        match self.failure.take() {
+            Some(failure) => (progress, failure),
+            None => (progress, self.next_json().await),
         }
     }
 
     async fn send(&mut self, text: &str) {
-        use futures::SinkExt;
+        self.connection()
+            .sender()
+            .data(splitty_transport::wire::Kind::Text, text.as_bytes())
+            .expect("send");
+    }
 
-        self.0.send(Message::text(text)).await.expect("send");
+    /// A request over the stream to the host's daemon: the status and the
+    /// JSON body. Messages that arrive meanwhile are skipped.
+    async fn request(&mut self, operation: &str) -> (u16, serde_json::Value) {
+        let reply = self
+            .connection()
+            .request(operation.into(), serde_json::Map::new(), Some(WAIT))
+            .await
+            .unwrap_or_else(|error| panic!("{operation}: {error}"));
+        (
+            reply.status,
+            serde_json::from_str(&reply.body).unwrap_or(serde_json::Value::Null),
+        )
     }
 
     async fn close(&mut self) {
-        self.0.close(None).await.expect("close");
+        if let Some(connection) = self.connection.take() {
+            connection.finish().await.expect("close");
+        }
     }
 
-    /// The close code, skipping what the host still sends.
-    async fn close_code(&mut self) -> u16 {
-        loop {
-            if let Message::Close(frame) = self.next().await {
-                return frame.map_or(1005, |frame| u16::from(frame.code));
-            }
-        }
+    /// The stream ends without the client closing it, skipping what the host
+    /// still sends: the hub lost the host.
+    async fn lost(&mut self) {
+        while self.try_next().await.is_some() {}
     }
 }
 
@@ -2115,7 +1257,7 @@ impl HubSocket {
 async fn the_hub_relays_a_host_through_real_ssh() {
     let Some(lab) = lab() else { return };
     let payload = lab.payload();
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
 
     // A host without Splitty.
     let mut socket = hub.open(HOST).await;
@@ -2162,11 +1304,106 @@ async fn the_hub_relays_a_host_through_real_ssh() {
         }
     }
 
-    // The relaying ssh dies: the socket closes with 4001.
+    // cli, On a host over SSH: the remote command's pick list, terminal mode
+    // and private daemon attachment, through real SSH. The lab's sshd cannot
+    // allocate a terminal inside its user namespace, so `script` gives the
+    // command one on the host.
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        async fn until(stdout: &mut tokio::process::ChildStdout, marker: &[u8]) -> Vec<u8> {
+            tokio::time::timeout(WAIT, async {
+                let mut output = Vec::new();
+                loop {
+                    let mut bytes = [0; 4096];
+                    let count = stdout.read(&mut bytes).await.expect("SSH terminal output");
+                    assert!(
+                        count > 0,
+                        "SSH terminal ended before {:?}: {}",
+                        marker,
+                        String::from_utf8_lossy(&output)
+                    );
+                    output.extend_from_slice(&bytes[..count]);
+                    assert!(output.len() < 1024 * 1024, "bounded terminal output");
+                    if output.windows(marker.len()).any(|part| part == marker) {
+                        return output;
+                    }
+                }
+            })
+            .await
+            .expect("remote attach response")
+        }
+        socket
+            .send(
+                &serde_json::json!({
+                    "type":"input", "id":session,
+                    "data":"printf 'ATTACH_%s\\n' REPLAY_READY\n"
+                })
+                .to_string(),
+            )
+            .await;
+        tokio::time::timeout(WAIT, async {
+            let mut replay = Vec::new();
+            loop {
+                if let Message::Binary(frame) = socket.next().await {
+                    let start = 1 + usize::from(frame[0]);
+                    if frame.get(1..start) == Some(session.as_bytes()) {
+                        replay.extend_from_slice(&frame[start..]);
+                        assert!(replay.len() < 1024 * 1024, "bounded replay");
+                        if replay
+                            .windows(b"ATTACH_REPLAY_READY".len())
+                            .any(|part| part == b"ATTACH_REPLAY_READY")
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("marker in host replay");
+        let mut command = lab.client_command("ssh");
+        command
+            .args(["-o", "BatchMode=yes", HOST, "--"])
+            .arg(format!(
+                "script -qefc '{} attach' /dev/null",
+                lab.installed_server().display()
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(fs::File::create(lab.dir.path().join("attach.stderr")).unwrap());
+        let mut terminal = tokio::process::Command::from(command)
+            .kill_on_drop(true)
+            .spawn()
+            .expect("ssh attach");
+        let mut input = terminal.stdin.take().unwrap();
+        let mut output = terminal.stdout.take().unwrap();
+        let list = until(&mut output, b"Attach to (1-1): ").await;
+        assert!(
+            String::from_utf8_lossy(&list).contains("hub"),
+            "{}",
+            String::from_utf8_lossy(&list)
+        );
+        input.write_all(b"1\n").await.unwrap();
+        until(&mut output, b"ATTACH_REPLAY_READY").await;
+        input
+            .write_all(b"printf '%s%s\\n' NATIVE_ ATTACH_OK\n")
+            .await
+            .unwrap();
+        until(&mut output, b"NATIVE_ATTACH_OK").await;
+        input.write_all(&[0x1c]).await.unwrap();
+        until(&mut output, b"[detached]").await;
+        assert!(tokio::time::timeout(WAIT, terminal.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success());
+    }
+
+    // The relaying ssh dies: the host stream ends without the client.
     let bridges = hub.ssh();
     assert_eq!(bridges.len(), 1, "one ssh carries the bridge: {bridges:?}");
     kill(Pid::from_raw(bridges[0]), Signal::SIGKILL).expect("kill the bridge's ssh");
-    assert_eq!(socket.close_code().await, 4001);
+    socket.lost().await;
     hub.wait_without_ssh();
 
     // Again: the server is installed and the daemon runs, with the screen.
@@ -2208,16 +1445,8 @@ async fn the_hub_relays_a_host_through_real_ssh() {
     }
 
     // Only the host that became ready is recorded, and the picker lists it.
-    let (status, response) = http(
-        hub.port,
-        "GET",
-        "/api/remote/hosts",
-        Some(&hub.cookie),
-        None,
-    );
-    assert_eq!(status, 200, "{response}");
-    let hosts: serde_json::Value =
-        serde_json::from_str(response.split_once("\r\n\r\n").expect("body").1).expect("JSON");
+    let (status, hosts) = hub.api("GET", "/api/remote/hosts", None).await;
+    assert_eq!(status, 200, "{hosts}");
     assert_eq!(hosts[0]["target"], HOST, "{hosts}");
     assert_eq!(hosts[0]["source"], "recent", "{hosts}");
     assert_eq!(hosts.as_array().map(Vec::len), Some(1), "{hosts}");
@@ -2292,7 +1521,7 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     }
     let Some(lab) = lab() else { return };
     let payload = lab.payload();
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
 
     // A host without Splitty, and then its daemon of the hub's version with
     // a screen.
@@ -2317,7 +1546,7 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     let daemon = host_daemon_pid(&lab);
     let keepers = host_keepers(&lab);
     assert_eq!(keepers.len(), 1, "the screen's shell has a keeper");
-    let mut socket = hub.open_with(HOST, "&update=1").await;
+    let mut socket = hub.open_with(HOST, true).await;
     let (steps, ready) = socket.outcome().await;
     assert_eq!(steps, ["daemon", "bridge"], "nothing to update: {ready}");
     assert_eq!(ready["daemon"]["started"], false, "{ready}");
@@ -2411,7 +1640,7 @@ if not marker.exists() and command[-4:] == ["daemon", "stop", "--if-instance", i
     assert_ne!(force, original_force);
     write_executable(&force_path, &force);
 
-    let mut socket = hub.open_with(HOST, "&update=1").await;
+    let mut socket = hub.open_with(HOST, true).await;
     let (progress, ready) = socket.progress().await;
     write_executable(&force_path, &original_force);
     assert!(
@@ -2515,7 +1744,7 @@ if not marker.exists() and command[-4:] == ["daemon", "stop", "--if-instance", i
         }
         let record = serde_json::to_vec(&incompatible).unwrap();
         fs::write(&info_path, &record).unwrap();
-        let mut socket = hub.open_with(HOST, "&update=1").await;
+        let mut socket = hub.open_with(HOST, true).await;
         let (_, failure) = socket.outcome().await;
         assert_eq!(failure["type"], "remote.error", "{failure}");
         assert_eq!(
@@ -2550,8 +1779,306 @@ if not marker.exists() and command[-4:] == ["daemon", "stop", "--if-instance", i
     fs::write(&info_path, replacement_record).unwrap();
 }
 
+/// The client's recent hosts: their targets, none before the first record.
+fn recent_targets(lab: &Lab) -> Vec<String> {
+    let Ok(bytes) = fs::read(lab.recent_hosts()) else {
+        return Vec::new();
+    };
+    let recent: serde_json::Value = serde_json::from_slice(&bytes).expect("recent hosts JSON");
+    assert_eq!(recent["version"], 1, "{recent}");
+    let mode = fs::metadata(lab.recent_hosts())
+        .expect("mode")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    recent["hosts"]
+        .as_array()
+        .expect("hosts")
+        .iter()
+        .map(|host| host["target"].as_str().expect("target").to_owned())
+        .collect()
+}
+
+/// Wait until the host the hub became ready for is recorded as recent.
+async fn wait_for_recent(lab: &Lab) {
+    let deadline = Instant::now() + WAIT;
+    while recent_targets(lab) != [HOST] {
+        assert!(
+            Instant::now() < deadline,
+            "{HOST} is not recorded as recent"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// remote-screens, Remote Screen Hub Endpoint, for a host without Splitty
+/// that this Splitty cannot install on: the hub refuses the host stream with
+/// a `remote.error` and a hint, before any daemon, and records nothing as
+/// recent (remote-hosts, Recent Hosts).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_reports_a_host_without_splitty() {
+    let Some(lab) = lab() else { return };
+    let hub = HubServer::start_with(&lab, None).await;
+    let mut socket = hub.open(HOST).await;
+    let (steps, error) = socket.outcome().await;
+    assert!(!steps.iter().any(|step| step == "started"), "{steps:?}");
+    assert_eq!(error["type"], "remote.error", "{error}");
+    assert_eq!(error["code"], "unsupported_host", "{error}");
+    assert!(
+        error["message"]
+            .as_str()
+            .expect("message")
+            .contains(&format!("Splitty is not installed on {HOST}")),
+        "{error}"
+    );
+    assert!(
+        error["hint"]
+            .as_str()
+            .expect("a hint")
+            .contains(&format!("Install splitty on {HOST}")),
+        "{error}"
+    );
+    assert!(!lab.installed_server().exists(), "nothing was installed");
+    hub.wait_without_ssh();
+    assert!(
+        !lab.recent_hosts().exists(),
+        "a failed host stream records nothing"
+    );
+}
+
+/// remote-screens, Remote Screen Hub Endpoint: a host with Splitty but no
+/// daemon gets a private daemon from the hub, reported as `started`; the
+/// host stream reaches it, and the host is recorded as recent once ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_starts_a_daemon_on_a_host_without_one() {
+    let Some(lab) = lab() else { return };
+    lab.install_splitty();
+    // No server of its own to install: the hub runs the host's splitty.
+    let hub = HubServer::start_with(&lab, None).await;
+    assert!(!lab.recent_hosts().exists(), "nothing recorded before");
+    let mut socket = hub.open(HOST).await;
+    let (progress, ready) = socket.progress().await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    assert_eq!(ready["daemon"]["started"], true, "{ready}");
+    assert!(
+        progress.iter().any(|report| report["step"] == "started"
+            && report["message"] == format!("Started a private Splitty daemon on {HOST}.")),
+        "{progress:?}"
+    );
+    assert!(
+        !progress.iter().any(|report| report["step"] == "install"),
+        "the host's own splitty runs: {progress:?}"
+    );
+    assert!(!lab.installed_server().exists());
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    let (status, state) = socket.request("mux.state").await;
+    assert_eq!(status, 200, "{state}");
+    wait_for_recent(&lab).await;
+    assert!(kill(Pid::from_raw(host_daemon_pid(&lab)), None).is_ok());
+    socket.close().await;
+    hub.wait_without_ssh();
+}
+
+/// remote-screens, Remote Screen Hub Endpoint, on a host without Splitty:
+/// the hub installs its server and starts the daemon; after a reboot (the
+/// daemon is gone) the next host stream starts it again, after a rebuilt
+/// container (server and daemon are gone) the next one installs the server
+/// again, and a later one reuses the installed server and running daemon.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
+    let Some(lab) = lab() else { return };
+    let payload = lab.payload();
+    let installed = lab.installed_server();
+    let hub = HubServer::start(&lab, &payload).await;
+
+    // A host without Splitty: install, start the daemon, connect.
+    let mut socket = hub.open(HOST).await;
+    let (progress, ready) = socket.progress().await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    let text: Vec<&str> = progress
+        .iter()
+        .map(|report| report["message"].as_str().expect("message"))
+        .collect();
+    assert!(
+        text.iter().any(|line| line.starts_with(&format!(
+            "Installing Splitty {} on {HOST} (",
+            env!("CARGO_PKG_VERSION")
+        ))),
+        "{text:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|line| line.starts_with(&format!("Started a private Splitty daemon on {HOST}"))),
+        "{text:?}"
+    );
+    assert!(
+        installed.is_file(),
+        "server installed at {}",
+        installed.display()
+    );
+    assert!(installed.with_file_name("shell-integration").is_dir());
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(socket.request("mux.state").await.0, 200);
+
+    // A reboot: the daemon is gone and the host stream ends. The next one
+    // starts the daemon again.
+    kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill the daemon");
+    socket.lost().await;
+    hub.wait_without_ssh();
+    let mut socket = hub.open(HOST).await;
+    let (steps, ready) = socket.outcome().await;
+    assert_eq!(steps, ["daemon", "started", "bridge"], "{ready}");
+    assert_eq!(ready["daemon"]["started"], true, "{ready}");
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(socket.request("mux.state").await.0, 200);
+
+    // A rebuilt container: server and daemon are gone. The next host stream
+    // installs the server again and starts the daemon.
+    kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill the daemon");
+    socket.lost().await;
+    hub.wait_without_ssh();
+    fs::remove_dir_all(lab.dir.path().join("home/.local/share/splitty"))
+        .expect("remove the server");
+    let mut socket = hub.open(HOST).await;
+    let (steps, ready) = socket.outcome().await;
+    assert_eq!(steps, ["install", "daemon", "started", "bridge"], "{ready}");
+    assert!(installed.is_file(), "the server is installed again");
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(socket.request("mux.state").await.0, 200);
+    socket.close().await;
+    hub.wait_without_ssh();
+
+    // Connecting again reuses the installed server and the running daemon.
+    let mut again = hub.open(HOST).await;
+    let (steps, ready) = again.outcome().await;
+    assert_eq!(steps, ["daemon", "bridge"], "{ready}");
+    assert_eq!(ready["daemon"]["started"], false, "{ready}");
+    again.close().await;
+    hub.wait_without_ssh();
+}
+
+/// remote-screens, Remote Screen Hub Endpoint (Host connection lost) and
+/// Port Forwards Through The Hub, through real `ssh` and a real host daemon:
+/// after the bridge's `ssh` and a saved forward's `ssh` die, the next host
+/// stream shows the same daemon with the same sessions and the forward is
+/// rebuilt on its local port; a new daemon incarnation is reached the same
+/// way; closing the stream ends its `ssh`. The host is recorded as recent
+/// only once a stream is ready.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_reconnects_and_hands_over_sessions_through_real_ssh() {
+    let Some(lab) = lab() else { return };
+    lab.install_splitty();
+    lab.start_daemon();
+    let service = lab.serve_on_host(0);
+    let payload = lab.payload();
+    let hub = HubServer::start(&lab, &payload).await;
+    let local = free_local_port();
+    let saved = serde_json::json!({
+        "target": HOST, "port": service.port, "local": local, "label": "Reconnected service",
+    })
+    .to_string();
+    assert_eq!(hub.preferences("PUT", Some(&saved)).await.0, 200);
+    assert!(!lab.recent_hosts().exists(), "nothing recorded before");
+
+    let mut socket = hub.open(HOST).await;
+    let (_, ready) = socket.outcome().await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    assert_eq!(ready["daemon"]["started"], false, "{ready}");
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    wait_for_recent(&lab).await;
+    let forward = expected_forward(service.port, local);
+    wait_for_active(&hub, &serde_json::json!([forward])).await;
+    assert_eq!(health(local), "ok");
+    socket
+        .send(
+            r#"{"type":"mux.op","screenId":"kept","op":{"type":"create_screen","screenId":"kept","name":"kept","newPaneId":"kept-pane"}}"#,
+        )
+        .await;
+    loop {
+        let message = socket.next_json().await;
+        if message["type"] == "mux.pane_spawned" {
+            assert_eq!(message["paneId"], "kept-pane", "{message}");
+            break;
+        }
+    }
+    assert_eq!(socket.request("mux.state").await.0, 200);
+    let daemon = host_daemon_pid(&lab);
+
+    // The ssh processes die; the same daemon is still there.
+    let forwards = forward_ssh(&hub);
+    assert_eq!(forwards.len(), 1, "one ssh holds the forward: {forwards:?}");
+    let bridges: Vec<_> = hub
+        .ssh()
+        .into_iter()
+        .filter(|pid| !forwards.contains(pid))
+        .collect();
+    assert_eq!(bridges.len(), 1, "one ssh carries the bridge: {bridges:?}");
+    for pid in bridges.iter().chain(&forwards) {
+        kill(Pid::from_raw(*pid), Signal::SIGKILL).expect("kill ssh");
+    }
+    socket.lost().await;
+    let mut socket = hub.open(HOST).await;
+    let (_, ready) = socket.outcome().await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    assert_eq!(ready["daemon"]["started"], false, "{ready}");
+    assert_eq!(
+        ready["screens"],
+        serde_json::json!([{"id": "kept", "name": "kept", "panes": 1}]),
+        "the same sessions: {ready}"
+    );
+    assert_eq!(host_daemon_pid(&lab), daemon, "the same daemon");
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let rebuilt = forward_ssh(&hub);
+        let (_, list) = hub.forwards("GET", None).await;
+        if list == serde_json::json!([forward])
+            && !rebuilt.is_empty()
+            && !rebuilt.contains(&forwards[0])
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "not rebuilt: {list}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        listeners(local),
+        [format!("0100007F:{local:04X}")],
+        "the forward listens on its own port, on 127.0.0.1 only"
+    );
+    assert_eq!(health(local), "ok");
+    assert_eq!(recent_targets(&lab), [HOST]);
+
+    // A new host incarnation is reached by the next host stream.
+    kill(Pid::from_raw(daemon), Signal::SIGKILL).expect("kill host daemon");
+    socket.lost().await;
+    let mut socket = hub.open(HOST).await;
+    let (_, ready) = socket.outcome().await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    assert_eq!(ready["daemon"]["started"], true, "{ready}");
+    assert_ne!(host_daemon_pid(&lab), daemon, "a new daemon runs");
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(socket.request("mux.state").await.0, 200);
+
+    // Closing the stream ends its ssh; the forward stays until stopped.
+    let held = forward_ssh(&hub);
+    socket.close().await;
+    let deadline = Instant::now() + WAIT;
+    while hub.ssh() != held {
+        assert!(
+            Instant::now() < deadline,
+            "the stream's ssh must end with it: {:?}",
+            hub.ssh()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let key = serde_json::json!({"target": HOST, "port": service.port}).to_string();
+    assert_eq!(hub.forwards("DELETE", Some(&key)).await.0, 204);
+    hub.wait_without_ssh();
+}
+
 /// The hub's `ssh` processes that hold a forward, not a bridge.
-fn forward_ssh(hub: &HubServer) -> Vec<i32> {
+fn forward_ssh(hub: &impl HubProcess) -> Vec<i32> {
     hub.ssh()
         .into_iter()
         .filter(|pid| {
@@ -2559,32 +2086,6 @@ fn forward_ssh(hub: &HubServer) -> Vec<i32> {
                 .is_ok_and(|cmdline| cmdline.split(|b| *b == 0).any(|arg| arg == b"-L"))
         })
         .collect()
-}
-
-/// A request to the hub's `/api/remote/forwards` with its session cookie;
-/// the status and the JSON body.
-fn forwards(hub: &HubServer, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
-    hub_json(hub, method, "/api/remote/forwards", body)
-}
-
-fn preferences(hub: &HubServer, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
-    hub_json(hub, method, "/api/remote/forward-preferences", body)
-}
-
-fn hub_json(
-    hub: &HubServer,
-    method: &str,
-    path: &str,
-    body: Option<&str>,
-) -> (u16, serde_json::Value) {
-    let (status, response) = http(hub.port, method, path, Some(&hub.cookie), body);
-    let body = response.split_once("\r\n\r\n").map_or("", |(_, body)| body);
-    let json = if body.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::from_str(body).unwrap_or_else(|e| panic!("not JSON ({e}): {response}"))
-    };
-    (status, json)
 }
 
 /// `GET /` of a server through a forward's local `port`.
@@ -2700,226 +2201,6 @@ fn expected_forward(remote: u16, local: u16) -> serde_json::Value {
     })
 }
 
-/// Own only the adapter's process group. Successful exit is reaped by the
-/// waiter; timeout, failed stdin handoff and unwinding kill/reap this group.
-struct BrowserChild {
-    child: Child,
-    reaped: bool,
-}
-
-impl Drop for BrowserChild {
-    fn drop(&mut self) {
-        if !self.reaped {
-            if let Ok(pid) = i32::try_from(self.child.id()) {
-                let _ = killpg(Pid::from_raw(pid), Signal::SIGKILL);
-            }
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
-/// Opt-in smoke adapter for D8. Only real Chrome, the actual UI/API and SSH
-/// can establish browser activation and the cross-window navigation boundary.
-/// No opt-in means UNRUN; an opted-in unavailable dependency is a test failure.
-#[test]
-fn the_browser_verifies_open_and_cross_window_stop_through_real_ssh() {
-    let (module, chrome) = match (
-        env::var_os("SPLITTY_TEST_PLAYWRIGHT_MODULE"),
-        env::var_os("SPLITTY_TEST_CHROME"),
-    ) {
-        (None, None) => {
-            eprintln!("browser UNRUN: set both SPLITTY_TEST_PLAYWRIGHT_MODULE and SPLITTY_TEST_CHROME to opt in");
-            return;
-        }
-        (Some(module), Some(chrome)) => (PathBuf::from(module), PathBuf::from(chrome)),
-        _ => panic!("browser BLOCKED: both opt-in variables are required"),
-    };
-    for path in [&module, &chrome] {
-        assert!(
-            path.is_absolute() && path.is_file(),
-            "browser BLOCKED: dependency must be an existing absolute file"
-        );
-    }
-    let node = which("node").expect("browser BLOCKED: node is required");
-    let python = which("python3").expect("browser BLOCKED: python3 is required");
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/testing/remote-forwards-browser.mjs");
-    assert!(
-        script.is_file(),
-        "browser BLOCKED: integrate the browser adapter before opting in"
-    );
-    // Unlike lab(), opted-in prerequisites cannot silently become a green skip.
-    let lab = Lab::start().unwrap_or_else(|reason| panic!("browser BLOCKED: {reason}"));
-    let marker = format!("splitty-browser-{:032x}", rand::random::<u128>());
-    let service = lab.marker_on_host(&python, &marker, None);
-    let openssl = which("openssl");
-    let api_marker = format!("{marker}-api");
-    let api_service = lab.marker_on_host(&python, &api_marker, openssl.as_deref());
-    let tls_ca = openssl.as_ref().map(|_| {
-        fs::read_to_string(api_service._directory.path().join("cert.pem"))
-            .expect("TLS fixture: public certificate")
-    });
-    if tls_ca.is_none() {
-        eprintln!("TLS UNRUN: openssl absent; API transport will use plain HTTP");
-    }
-    let payload = lab.payload();
-    let hub = HubServer::start(&lab, &payload);
-    assert_ne!(hub.port, 44877, "browser BLOCKED: reserved hub port");
-    assert_eq!(forwards(&hub, "GET", None), (200, serde_json::json!([])));
-    assert_eq!(
-        preferences(&hub, "GET", None),
-        (200, serde_json::json!({"version": 1, "forwards": []}))
-    );
-    assert!(
-        hub.ssh().is_empty(),
-        "fresh hub must have no host connection"
-    );
-    let local = free_local_port();
-    assert!(
-        local >= 1024 && local != 44877 && local != hub.port,
-        "browser BLOCKED: reserved local port"
-    );
-    // Recheck strictly: permission/unknown IPv6 errors are failures, not an
-    // absent family. Release the reservation before the real backend POST.
-    let frontend_reservation = splitty_remote::tunnel::reserve_exact(local)
-        .expect("browser BLOCKED: local port must be free on both supported families");
-    let api_local = free_local_port();
-    assert!(api_local >= 1024 && api_local != 44877 && api_local != hub.port);
-    drop(splitty_remote::tunnel::reserve_exact(api_local).expect("API local port availability"));
-    drop(frontend_reservation);
-    let input = serde_json::to_vec(&serde_json::json!({
-        "hubUrl": format!("http://127.0.0.1:{}", hub.port),
-        "cookie": hub.cookie, "target": HOST, "remote": service.port,
-        "local": local, "marker": marker, "playwrightModule": module,
-        "executablePath": chrome,
-        "apiService": {"remote": api_service.port, "local": api_local,
-            "marker": api_marker, "tlsCa": tls_ca},
-    }))
-    .expect("serialize private browser configuration");
-    assert!(
-        input.len() <= 16384,
-        "browser BLOCKED: configuration exceeds adapter limit"
-    );
-    let output = lab.dir.path().join("browser-report.json");
-    let stderr = lab.dir.path().join("browser.stderr");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let mut adapter = BrowserChild {
-        child: Command::new(node)
-            .arg(script)
-            .args(["--lab-only", "--config", "-"])
-            .env_remove("DEBUG")
-            .env_remove("PWDEBUG")
-            .env_remove("DEBUG_FILE")
-            .process_group(0)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::from(
-                fs::File::create(&output).expect("private browser report"),
-            ))
-            .stderr(Stdio::from(
-                fs::File::create(stderr).expect("private browser stderr"),
-            ))
-            .spawn()
-            .expect("browser BLOCKED: cannot spawn node adapter"),
-        reaped: false,
-    };
-    let mut stdin = adapter.child.stdin.take().expect("private browser stdin");
-    // Include a stalled stdin consumer in the same 120-second bound. Files
-    // capture output without pipe backpressure; neither stream is dumped raw.
-    nix::fcntl::fcntl(
-        stdin.as_raw_fd(),
-        nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
-    )
-    .expect("nonblocking adapter stdin");
-    let mut remaining = input.as_slice();
-    while !remaining.is_empty() {
-        assert!(
-            Instant::now() < deadline,
-            "browser FAILED: adapter stdin exceeded 120 seconds"
-        );
-        match stdin.write(remaining) {
-            Ok(0) => panic!("browser FAILED: adapter stdin closed"),
-            Ok(written) => remaining = &remaining[written..],
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(20))
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => panic!("browser FAILED: private stdin handoff failed"),
-        }
-    }
-    drop(stdin);
-    let status = loop {
-        assert!(
-            Instant::now() < deadline,
-            "browser FAILED: adapter exceeded 120 seconds"
-        );
-        if let Some(status) = adapter.child.try_wait().expect("wait for browser adapter") {
-            adapter.reaped = true;
-            break status;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    assert!(
-        fs::metadata(&output)
-            .expect("browser report metadata")
-            .len()
-            <= 65536,
-        "browser FAILED: oversized report"
-    );
-    let report: serde_json::Value =
-        serde_json::from_reader(fs::File::open(output).expect("browser report"))
-            .expect("browser FAILED: adapter did not return JSON");
-    // Print only the adapter's documented redacted report, never stderr or
-    // configuration. Defensive redaction also covers accidental echoing.
-    assert!(
-        !report.to_string().contains(&hub.cookie),
-        "browser FAILED: report contained a credential"
-    );
-    eprintln!("browser adapter: {report}");
-    assert!(
-        status.success(),
-        "browser FAILED/BLOCKED: adapter exit {status}"
-    );
-    assert_eq!(report["status"], "pass", "browser did not pass");
-    assert_eq!(
-        report["cleanup"]["status"], "pass",
-        "browser cleanup did not pass"
-    );
-    let checks = report["checks"]
-        .as_array()
-        .expect("browser scenario results");
-    assert_eq!(
-        checks.len(),
-        3,
-        "browser and service transport scenarios are required"
-    );
-    for scenario in [
-        "verified-open",
-        "cross-window-stale-response",
-        "manual-services-transport",
-    ] {
-        assert!(
-            checks.iter().any(|check| check["scenario"] == scenario),
-            "browser scenario missing: {scenario}"
-        );
-    }
-    let transport = &checks[2];
-    assert_eq!(transport["manualSavedServices"], 2);
-    assert_eq!(transport["rawWebSocket"], true);
-    assert_eq!(transport["hmrStyleUpdate"], true);
-    assert_eq!(transport["apiAuthAndBytes"], true);
-    assert_eq!(
-        transport["tls"]["status"],
-        if openssl.is_some() { "pass" } else { "unrun" }
-    );
-    assert_eq!(forwards(&hub, "GET", None), (200, serde_json::json!([])));
-    assert_eq!(
-        preferences(&hub, "GET", None),
-        (200, serde_json::json!({"version": 1, "forwards": []}))
-    );
-    hub.wait_without_ssh();
-}
-
 /// Smoke-level D7 regression: a real OpenSSH child has reached ProxyCommand,
 /// but sshd has not even started. TCP reachability cannot authorize success.
 /// The positive control uses the identical gate and actual host service.
@@ -2928,15 +2209,15 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
     let Some(lab) = lab() else { return };
     let service = lab.serve_on_host(0);
     let payload = lab.payload();
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
     let local = free_local_port();
     let key = serde_json::json!({"target": HOST, "port": service.port}).to_string();
     let saved = serde_json::json!({
         "target": HOST, "port": service.port, "local": local, "label": "D7 service",
     })
     .to_string();
-    assert_eq!(preferences(&hub, "PUT", Some(&saved)).0, 200);
-    assert_eq!(forwards(&hub, "DELETE", Some(&key)).0, 204);
+    assert_eq!(hub.preferences("PUT", Some(&saved)).await.0, 200);
+    assert_eq!(hub.forwards("DELETE", Some(&key)).await.0, 204);
     let original = lab.saved_forwards();
     assert_eq!(original["forwards"][0]["enabled"], false);
 
@@ -2944,18 +2225,7 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
     // one. Success cannot be explained by a gate that never reaches real SSH.
     for competing in [true, false] {
         let gate = AuthGate::arm(&lab);
-        let port = hub.port;
-        let cookie = hub.cookie.clone();
-        let body = key.clone();
-        let mut opening = tokio::task::spawn_blocking(move || {
-            http(
-                port,
-                "POST",
-                "/api/remote/forwards",
-                Some(&cookie),
-                Some(&body),
-            )
-        });
+        let mut opening = hub.api_task("POST", "/api/remote/forwards", Some(key.clone()));
         gate.entered(&hub).await;
         let ssh = forward_ssh(&hub);
         let competitor = competing.then(|| CompetingListener::bind(local));
@@ -2972,7 +2242,10 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
                 .is_err(),
             "POST completed before authentication (competing={competing})"
         );
-        assert_eq!(forwards(&hub, "GET", None), (200, serde_json::json!([])));
+        assert_eq!(
+            hub.forwards("GET", None).await,
+            (200, serde_json::json!([]))
+        );
         assert_eq!(lab.saved_forwards(), original, "no premature resume");
         assert!(!gate.directory.join("passed").exists());
         assert!(
@@ -2981,7 +2254,7 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
         );
 
         gate.release();
-        let (status, response) = tokio::time::timeout(WAIT, opening)
+        let (status, body) = tokio::time::timeout(WAIT, opening)
             .await
             .expect("forward request deadline")
             .expect("request worker");
@@ -2989,9 +2262,6 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
             gate.directory.join("passed").exists(),
             "real sshd was released"
         );
-        let body: serde_json::Value =
-            serde_json::from_str(response.split_once("\r\n\r\n").expect("response body").1)
-                .expect("forward JSON");
         if competing {
             let log = gate.ssh_log();
             assert!(
@@ -3004,12 +2274,15 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
                     && log.contains("Could not request local forwarding"),
                 "OpenSSH must fail its actual local bind, not just time out: {log}"
             );
-            assert_eq!(status, 409, "{response}");
+            assert_eq!(status, 409, "{body}");
             assert_eq!(body["code"], "local_port_conflict", "{body}");
-            assert_eq!(forwards(&hub, "GET", None), (200, serde_json::json!([])));
+            assert_eq!(
+                hub.forwards("GET", None).await,
+                (200, serde_json::json!([]))
+            );
             hub.wait_without_ssh();
             assert_eq!(lab.saved_forwards(), original, "failed resume stays paused");
-            let (status, saved) = preferences(&hub, "GET", None);
+            let (status, saved) = hub.preferences("GET", None).await;
             assert_eq!(status, 200);
             assert_eq!(saved["forwards"][0]["enabled"], false);
             assert_eq!(saved["forwards"][0]["local"], local);
@@ -3027,7 +2300,7 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
                 gate.ssh_log().contains("Authenticated to "),
                 "positive control authenticated"
             );
-            assert_eq!(status, 200, "{response}");
+            assert_eq!(status, 200, "{body}");
             assert_eq!(body, expected_forward(service.port, local));
             assert_eq!(
                 forward_ssh(&hub),
@@ -3036,11 +2309,11 @@ async fn the_hub_waits_for_real_ssh_bind_after_the_pre_auth_gate() {
             );
             assert_eq!(listeners(local), [format!("0100007F:{local:04X}")]);
             assert_eq!(health(local), "ok", "bytes reach the actual remote service");
-            let (_, saved) = preferences(&hub, "GET", None);
+            let (_, saved) = hub.preferences("GET", None).await;
             assert_eq!(saved["forwards"][0]["enabled"], true);
             assert!(saved["forwards"][0].get("lastError").is_none());
             assert_eq!(saved, lab.saved_forwards());
-            assert_eq!(forwards(&hub, "DELETE", Some(&key)).0, 204);
+            assert_eq!(hub.forwards("DELETE", Some(&key)).await.0, 204);
             hub.wait_without_ssh();
         }
         drop(competitor);
@@ -3061,7 +2334,7 @@ fn saved_document(mut entries: Vec<serde_json::Value>) -> serde_json::Value {
 async fn wait_for_active(hub: &HubServer, expected: &serde_json::Value) {
     let deadline = Instant::now() + WAIT;
     loop {
-        let (status, actual) = forwards(hub, "GET", None);
+        let (status, actual) = hub.forwards("GET", None).await;
         assert_eq!(status, 200);
         if actual == *expected {
             return;
@@ -3077,8 +2350,11 @@ async fn wait_for_active(hub: &HubServer, expected: &serde_json::Value) {
 async fn assert_passive(hub: &HubServer, lab: &Lab, invocations: &str, saved: &serde_json::Value) {
     let deadline = Instant::now() + Duration::from_millis(300);
     loop {
-        assert_eq!(preferences(hub, "GET", None), (200, saved.clone()));
-        assert_eq!(forwards(hub, "GET", None), (200, serde_json::json!([])));
+        assert_eq!(hub.preferences("GET", None).await, (200, saved.clone()));
+        assert_eq!(
+            hub.forwards("GET", None).await,
+            (200, serde_json::json!([]))
+        );
         assert_eq!(lab.ssh_invocations(), invocations, "passive work ran ssh");
         assert!(hub.ssh().is_empty());
         assert_eq!(lab.saved_forwards(), *saved);
@@ -3114,16 +2390,14 @@ async fn browse_empty_host(hub: &HubServer) -> HubSocket {
 /// Restore is asynchronous after ready. Observe after it completes as well,
 /// allowing ordinary host traffic but rejecting delayed hub-owned frames.
 async fn assert_no_extra_hub_frames(socket: &mut HubSocket) {
-    use futures::StreamExt;
-
     let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
     loop {
         if tokio::time::Instant::now() >= deadline {
             return;
         }
-        match tokio::time::timeout_at(deadline, socket.0.next()).await {
+        match tokio::time::timeout_at(deadline, socket.try_next()).await {
             Err(_) => return,
-            Ok(Some(Ok(Message::Text(text)))) => {
+            Ok(Some(Message::Text(text))) => {
                 let message: serde_json::Value = serde_json::from_str(&text).expect("host JSON");
                 assert!(
                     !message["type"]
@@ -3133,9 +2407,11 @@ async fn assert_no_extra_hub_frames(socket: &mut HubSocket) {
                     "unexpected hub frame after remote.ready and restoration: {message}"
                 );
             }
-            Ok(Some(Ok(Message::Close(frame)))) => panic!("host relay closed: {frame:?}"),
-            Ok(Some(Ok(_))) => {}
-            other => panic!("host relay failed while observing restoration: {other:?}"),
+            Ok(Some(Message::Binary(_))) => {}
+            Ok(None) => panic!(
+                "host relay closed: {:?}",
+                socket.connection().closed_reason()
+            ),
         }
     }
 }
@@ -3149,7 +2425,7 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
     let api = lab.serve_on_host(0);
     let payload = lab.payload();
     let before_start = lab.ssh_invocations();
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
     // Keep ports distinct while selecting; drop every reservation before API
     // work, so passive saves cannot hide an attempted bind behind a conflict.
     let reservations: Vec<_> = (0..3)
@@ -3175,32 +2451,32 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
             "target": target, "remote": remote, "local": local, "label": label, "enabled": true,
         });
         assert_eq!(
-            preferences(&hub, "PUT", Some(&request.to_string())),
+            hub.preferences("PUT", Some(&request.to_string())).await,
             (200, expected.clone())
         );
         entries.push(expected);
     }
     let api_key = serde_json::json!({"target": HOST, "port": api.port}).to_string();
-    assert_eq!(forwards(&hub, "DELETE", Some(&api_key)).0, 204);
+    assert_eq!(hub.forwards("DELETE", Some(&api_key)).await.0, 204);
     entries[1]["enabled"] = false.into();
     let edit = serde_json::json!({"target": HOST, "port": api.port, "label": "Paused API"});
     entries[1]["label"] = "Paused API".into();
     assert_eq!(
-        preferences(&hub, "PUT", Some(&edit.to_string())),
+        hub.preferences("PUT", Some(&edit.to_string())).await,
         (200, entries[1].clone())
     );
     let saved = saved_document(entries.clone());
     assert_passive(&hub, &lab, &before_start, &saved).await;
     drop(hub);
 
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
     assert_passive(&hub, &lab, &before_start, &saved).await;
     for port in &locals {
         let _unreserved =
             TcpListener::bind(("127.0.0.1", *port)).expect("passive port is unreserved");
     }
     let automatic = serde_json::json!({"target": HOST, "port": api.port, "automatic": true});
-    let (status, error) = forwards(&hub, "POST", Some(&automatic.to_string()));
+    let (status, error) = hub.forwards("POST", Some(&automatic.to_string())).await;
     assert_eq!(status, 409, "{error}");
     assert_eq!(error["code"], "forward_paused");
     assert_eq!(
@@ -3222,7 +2498,7 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
         listeners(locals[2]).is_empty(),
         "other host stays disconnected"
     );
-    assert_eq!(preferences(&hub, "GET", None), (200, saved.clone()));
+    assert_eq!(hub.preferences("GET", None).await, (200, saved.clone()));
     assert_eq!(
         lab.ssh_invocations()
             .lines()
@@ -3240,7 +2516,7 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
     wait_for_active(&hub, &serde_json::json!([frontend_forward])).await;
     assert_no_extra_hub_frames(&mut socket).await;
     assert_eq!(forward_ssh(&hub), frontend_ssh);
-    assert_eq!(preferences(&hub, "GET", None), (200, saved));
+    assert_eq!(hub.preferences("GET", None).await, (200, saved));
     assert_eq!(
         lab.ssh_invocations()
             .lines()
@@ -3252,10 +2528,10 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
     // Forget changes metadata only, including on repeated calls.
     let frontend_key = serde_json::json!({"target": HOST, "port": frontend.port}).to_string();
     for _ in 0..2 {
-        assert_eq!(preferences(&hub, "DELETE", Some(&frontend_key)).0, 204);
+        assert_eq!(hub.preferences("DELETE", Some(&frontend_key)).await.0, 204);
         assert_eq!(forward_ssh(&hub), frontend_ssh);
         assert_eq!(
-            forwards(&hub, "GET", None),
+            hub.forwards("GET", None).await,
             (200, serde_json::json!([frontend_forward]))
         );
         assert_eq!(
@@ -3266,16 +2542,19 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
     }
     entries.remove(0);
     let forgotten = saved_document(entries.clone());
-    assert_eq!(preferences(&hub, "GET", None), (200, forgotten.clone()));
+    assert_eq!(hub.preferences("GET", None).await, (200, forgotten.clone()));
     assert_eq!(lab.saved_forwards(), forgotten);
     socket.close().await;
     drop(hub);
     let before_restart = lab.ssh_invocations();
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
     assert_passive(&hub, &lab, &before_restart, &forgotten).await;
     let mut socket = browse_empty_host(&hub).await;
     assert_no_extra_hub_frames(&mut socket).await;
-    assert_eq!(forwards(&hub, "GET", None), (200, serde_json::json!([])));
+    assert_eq!(
+        hub.forwards("GET", None).await,
+        (200, serde_json::json!([]))
+    );
     assert!(
         forward_ssh(&hub).is_empty(),
         "neither forgotten nor paused restores"
@@ -3287,20 +2566,20 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
             .count(),
         1
     );
-    assert_eq!(forwards(&hub, "DELETE", Some(&frontend_key)).0, 404);
+    assert_eq!(hub.forwards("DELETE", Some(&frontend_key)).await.0, 404);
 
     // Explicit Resume is the remaining consent that can enable the paused API.
-    let (status, resumed) = forwards(&hub, "POST", Some(&api_key));
+    let (status, resumed) = hub.forwards("POST", Some(&api_key)).await;
     assert_eq!(status, 200, "{resumed}");
     assert_eq!(resumed, expected_forward(api.port, locals[1]));
     assert_eq!(health(locals[1]), "ok");
     entries[0]["enabled"] = true.into();
     assert_eq!(
-        preferences(&hub, "GET", None),
+        hub.preferences("GET", None).await,
         (200, saved_document(entries.clone()))
     );
     assert_eq!(lab.saved_forwards(), saved_document(entries));
-    assert_eq!(forwards(&hub, "DELETE", Some(&api_key)).0, 204);
+    assert_eq!(hub.forwards("DELETE", Some(&api_key)).await.0, 204);
     assert!(forward_ssh(&hub).is_empty(), "Stop reaps the forward");
     assert!(listeners(locals[1]).is_empty());
     socket.close().await;
@@ -3315,13 +2594,13 @@ async fn saved_forwards_restore_lazily_after_real_hub_restart_and_forget_stays_l
 /// on `127.0.0.1` alone although the lab's configuration sets `GatewayPorts
 /// yes`, at `http://localhost:<port>`; a killed forward `ssh` is rebuilt on
 /// the same port; the server's end is reported; `DELETE` ends the forward's
-/// `ssh` and frees the port; a forward ends with `serve` on SIGTERM too (a
+/// `ssh` and frees the port; a forward ends with the hub on SIGTERM too (a
 /// smoke test: only the real process shows what a signal leaves behind).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
     let Some(lab) = lab() else { return };
     let payload = lab.payload();
-    let mut hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
     let port = free_local_port();
 
     let mut socket = hub.open(HOST).await;
@@ -3370,7 +2649,7 @@ async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
 
     // Forwarded to the same port here, on 127.0.0.1 only.
     let body = format!(r#"{{"target":"{HOST}","port":{port}}}"#);
-    let (status, forward) = forwards(&hub, "POST", Some(&body));
+    let (status, forward) = hub.forwards("POST", Some(&body)).await;
     assert_eq!(status, 200, "{forward}");
     assert_eq!(
         forward,
@@ -3393,7 +2672,7 @@ async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
         let rebuilt = forward_ssh(&hub);
-        let (_, list) = forwards(&hub, "GET", None);
+        let (_, list) = hub.forwards("GET", None).await;
         if list[0]["state"] == "up" && !rebuilt.is_empty() && !rebuilt.contains(&killed[0]) {
             assert_eq!(list, serde_json::json!([forward]), "the same forward");
             break;
@@ -3415,7 +2694,7 @@ async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
         }
     }
 
-    let (status, _) = forwards(&hub, "DELETE", Some(&body));
+    let (status, _) = hub.forwards("DELETE", Some(&body)).await;
     assert_eq!(status, 204);
     assert_eq!(
         forward_ssh(&hub),
@@ -3423,41 +2702,38 @@ async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
         "the forward's ssh ended"
     );
     assert_eq!(listeners(port), Vec::<String>::new());
-    let (_, list) = forwards(&hub, "GET", None);
+    let (_, list) = hub.forwards("GET", None).await;
     assert_eq!(list, serde_json::json!([]));
 
-    // A forward does not outlive `serve` ended with SIGTERM.
-    let (status, again) = forwards(&hub, "POST", Some(&body));
+    // A forward does not outlive the hub ended with SIGTERM.
+    let (status, again) = hub.forwards("POST", Some(&body)).await;
     assert_eq!(status, 200, "{again}");
     let held = forward_ssh(&hub);
     assert_eq!(held.len(), 1, "one ssh holds the forward: {held:?}");
     socket.close().await;
-    kill(Pid::from_raw(hub.child.id() as i32), Signal::SIGTERM).expect("SIGTERM serve");
+    kill(Pid::from_raw(hub.pid as i32), Signal::SIGTERM).expect("SIGTERM the hub");
     let deadline = std::time::Instant::now() + WAIT;
-    while hub.child.try_wait().expect("wait for serve").is_none() {
+    while !hub.ended() {
         assert!(
             std::time::Instant::now() < deadline,
-            "serve did not end on SIGTERM"
+            "the hub did not end on SIGTERM"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
     while Path::new(&format!("/proc/{}", held[0])).exists() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the forward's ssh outlived serve"
+            "the forward's ssh outlived the hub"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(listeners(port), Vec::<String>::new());
 }
 
-#[path = "remote_connect/exposure_crash.rs"]
-mod exposure_crash;
-
 // ── Reverse forwards ────────────────────────────────────────────────────────
 
 /// The hub's `ssh` processes that hold a reverse forward.
-fn reverse_ssh(hub: &HubServer) -> Vec<i32> {
+fn reverse_ssh(hub: &impl HubProcess) -> Vec<i32> {
     hub.ssh()
         .into_iter()
         .filter(|pid| {
@@ -3465,10 +2741,6 @@ fn reverse_ssh(hub: &HubServer) -> Vec<i32> {
                 .is_ok_and(|cmdline| cmdline.split(|b| *b == 0).any(|arg| arg == b"-R"))
         })
         .collect()
-}
-
-fn reverses(hub: &HubServer, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
-    hub_json(hub, method, "/api/remote/reverse-forwards", body)
 }
 
 /// What a program on the host gets from `address:port` there: the first
@@ -3555,13 +2827,13 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
         return;
     }
     let payload = lab.payload();
-    let hub = HubServer::start(&lab, &payload);
+    let hub = HubServer::start(&lab, &payload).await;
     let (_service, local) = local_marker_service();
     let port = 18431;
     let share = serde_json::json!({"target": HOST, "port": port, "local": local}).to_string();
 
     let before = lab.ssh_invocations();
-    let (status, shared) = reverses(&hub, "POST", Some(&share));
+    let (status, shared) = hub.reverses("POST", Some(&share)).await;
     if splitty_remote::tunnel::exposure::check_sharing_supported()
         .is_err_and(|error| error.kind() == io::ErrorKind::Unsupported)
     {
@@ -3574,7 +2846,10 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
             "unsupported sharing must fail before any SSH preparation"
         );
         assert!(reverse_ssh(&hub).is_empty());
-        assert_eq!(reverses(&hub, "GET", None), (200, serde_json::json!([])));
+        assert_eq!(
+            hub.reverses("GET", None).await,
+            (200, serde_json::json!([]))
+        );
         assert!(!lab
             .dir
             .path()
@@ -3628,7 +2903,7 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
     kill(Pid::from_raw(ssh[0]), Signal::SIGKILL).expect("kill ssh");
     let deadline = Instant::now() + WAIT;
     loop {
-        let (_, list) = reverses(&hub, "GET", None);
+        let (_, list) = hub.reverses("GET", None).await;
         let pids = reverse_ssh(&hub);
         if list[0]["state"] == "up" && !pids.is_empty() && pids != ssh {
             break;
@@ -3639,7 +2914,7 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
     assert_eq!(from_host(&lab, "127.0.0.1", port), "local-service");
 
     let key = serde_json::json!({"target": HOST, "port": port}).to_string();
-    assert_eq!(reverses(&hub, "DELETE", Some(&key)).0, 204);
+    assert_eq!(hub.reverses("DELETE", Some(&key)).await.0, 204);
     let deadline = Instant::now() + WAIT;
     while !host_listeners(&lab, port).is_empty() {
         assert!(Instant::now() < deadline, "the relay ends after Stop");

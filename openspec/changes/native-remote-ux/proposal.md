@@ -68,6 +68,8 @@ private mapping labels must remain private throughout implementation.
 
 ## Carried-over design notes
 
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.
+
 - 2026-11-11, from `native-drawer-host-ports`: keep exact host/source capture,
   verified endpoints, cancellation and bounded menus. A popup's lifetime is not
   the forwarding lifetime. Replace the presentation without weakening these rules.

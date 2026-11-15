@@ -1,5 +1,7 @@
 # Enhancement Proposal: OSC 133 Semantic Prompts for Splitty
 
+> Historical note — 2026-11-15, `remove-browser-access`: The WebSocket and xterm.js client framing below is historical after removal of the web client. Server-side OSC 133 semantics and shell integration remain applicable; native connections carry the session events.
+
 > Status: implemented, with one part removed later. The server no longer forwards each
 > boundary as an `osc133` event (section 3.3, step 3): no window read it. The scanner, the
 > per-session semantic state sent with `created`/`attached`, `process.idle` and the program

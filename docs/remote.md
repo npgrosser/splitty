@@ -9,15 +9,9 @@ installs a matching Splitty server through SSH.
 The [connection diagrams](networking.md) show the local/remote process boundaries,
 where listeners exist and which sessions survive a disconnect.
 
-There are two ways to look at a host:
-
-| Way | Where | Needs locally |
-|---|---|---|
-| [Remote screens](#remote-screens) | Screens of the host next to your local screens, in the same window | The app, or `splitty serve` for the [browser UI](cli.md#browser-ui) |
-| [`splitty connect`](#splitty-connect) | Your browser | The `splitty` command |
-
-Host keys are checked strictly in both: connect to a new host once with plain
-`ssh` and verify its fingerprint.
+Remote screens appear in the app alongside local screens. Terminal-only access
+is available through `ssh -t me@192.0.2.10 splitty attach`. Host keys are checked
+strictly; connect to a new host once with plain `ssh` and verify its fingerprint.
 
 ## Host requirements
 
@@ -44,15 +38,14 @@ example); type to filter, or type any `[user@]host[:port]` and choose
 state and its running screens, with **New Screen**. For a host that already has
 screens in the window, the **+** on its line in the drawer creates another one.
 The local server installs its server on the host when it lacks it, starts the
-host's daemon and relays it over SSH, as `splitty connect` does, but without a
-tunnel or a browser tab. The host's panel shows how far the connection got, and
+host's daemon and relays its native connection over SSH exec stdin/stdout. The host's panel shows how far the connection got, and
 errors with a retry. When SSH asks for a password or a key's passphrase, the app
 asks in a dialog of its own.
 
 - A remote screen's tabs, splits, shells and working directories are the host's: `splitty split` in one of its panes splits it there. Your theme, font and keybindings apply; your local shell profiles do not, so a new tab there is a plain terminal of the host.
 - In the drawer, local screens come first, under **This computer**. Each host with open screens follows under a line of its own with its name and connection dot (connected, reconnecting, offline), a ports button with the number of its ports, a **+** for another screen there and, on hover, an unplug button that closes the host. Hosts without open screens are not in the list but under **Hosts**. Screen shortcuts and the mouse wheel over the drawer switch screens in that order; drag to reorder screens within a group, and host groups among each other. A dropped connection shows reconnecting and comes back with what was printed meanwhile; a host that stays unreachable for two minutes is shown offline, with a retry.
 - **Detaching** a remote screen (the unplug button on its row, or **Detach from This Window** in its menu) removes it from the window without asking, and everything keeps running on the host. Local screens use × to close. **Terminate Screen…** in a remote screen's menu **ends** the screen on the host, with its panes and their processes. Quitting or closing the window only detaches remote screens; their processes never hold up quitting.
-- **Closing a host** (the unplug button on its line, or **Close host** in its panel) takes all of its screens out of the window; they keep running. The local server remembers which screens were open: the host's panel then offers to reopen them (**Reopen 1 Screen**, **Reopen 2 Screens**, …), and **Open all … Screens** for the host's screens that are not open here. With **Reconnect at start** on in a host's panel, the app connects that host once at startup and brings back its screens (a browser window connects it at once too when it brings back screens of it); otherwise a host connects only when you ask, so an unreachable host does not slow the start. A screen the host no longer has is reported as missing, never recreated silently.
+- **Closing a host** (the unplug button on its line, or **Close host** in its panel) takes all of its screens out of the window; they keep running. The local server remembers which screens were open: the host's panel then offers to reopen them (**Reopen 1 Screen**, **Reopen 2 Screens**, …), and **Open all … Screens** for the host's screens that are not open here. With **Reconnect at start** on in a host's panel, the app connects that host once at startup and brings back its screens; otherwise a host connects only when you ask, so an unreachable host does not slow the start. A screen the host no longer has is reported as missing, never recreated silently.
 - **The Hosts page** (Alt+H, Cmd+Shift+H on macOS, **Hosts and Ports** in the command palette, or **Manage hosts…** at the end of the host list) lists every host you used, connected or not, with its state, the version of a connected host's daemon, its screens and its ports. Disconnected hosts show the last seen names and pane counts, saved by the local server across restarts. Reading this list never connects hosts at startup.
 - **Updates:** for a host that runs another server version, its entry on the Hosts page offers **Update…**. The dialog names the current and the replacement version, and **Update host** confirms. Eligible older native daemons update through their verified service identity. For a compatible legacy Linux daemon, the dialog says how many sessions were observed; the backend checks its process identity and session keepers again before changing anything. Confirming applies to one attempt; an ordinary retry never migrates a legacy daemon. If migration cannot be verified, including for legacy macOS daemons, the daemon keeps running. Newer daemons and daemons without session keepers are not replaced this way.
 - On Windows the local server runs in WSL, so remote screens use WSL's `ssh`, keys and SSH configuration.
@@ -77,7 +70,7 @@ The other direction: a service on this machine (a local API, a database, a model
 
 - **Share a local port…** in the ports list of a host's line opens the host's shared local ports. Type the local port and, optionally, the port it gets on the host (`11434`, or `11434:8080`; without a host port it gets the same number), then choose **Share local port …**. Nothing is shared without that choice; detected ports, links and reconnects never start a share.
 - On the host, the port listens on `127.0.0.1` and `::1` only, and Splitty accepts a connection only from a program running as the user you log in as. Other users on the host, and other machines, cannot reach it, whatever the server's `GatewayPorts` says. Programs running as you on the host can, and most local services ask for no password: share only what you would let those programs use. The list says so before you share, and warns more strongly for ports usually used by SSH, Docker, Kubernetes, Remote Desktop or VNC.
-- Only `localhost` of this machine is shared, one port per share, never another machine of your network. Every active Splitty browser gateway in the supported local reservation domain is refused, including gateways from another configuration directory. A gateway also refuses a port already reserved for sharing.
+- Only `localhost` of this machine is shared, one port per share, never another machine of your network. Internal endpoints are refused. The exposure registry also keeps live internal-listener claims from older processes of the same user reserved, across configuration directories.
 - Linux hosts only for now: the owner check reads `/proc` on the host, and a Mac host refuses the share. A port already in use on the host fails the share; nothing on the host is stopped.
 - A share's row stops or resumes it. On a running share, **Share again when this host connects** remembers it: a remembered share starts again only when its host connects, and **Stop and forget** ends it and removes it. A lost connection frees the host's port within about a minute, and a running share is rebuilt on the same port.
 - Reverse sharing is unavailable on Windows and WSL: their reachable localhost services have no shared Splitty reservation authority. It fails before starting SSH, including with mirrored networking. Forwarding a host service to this machine remains available.
@@ -85,8 +78,7 @@ The other direction: a service on this machine (a local API, a database, a model
 
 ### Forwarding registry requirements
 
-On native Linux and macOS, reverse shares and explicit `serve`/`connect` browser
-gateways use one persistent registry rooted in the OS account's home directory:
+On native Linux and macOS, reverse shares use one persistent registry rooted in the OS account's home directory:
 `.local/state/splitty/exposure` on Linux and
 `Library/Application Support/Splitty/exposure` on macOS. `HOME`, XDG variables and
 `SPLITTY_CONFIG_DIR` do not select a separate registry.
@@ -98,80 +90,14 @@ regular files with mode `0600`. Supported persistent local filesystem semantics
 and a verifiable shared process/network view are required as well.
 
 For example, an existing `.local` or `.local/state` with mode `0775` prevents a
-native Linux browser gateway or reverse share from starting. This applies even
-when the gateway itself starts no share: another Splitty process may already be
-sharing its prospective port. Splitty does not chmod shared parent directories
+native Linux reverse share from starting. Splitty does not chmod shared parent directories
 or bypass the registry. This restriction is separate from native terminal
 connections, which support owned `0775` ancestors through pinned endpoint
 directories and peer checks.
 
-Windows and WSL instead refuse reverse sharing entirely; their explicit browser
-gateways and forward-to-local application ports remain available. Their policy
+Windows and WSL instead refuse reverse sharing entirely; forward-to-local
+application ports remain available. Their policy
 is not a fallback for an unsupported or unreadable native Linux registry.
-
-## `splitty connect`
-
-Opens a local browser gateway connected to one host over SSH:
-
-```bash
-splitty connect user@remote-host
-```
-
-The command installs or locates the host's server, asks for format-2 discovery
-(`remote-handshake --json --ensure-daemon`), and opens a native bridge over SSH
-stdin/stdout to its private daemon socket. The host opens no terminal-service
-TCP listener. Your machine owns the browser listener, UI assets and one-use
-launch code; browser credentials are created locally and never sent to the
-host. `--no-open` prints the URL (`SPLITTY_URL=…`) without opening a browser.
-
-The gateway chooses a free local port independently of the host. Its address,
-cookie name and browser session store stay the same while SSH reconnects or the
-host daemon is replaced. Existing tabs reconnect through that gateway. No new
-URL or host-issued browser credential is needed.
-
-`--forward` additionally opens the requested development ports through separate
-owned SSH connections:
-
-```bash
-# Ports 3000 and 5173 of the host on the same ports here, its port 80 on 8080
-splitty connect user@remote-host --forward 3000,5173 --forward 8080:80
-```
-
-Each forward binds `127.0.0.1` here and reaches `localhost:<port>` on the host,
-including an IPv6-only host service. An occupied requested port gets a free
-alternate; `connect` announces the actual mapping as
-`Forwarding http://localhost:<port> -> <host>:<port>` and rebuilds it on that
-port after a drop. Open forwarded servers as `localhost`, as announced; the
-canonical gateway launch URL uses `127.0.0.1`. No Splitty credentials are added
-to forwarded application traffic. Ctrl+C ends the gateway and its requested
-forwards while the host daemon and sessions keep running.
-
-`--json` prints one JSON object per line instead of text: `progress`
-(`step`: `install|daemon|started|tunnel`, `message`), `notice` (`message`),
-`ready` (`url`, `port`), one `forward` after it for each requested mapping
-(`remote`, `local`, `url`), `lost` (`message`), `retry` (`message`, `retryIn`
-in seconds), `restored`, `failed` (`message`, optional `hint`) and `closed`.
-Daemon replacement reports `restored` with the original gateway URL. A failure
-exits with 1, rejected arguments with 2, and Ctrl+C with 0. `--no-open` controls
-browser launch in both output modes.
-
-- If no daemon runs, the command starts one at the host's private endpoint.
-  An older daemon can be updated automatically only when it has keepers, a
-  verifiable native identity and the matching installed replacement. The stop
-  request names that exact instance. Newer or non-kept daemons remain running
-  and require explicit migration on the host.
-  Versions follow SemVer precedence, so `0.2.0-dev.10` can replace
-  `0.2.0-dev.9`, and `0.2.0` can replace either. Build metadata alone does not
-  trigger replacement; an invalid version never authorizes an automatic update.
-- Network loss retries with bounded backoff for at most ten minutes. Host-key,
-  authentication and permanent protocol/installation errors require action.
-  A rebuilt container can reinstall the server; a restarted host can start its
-  daemon again, without changing the local browser origin.
-- Successful connections record the target in
-  `~/.config/splitty/recent-hosts.json` (the last 20, most recent first).
-- Gateways have separate cookie names and credential stores. Browser cookies
-  are still scoped by hostname rather than port; this does not isolate them
-  from every other HTTP service on the same hostname.
 
 ## Installing Splitty on hosts
 
@@ -182,5 +108,5 @@ minutes to finish. Progress reports do not renew these limits. Native framing
 and service handshakes retain their separate five-second deadlines.
 
 - On a Linux or macOS host without Splitty (or with another version), the client installs its own server first, through SSH, to `~/.local/share/splitty/remote/<version>/` (checksum verified on the host; nothing is downloaded there). It needs a payload: the released static `splitty` (`splitty-wsl-x86_64.tar.gz`) installs itself on x86_64 hosts and carries the servers for aarch64 hosts and for Macs (Apple silicon and Intel); any build takes one from `SPLITTY_REMOTE_PAYLOAD=<archive>`, an archive as `packaging/windows/build-wsl-payload.sh <repo> <out> [commit] [x86_64|aarch64|darwin-aarch64|darwin-x86_64]` builds it (on Linux, the macOS ones cross-built with a pinned zig that `packaging/zig-toolchain.sh` fetches; on a Mac, all four without zig).
-- Without a payload, `splitty` must be in the `PATH` of non-interactive SSH sessions on the remote machine, which often comes from `~/.profile` rather than `~/.bashrc`; `ssh user@remote-host splitty --version` shows whether it is.
-- On a Mac, the server `connect` or the hub installed keeps its own directory, `~/.config/splitty` (it runs with `SPLITTY_CONFIG_DIR` set to it): its daemon, sessions and private endpoints stay apart from a Splitty desktop app on that Mac, which keeps `~/Library/Application Support/splitty`. Updating the host from elsewhere never stops the app's sessions, and the app never attaches to that daemon.
+- Without a payload, `splitty` must be in the `PATH` of non-interactive SSH sessions on the remote machine, which often comes from `~/.profile` rather than `~/.bashrc`; `ssh me@192.0.2.10 splitty --version` shows whether it is.
+- On a Mac, the server the hub installed keeps its own directory, `~/.config/splitty` (it runs with `SPLITTY_CONFIG_DIR` set to it): its daemon, sessions and private endpoints stay apart from a Splitty desktop app on that Mac, which keeps `~/Library/Application Support/splitty`. Updating the host from elsewhere never stops the app's sessions, and the app never attaches to that daemon.

@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [actions, javascript-typescript, python, rust]
+        language: [actions, python, rust]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -61,7 +61,7 @@ jobs:
         uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           languages: ${{ matrix.language }}
-          # These four languages support extraction without a build, as in
+          # These three languages support extraction without a build, as in
           # default setup. Compilation and tests remain in the CI workflow.
           build-mode: none
 

@@ -81,3 +81,7 @@ No stored-format migration. Add the operation and capability first, then client-
 
 - **NSR-1** (2026-11-08, provisional, tbd): additive `move_screen` and `screen-placement-v1` express relative intent; never use a legacy full-list fallback.
 - **NSR-2** (2026-11-08, provisional, tbd): collapse duplicate entries only for the moved Screen, preserve all other order entries, and reject existing but unlisted moved/anchor Screens.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

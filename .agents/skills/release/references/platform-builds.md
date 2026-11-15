@@ -12,11 +12,11 @@ Use the existing bridge from the checkout at `release_sha`:
 bash scripts/windows-installer.sh
 ```
 
-It creates/reuses a Windows-drive checkout, fetches this repository's committed HEAD into it, and runs `packaging/windows/build.ps1` there using native Windows Rust/MSVC, Node/pnpm, NSIS (`makensis.exe` on `PATH` or in its default install directory) and WSL for the backend payload. It prints `Setup: <windows path>` for the built installer. Do not pass `--install` or `--skip-tests` by default. A Linux build inside WSL would produce the wrong desktop package.
+It creates/reuses a Windows-drive checkout, fetches this repository's committed HEAD into it, and runs `packaging/windows/build.ps1` there using native Windows Rust/MSVC, NSIS (`makensis.exe` on `PATH` or in its default install directory) and WSL for the backend payload. It prints `Setup: <windows path>` for the built installer. Do not pass `--install` or `--skip-tests` by default. A Linux build inside WSL would produce the wrong desktop package.
 
 The native executable links the pinned terminal library. `SPLITTY_GHOSTTY_VT_DIR` names the Windows path of a built prefix; without it the build runs `scripts/bootstrap-libghostty-vt.py` with Windows Python, which downloads and builds it once into the user cache.
 
-Use an existing clean `SPLITTY_WINDOWS_CHECKOUT` when configured. If the default preview checkout contains other work, choose a separate release checkout, e.g. under the Windows user's `Code` folder; never discard the preview's changes. The wrapper requires WSL interop, `powershell.exe`, `wslpath`, native Windows Git, Node/pnpm, Rust/MSVC and the payload prerequisites from `packaging/windows/README.md`. `SPLITTY_WINDOWS_PATH` can add native Windows tools to PATH.
+Use an existing clean `SPLITTY_WINDOWS_CHECKOUT` when configured. If the default preview checkout contains other work, choose a separate release checkout, e.g. under the Windows user's `Code` folder; never discard the preview's changes. The wrapper requires WSL interop, `powershell.exe`, `wslpath`, native Windows Git, Rust/MSVC and the payload prerequisites from `packaging/windows/README.md`. `SPLITTY_WINDOWS_PATH` can add native Windows tools to PATH.
 
 The Windows staging checkout's HEAD must equal `release_sha`. The native installer is `target/x86_64-pc-windows-msvc/release/bundle/native/Splitty_<VERSION>_x64-setup.exe` (the path the wrapper printed). Verify the file was produced during this build; pass its WSL path to the Downloads helper. The wrapper's current x64 restriction is real: report an unsupported Windows architecture instead of labeling an x64 package as native ARM64.
 
@@ -60,7 +60,7 @@ If payload artifacts are unavailable, build them locally from the release commit
 
 ## macOS
 
-Prerequisites: Xcode command-line tools, Rust (rustup), Python 3 and Node/pnpm. On an Apple silicon Mac, from the checkout at `release_sha` with the payload environment above:
+Prerequisites: Xcode command-line tools, Rust (rustup), Python 3. On an Apple silicon Mac, from the checkout at `release_sha` with the payload environment above:
 
 ```sh
 packaging/macos/native/build.sh \
@@ -68,13 +68,13 @@ packaging/macos/native/build.sh \
   --shell-integration "$payload_dir/darwin-aarch64/shell-integration"
 ```
 
-It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, assembles the ad-hoc signed `Splitty.app`, verifies its signature and writes `build/native-macos/Splitty_<VERSION>_aarch64.dmg` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this Mac's own `splitty` instead of the release's static server; say so if that was used. The app is built for the host's architecture: an Intel Mac produces `Splitty_<VERSION>_x64.dmg`, also published by the release.
+It builds the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, assembles the ad-hoc signed `Splitty.app`, verifies its signature and writes `build/native-macos/Splitty_<VERSION>_aarch64.dmg` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this Mac's own `splitty` instead of the release's static server; say so if that was used. The app is built for the host's architecture: an Intel Mac produces `Splitty_<VERSION>_x64.dmg`, also published by the release.
 
 Inspect the app executable's architecture with `file`/`lipo -info`, verify the bundle version, and copy the DMG to the macOS Downloads folder. Do not install into `/Applications` or stop a running app merely to produce a download.
 
 ## Native Linux
 
-Prerequisites: Rust, Python 3, Node.js 24 and pnpm, `dpkg-deb`, `rpmbuild` (Debian/Ubuntu: `rpm`; Fedora: `rpm-build`, `dpkg`) and the development packages `docs/development.md` lists under "The native app". Build for the supported x86_64 architecture, from the checkout at `release_sha` with the payload environment above:
+Prerequisites: Rust, Python 3, `dpkg-deb`, `rpmbuild` (Debian/Ubuntu: `rpm`; Fedora: `rpm-build`, `dpkg`) and the development packages `docs/development.md` lists under "The native app". Build for the supported x86_64 architecture, from the checkout at `release_sha` with the payload environment above:
 
 ```sh
 packaging/linux/native/build.sh \
@@ -82,6 +82,6 @@ packaging/linux/native/build.sh \
   --shell-integration "$payload_dir/x86_64/shell-integration"
 ```
 
-It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, and writes `splitty_<VERSION>_amd64.deb`, `splitty-<VERSION>-1.x86_64.rpm` and `splitty-<VERSION>-linux-x86_64.tar.gz` into `build/native-linux/` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this machine's own `splitty` instead of the release's static server; say so if that was used. The deb requires the glibc of the build machine or newer; the release builds on Ubuntu 22.04.
+It builds the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, and writes `splitty_<VERSION>_amd64.deb`, `splitty-<VERSION>-1.x86_64.rpm` and `splitty-<VERSION>-linux-x86_64.tar.gz` into `build/native-linux/` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this machine's own `splitty` instead of the release's static server; say so if that was used. The deb requires the glibc of the build machine or newer; the release builds on Ubuntu 22.04.
 
 Check the packages (`dpkg-deb --info`, `rpm -qip`, and `./splitty-gpui --help` from the unpacked tar.gz) and copy all three to the actual XDG Downloads folder with the helper. Do not install them or use `make install-*` for delivery to Downloads.

@@ -1,5 +1,5 @@
-//! One OS-user authority for browser listeners and deliberately shared local
-//! ports. No control/HTTP service is opened to coordinate reservations.
+//! Per-user reservations for shared ports, including live gateway claims from
+//! older processes. No listener is needed to coordinate reservations.
 #[cfg(any(target_os = "macos", test))]
 mod acl;
 #[cfg(all(test, target_os = "linux"))]
@@ -16,7 +16,6 @@ use splitty_transport::{
 };
 use std::{
     io,
-    net::{SocketAddr, TcpListener},
     path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
 };
@@ -361,37 +360,57 @@ impl Registry {
             port,
         })
     }
-    fn bind(self: &Arc<Self>, address: SocketAddr) -> io::Result<GatewayListener> {
+    /// The claim a browser gateway of process `owner` records when it binds
+    /// `port`, under the same conflict check, without a listener of its own.
+    #[cfg(any(test, feature = "testing"))]
+    fn record_gateway(&self, port: u16, owner: u32) -> io::Result<()> {
+        let owner = platform::identity(owner)?;
+        if owner.uid != self.scope.uid {
+            return Err(denied("a gateway record belongs to this user"));
+        }
         self.transaction(|records| {
-            // Port-zero allocation may select a currently unbound but still
-            // durably shared destination. Keep retrying a bounded number of
-            // kernel choices while the same conflict lock is held.
-            for _ in 0..64 {
-                if address.port() != 0 && self.conflict(records, address.port(), Purpose::Gateway) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::AddrInUse,
-                        "requested browser port is still shared",
-                    ));
-                }
-                let listener = TcpListener::bind(address)?;
-                let port = listener.local_addr()?.port();
-                if self.conflict(records, port, Purpose::Gateway) {
-                    drop(listener);
-                    continue;
-                }
-                listener.set_nonblocking(true)?;
-                let claim = self.add(records, port, Purpose::Gateway)?;
-                let listener = tokio::net::TcpListener::from_std(listener)?;
-                return Ok(GatewayListener {
-                    listener,
-                    _guard: GatewayGuard(Some(claim)),
-                });
+            if self.conflict(records, port, Purpose::Gateway) {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "requested browser port is still shared",
+                ));
             }
-            Err(io::Error::new(
-                io::ErrorKind::AddrNotAvailable,
-                "no provably unshared browser port is available",
-            ))
+            records.entries.push(Entry {
+                id: nonce(),
+                port,
+                scope: self.scope.clone(),
+                owner,
+                kind: Purpose::Gateway,
+                active: true,
+                workers: Vec::new(),
+            });
+            Ok(())
         })
+    }
+}
+
+/// Browser-gateway claims of other processes, for tests outside this crate.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use super::*;
+
+    /// Record a live gateway claim of process `owner` on `port` in this
+    /// user's registry, as a gateway process of an older Splitty does when
+    /// it binds: refused with `AddrInUse` while a share holds the port. The
+    /// claim lasts until `owner` ends.
+    pub async fn record_gateway(port: u16, owner: u32) -> io::Result<()> {
+        let registry = Registry::system()?.ok_or_else(unsupported)?;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match registry.record_gateway(port, owner) {
+                Err(error)
+                    if storage::is_busy(&error) && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await
+                }
+                result => return result,
+            }
+        }
     }
 }
 
@@ -407,60 +426,6 @@ impl Drop for Claim {
         // next transaction; a crash still leaves conservative on-disk claims.
         self.registry.retire(&self.id, None);
         let _ = self.registry.transaction(|_| Ok(()));
-    }
-}
-
-/// This guard must be held until the actual listener is closed. It carries no
-/// token, HTTP handler or authority to expose another destination.
-struct GatewayGuard(Option<Claim>);
-impl Drop for GatewayGuard {
-    fn drop(&mut self) {
-        self.0.take();
-    }
-}
-pub struct GatewayListener {
-    // Drop closes the actual listener before releasing its reservation.
-    listener: tokio::net::TcpListener,
-    _guard: GatewayGuard,
-}
-impl GatewayListener {
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
-    }
-    pub async fn accept(&self) -> io::Result<(tokio::net::TcpStream, SocketAddr)> {
-        self.listener.accept().await
-    }
-}
-
-/// Bind and publish under the same reservation lock. Windows/WSL allow
-/// gateways while refusing all reverse sharing until their broker authority is
-/// shared; a local registry must not pretend those runtimes are isolated.
-pub async fn bind_gateway(address: SocketAddr) -> io::Result<GatewayListener> {
-    if !address.ip().is_loopback() {
-        return Err(denied("browser listeners require loopback"));
-    }
-    match Registry::system()? {
-        Some(registry) => {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                match registry.bind(address) {
-                    Err(error)
-                        if storage::is_busy(&error) && tokio::time::Instant::now() < deadline =>
-                    {
-                        tokio::time::sleep(std::time::Duration::from_millis(5)).await
-                    }
-                    result => break result,
-                }
-            }
-        }
-        None => {
-            let listener = TcpListener::bind(address)?;
-            listener.set_nonblocking(true)?;
-            Ok(GatewayListener {
-                listener: tokio::net::TcpListener::from_std(listener)?,
-                _guard: GatewayGuard(None),
-            })
-        }
     }
 }
 
@@ -632,16 +597,12 @@ mod tests {
         }
     }
     fn port() -> u16 {
-        TcpListener::bind("127.0.0.1:0")
+        std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
             .port()
     }
-    fn address(port: u16) -> SocketAddr {
-        SocketAddr::from(([127, 0, 0, 1], port))
-    }
-
     #[tokio::test]
     async fn share_intents_exclude_gateways_across_configurations_and_both_families() {
         let (_dir, registry) = fixture();
@@ -653,29 +614,75 @@ mod tests {
             registry.owner.clone(),
         )
         .unwrap();
-        for address in [
-            address(port),
-            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
-        ] {
-            assert_eq!(
-                other.bind(address).err().unwrap().kind(),
-                io::ErrorKind::AddrInUse
-            );
-        }
-        let alternate = other.bind(address(0)).unwrap();
-        assert_ne!(alternate.local_addr().unwrap().port(), port);
-        drop(alternate);
+        assert_eq!(
+            other
+                .record_gateway(port, std::process::id())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AddrInUse
+        );
+        let alternate = port.checked_add(1).filter(|p| *p != 0).unwrap_or(1);
+        other.record_gateway(alternate, std::process::id()).unwrap();
         drop(share);
-        let gateway = other.bind(address(port)).unwrap();
+        other.record_gateway(port, std::process::id()).unwrap();
         assert!(other
             .transaction(|records| other.add(records, port, Purpose::Share))
             .is_err());
-        drop(gateway);
+        registry
+            .transaction(|records| {
+                records
+                    .entries
+                    .retain(|entry| entry.kind != Purpose::Gateway);
+                Ok(())
+            })
+            .unwrap();
         drop(
             other
                 .transaction(|records| other.add(records, port, Purpose::Share))
                 .unwrap(),
         );
+    }
+
+    /// A gateway claim another process holds reserves its port against
+    /// sharing until that process ends; a live share refuses the claim.
+    #[tokio::test]
+    async fn a_live_gateway_record_of_another_process_refuses_sharing_its_port() {
+        let (_dir, registry) = fixture();
+        let port = port();
+        let reserve =
+            || registry.transaction(|records| registry.add(records, port, Purpose::Share));
+        let mut older = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        registry.record_gateway(port, older.id()).unwrap();
+        assert_eq!(reserve().err().unwrap().kind(), io::ErrorKind::AddrInUse);
+        let other = self::port();
+        drop(
+            registry
+                .transaction(|records| registry.add(records, other, Purpose::Share))
+                .expect("only the gateway's port is reserved"),
+        );
+        older.kill().unwrap();
+        older.wait().unwrap();
+        let share = reserve().expect("a dead gateway's record reserves nothing");
+        let mut later = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert_eq!(
+            registry
+                .record_gateway(port, later.id())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::AddrInUse,
+            "a share refuses a gateway claim on its port"
+        );
+        drop(share);
+        registry.record_gateway(port, later.id()).unwrap();
+        later.kill().unwrap();
+        later.wait().unwrap();
     }
 
     #[tokio::test]
@@ -690,7 +697,7 @@ mod tests {
         worker.kill().await.unwrap();
         assert_eq!(admission.counts().workers, 0);
         assert!(
-            registry.bind(address(port)).is_err(),
+            registry.record_gateway(port, std::process::id()).is_err(),
             "a reconnect intent survives a dead generation"
         );
         let mut command = tokio::process::Command::new("sh");
@@ -698,12 +705,11 @@ mod tests {
         let mut worker = share.spawn(&mut command, &admission).await.unwrap();
         drop(share);
         assert!(
-            registry.bind(address(port)).is_err(),
+            registry.record_gateway(port, std::process::id()).is_err(),
             "closing the coordinator intent is not worker exit"
         );
         worker.kill().await.unwrap();
-        let gateway = registry.bind(address(port)).unwrap();
-        drop(gateway);
+        registry.record_gateway(port, std::process::id()).unwrap();
     }
 
     #[tokio::test]
@@ -720,9 +726,9 @@ mod tests {
         let mut second = share.spawn(&mut second, &admission).await.unwrap();
         drop(share);
         first.kill().await.unwrap();
-        assert!(registry.bind(address(port)).is_err());
+        assert!(registry.record_gateway(port, std::process::id()).is_err());
         second.kill().await.unwrap();
-        drop(registry.bind(address(port)).unwrap());
+        registry.record_gateway(port, std::process::id()).unwrap();
     }
 
     #[tokio::test]
@@ -751,7 +757,7 @@ mod tests {
             drop(share);
             if pending {
                 assert!(
-                    registry.bind(address(port)).is_err(),
+                    registry.record_gateway(port, std::process::id()).is_err(),
                     "unknown generation must survive owner death"
                 );
                 registry
@@ -762,11 +768,9 @@ mod tests {
                     })
                     .unwrap();
             } else {
-                drop(
-                    registry
-                        .bind(address(port))
-                        .expect("different verified process birth proves saved worker ended"),
-                );
+                registry
+                    .record_gateway(port, std::process::id())
+                    .expect("different verified process birth proves saved worker ended");
             }
         }
     }
@@ -784,10 +788,10 @@ mod tests {
                 Ok(claim)
             })
             .unwrap();
-        assert!(registry.bind(address(port)).is_err());
+        assert!(registry.record_gateway(port, std::process::id()).is_err());
         // A real owner can still revoke its intent, which has no worker.
         drop(claim);
-        drop(registry.bind(address(port)).unwrap());
+        registry.record_gateway(port, std::process::id()).unwrap();
     }
 
     #[tokio::test]
@@ -798,24 +802,23 @@ mod tests {
         let lock = registry.directory.join("registry.lock");
         let inode = std::fs::metadata(&lock).unwrap().ino();
         for _ in 0..3 {
-            let gateway = registry.bind(address(0)).unwrap();
-            drop(gateway);
+            registry.record_gateway(port(), std::process::id()).unwrap();
         }
         assert_eq!(std::fs::metadata(&lock).unwrap().ino(), inode);
         let state = registry.directory.join("registry.json");
         std::fs::write(&state, b"not json").unwrap();
-        assert!(registry.bind(address(0)).is_err());
+        assert!(registry.record_gateway(port(), std::process::id()).is_err());
         std::fs::remove_file(&state).unwrap();
         assert!(
-            registry.bind(address(0)).is_err(),
+            registry.record_gateway(port(), std::process::id()).is_err(),
             "missing publication after an existing lock is not empty"
         );
         std::fs::write(&state, br#"{"format":1,"entries":[]}"#).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(registry.bind(address(0)).is_err());
+        assert!(registry.record_gateway(port(), std::process::id()).is_err());
         std::fs::remove_file(&state).unwrap();
         std::os::unix::fs::symlink("registry.lock", &state).unwrap();
-        assert!(registry.bind(address(0)).is_err());
+        assert!(registry.record_gateway(port(), std::process::id()).is_err());
     }
 
     #[tokio::test]
@@ -850,9 +853,9 @@ mod tests {
         );
         assert_eq!(creator.metadata().unwrap().ino(), inode);
         drop(late);
-        assert!(registry.bind(address(port)).is_err());
+        assert!(registry.record_gateway(port, std::process::id()).is_err());
         drop(share);
-        drop(registry.bind(address(port)).unwrap());
+        registry.record_gateway(port, std::process::id()).unwrap();
     }
 
     #[tokio::test]
@@ -864,7 +867,7 @@ mod tests {
         drop(share); // nonblocking Drop cannot take the already-held lock
         assert_eq!(registry.retired.lock().unwrap().entries.len(), 1);
         drop(lock);
-        drop(registry.bind(address(port)).unwrap());
+        registry.record_gateway(port, std::process::id()).unwrap();
         assert!(registry.retired.lock().unwrap().entries.is_empty());
     }
 
@@ -877,12 +880,12 @@ mod tests {
         let valid = std::fs::read(&state).unwrap();
         std::fs::remove_file(&state).unwrap();
         std::fs::create_dir(&state).unwrap();
-        assert!(registry.bind(address(port)).is_err());
+        assert!(registry.record_gateway(port, std::process::id()).is_err());
         std::fs::remove_dir(&state).unwrap();
         std::fs::write(&state, valid).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert!(registry.bind(address(port)).is_err());
+        assert!(registry.record_gateway(port, std::process::id()).is_err());
         drop(share);
-        drop(registry.bind(address(port)).unwrap());
+        registry.record_gateway(port, std::process::id()).unwrap();
     }
 }

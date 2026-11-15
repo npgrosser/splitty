@@ -61,3 +61,7 @@ This adds only window-local state to the experimental native executable. Existin
 - **NB-1, 2026-11-08 (provisional, tbd):** Preserve at most 100 read/dedup records across a reconnect of the same source namespace; hide old badges until fresh canonical mapping under the current token proves the captured source, pane and session, without requiring notification replay. Clear records on source removal or local-service replacement.
 - **NB-2, 2026-11-08 (provisional, tbd):** Read notification switches independently from appearance, fail closed until first valid settings, retain last-good on read failure and purge disabled categories on refresh.
 - **NB-3, 2026-11-08 (provisional, tbd):** Associate session events only with a route proven at arrival; keep unknown-session events permanently unbadged. Preserve association through a reconnect only with fresh exact source/pane/session proof; treat reset gaps as unknown and prune on conclusive removal or replacement. Deliberate same-pane/same-session-ID PTY reincarnation is outside the wire's identity model.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

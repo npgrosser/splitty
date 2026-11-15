@@ -112,19 +112,4 @@ generate_ico "$NATIVE_ICONS/icon.ico"
 # ── macOS icon (project root) ──
 generate_icns "$ROOT/icon-macos.icns"
 
-# ── Frontend (React) — favicon + PWA icons ──
-resize 48  "$ROOT/frontend/public/favicon.png"
-resize 192 "$ROOT/frontend/public/icon-192.png"
-resize 512 "$ROOT/frontend/public/icon-512.png"
-
-# ── Frontend asset (used in UI) ──
-resize 256 "$ROOT/frontend/src/assets/splitty.png"
-
-# ── Frontend (Svelte) — favicon + PWA icons ──
-if [ -d "$ROOT/frontend-svelte/public" ]; then
-  resize 48  "$ROOT/frontend-svelte/public/favicon.png"
-  resize 192 "$ROOT/frontend-svelte/public/icon-192.png"
-  resize 512 "$ROOT/frontend-svelte/public/icon-512.png"
-fi
-
 echo "Done."

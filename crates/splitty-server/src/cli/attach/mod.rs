@@ -3,9 +3,8 @@
 //! it. The server keeps owning the session; detaching leaves it running.
 //!
 //! The server is the daemon of this machine, reached like `remote-bridge`
-//! reaches it (verified private Unix socket), or an explicit browser gateway
-//! named by `--addr` and `--token`. `SPLITTY_SOCK` is not used, so the pane list and the stream
-//! always come from the same server. Without either, the terminal controls a
+//! reaches it (verified private Unix socket). `SPLITTY_SOCK` is not used, so the pane list and the stream
+//! always come from the same server. Without a daemon, the terminal controls a
 //! session keeper of this machine directly, until a starting daemon takes it
 //! over and the attach continues through the daemon.
 
@@ -25,8 +24,6 @@ use super::CliError;
 pub struct Options {
     pub target: Option<String>,
     pub detach_key: DetachKey,
-    pub addr: Option<String>,
-    pub token: Option<String>,
 }
 
 /// How an attach ended without an error.
@@ -59,7 +56,7 @@ impl Outcome {
 }
 
 const NO_DAEMON: &str =
-    "no running Splitty daemon found (splitty attach uses daemon.json, or --addr with --token)";
+    "no running Splitty daemon found (splitty attach uses daemon.json, or the keepers of this machine)";
 
 /// Attach until the session or the user ends it.
 pub async fn run(options: Options) -> Result<Outcome, CliError> {
@@ -81,86 +78,38 @@ fn unavailable() -> CliError {
 
 #[cfg(unix)]
 async fn run_in_terminal(options: Options) -> Result<Outcome, CliError> {
-    use futures::{SinkExt, StreamExt};
-
     if !terminal::is_terminal() {
         return Err(CliError::Failed("splitty attach needs a terminal".into()));
     }
-    if options.addr.is_none() && options.token.is_none() {
-        let Some(info) = native_daemon()? else {
-            return run_on_keeper(options).await;
-        };
-        let connector = crate::native::client::Connector::default();
-        let mut api = connector.local(&info).await.map_err(native_error)?;
-        let reply = api
-            .request(
-                crate::service::catalog::Operation::MuxState,
-                serde_json::Map::new(),
-            )
-            .await
-            .map_err(native_error)?;
-        if reply.status != 200 {
-            return Err(CliError::Failed(reply.body.chars().take(4096).collect()));
-        }
-        let decoded = splitty_transport::codec::reserve_json(
-            reply.body.as_bytes(),
-            &api.sender().context().budget,
-            false,
-        )
-        .map_err(native_error)?;
-        let state = serde_json::from_str(&reply.body).map_err(native_error)?;
-        api.shutdown().await;
-        let panes = target::panes(&state);
-        let session_id = session_for(options.target.as_deref(), &panes, pick)?;
-        drop((panes, state, reply, decoded));
-        refuse_own_session(&session_id, std::env::var("SPLITTY_SESSION_ID").ok())?;
-        let client = connector.local(&info).await.map_err(native_error)?;
-        return show_native(client, session_id, options.detach_key).await;
-    }
-    let (addr, token) = explicit_server(options.addr.as_deref(), options.token.as_deref())?
-        .expect("explicit options were provided");
-    let api = super::ServerInfo {
-        transport: super::Transport::Tcp {
-            addr: addr.clone(),
-            token: token.clone(),
-        },
-        source: "attach",
+    let Some(info) = native_daemon()? else {
+        return run_on_keeper(options).await;
     };
-    let state = super::api_get(&api, "/api/mux/state").await?;
+    let connector = crate::native::client::Connector::default();
+    let mut api = connector.local(&info).await.map_err(native_error)?;
+    let reply = api
+        .request(
+            crate::service::catalog::Operation::MuxState,
+            serde_json::Map::new(),
+        )
+        .await
+        .map_err(native_error)?;
+    if reply.status != 200 {
+        return Err(CliError::Failed(reply.body.chars().take(4096).collect()));
+    }
+    let decoded = splitty_transport::codec::reserve_json(
+        reply.body.as_bytes(),
+        &api.sender().context().budget,
+        false,
+    )
+    .map_err(native_error)?;
+    let state = serde_json::from_str(&reply.body).map_err(native_error)?;
+    api.shutdown().await;
     let panes = target::panes(&state);
     let session_id = session_for(options.target.as_deref(), &panes, pick)?;
+    drop((panes, state, reply, decoded));
     refuse_own_session(&session_id, std::env::var("SPLITTY_SESSION_ID").ok())?;
-    let socket = super::socket::open(&addr, &token)
-        .await
-        .map_err(CliError::Failed)?;
-    let size = terminal::size(&std::io::stdout()).unwrap_or((80, 24));
-    let alternate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let raw = terminal::RawMode::enable(std::io::stdin(), std::io::stdout(), alternate.clone())
-        .map_err(|e| CliError::Failed(format!("cannot put the terminal into raw mode: {e}")))?;
-    // Read only once the terminal is raw, so no read waits for a whole line.
-    let mut events = terminal::events().map_err(|e| CliError::Failed(e.to_string()))?;
-    let (to_server, from_server) = socket.split();
-    let to_server = to_server.with(|text: String| {
-        futures::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(
-            tokio_tungstenite::tungstenite::Message::text(text),
-        ))
-    });
-    let attach = session::Attach {
-        session_id,
-        detach_key: options.detach_key,
-        size,
-        skip_replay: false,
-    };
-    let outcome = session::run(
-        attach,
-        to_server,
-        from_server,
-        &mut events,
-        &mut terminal::Screen::new(std::io::stdout(), alternate),
-    )
-    .await;
-    drop(raw);
-    outcome
+    let client = connector.local(&info).await.map_err(native_error)?;
+    show_native(client, session_id, options.detach_key).await
 }
 
 /// Without a daemon: a keeper of this machine, controlled directly.
@@ -295,22 +244,6 @@ async fn run_native(
     session::run(attach, sink, source, events, screen).await
 }
 
-/// Explicit browser gateway attachment is the only token/WebSocket path.
-fn explicit_server(
-    addr: Option<&str>,
-    token: Option<&str>,
-) -> Result<Option<(String, String)>, CliError> {
-    match (addr, token) {
-        (Some(addr), Some(token)) if !addr.is_empty() && !token.is_empty() => {
-            Ok(Some((addr.into(), token.into())))
-        }
-        (None, None) => Ok(None),
-        _ => Err(CliError::Usage(
-            "--addr and --token must both be non-empty".into(),
-        )),
-    }
-}
-
 /// The session a target names, or without one the session of the pane the
 /// user picks. Never the pane the command runs in by default
 /// (`SPLITTY_PANE_ID`): attaching to it would show the session inside itself.
@@ -366,22 +299,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tcp_attachment_is_explicit_and_cannot_resolve_a_daemon_or_token_file() {
-        assert_eq!(
-            explicit_server(Some("127.0.0.1:9900"), Some("t")).unwrap(),
-            Some(("127.0.0.1:9900".into(), "t".into()))
-        );
-        for (addr, token) in [
-            (Some("127.0.0.1:1"), None),
-            (None, Some("t")),
-            (Some(""), Some("t")),
-        ] {
-            assert!(matches!(
-                explicit_server(addr, token),
-                Err(CliError::Usage(_))
-            ));
-        }
-        assert_eq!(explicit_server(None, None).unwrap(), None);
+    fn missing_daemon_names_local_discovery() {
+        assert_eq!(NO_DAEMON, "no running Splitty daemon found (splitty attach uses daemon.json, or the keepers of this machine)");
     }
 
     #[test]

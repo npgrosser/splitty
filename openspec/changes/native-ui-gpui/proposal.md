@@ -1,18 +1,18 @@
 # Proposal
 
-> Evaluation note, 2026-11-07: native work remains on an isolated feature branch. Native-only replacement, temporary or lasting coexistence with the web client, and retaining the native app as a reference experiment are open outcomes. The cutover and removal sections below describe one conditional direction, not scheduled removal work. This does not commit to a WebAssembly migration or a broad web refactor. Before expanding feature ports, review ownership and concrete reuse across service, client state and presentation.
+> Status, 2026-11-15 (`remove-browser-access`): the native app is the released desktop client. The web client and browser gateway are removed; N4 is complete. The remaining draft concerns native feature and platform acceptance and optional embedded document engines. Earlier evaluation and inventory entries are historical.
 
 The bounded Linux phase-0 implementation is recorded in [the spike report](../../../docs/gpui-spike.md)
 (`native-ui-gpui-spike`). Platform and input checks in that report remain gates for
 the full migration described below.
-Completing that experiment does not establish platform parity or authorize the
-release cutover described below.
+Completing that experiment alone does not establish platform parity; remaining
+acceptance work is tracked separately from the completed release cutover.
 
 > Draft captured on 2026-11-06. Not planned yet. Specs, design and tasks are written when this change is next, after the spike (phase 0 below). Depends on: steps 1 to 4 of the `frontend-client-core` sequence (`server-templates`, `server-derived-pane-state`, `settings-authority`, `hub-host-decisions`), which move domain decisions out of the window into the server and so shrink what a native client has to port; step 5 of that sequence, the TypeScript client core, is replaced by this change's Rust client core (N2). Builds on `native-client-transports` (the native client connection and transport crate the new client uses), `client-connections`, `mux-protocol`, `terminal-sessions`, `remote-screens`, `desktop-remote`, `viewer-panes`, `viewer-annotations` and `access-control`. Related: the viewer drafts `viewer-renderers`, `viewer-quick-edit`, `review-diffs`, `viewer-sandboxed-html` and `viewer-webview`, whose renderers this change has to provide; the open decisions of `arrange-panes` and `remember-selected-tab`, which exist because the web layout library owns the window's layout; the open decisions of `mobile-ssh-client` (M1–M3), which assume a Tauri mobile shell with xterm.
 
 ## Why
 
-The desktop app is a web application: Svelte 5 and TypeScript in an OS WebView (Tauri) or in Chromium (Electron on Linux), with xterm.js or ghostty-web for terminals and dockview for the layout. That costs more with every feature:
+The original desktop app was a web application: Svelte 5 and TypeScript in an OS WebView (Tauri) or in Chromium (Electron on Linux), with xterm.js or ghostty-web for terminals and dockview for the layout. That costs more with every feature:
 
 - **Two models of one layout.** dockview owns the window's layout, the server owns `ScreenState`. They are reconciled after the fact: `arrange_panes` 100 ms after a gesture, `select_tab` for tab clicks, snapshot rebuilds that suppress ops. Drift between them is a known class of bugs (`docs/layout-sync-drift.md`).
 - **A renderer that must be treated as hostile.** Terminal output, documents and data from hosts end up in a WebView that runs the app's script and holds its IPC, so the shells carry document proofs, nonces, navigation guards, capabilities, packaged-asset allowlists and per-window storage isolation (about 3k lines in the Tauri shell, plus the Electron shell), and every rendered document has to be sanitized into a shadow root of that same page.
@@ -29,8 +29,8 @@ A native client in Rust removes the WebView boundary around the app and the layo
 - **The window renders the server's layout.** The dock edits `ScreenState` through ops instead of reconciling a second layout model, and may apply an op optimistically with the server's own reducer.
 - **A native terminal view** using Ghostty's native terminal core (`libghostty-vt`), with selection, search, links and OSC 8 handling, the clipboard policy, IME, the PTY size marker and the scratchpad area. Terminal emulation, GPUI presentation and session wiring have separate responsibilities within the terminal feature. Engine-specific types stay inside that feature; changing the engine may change its renderer integration, but must not change session ownership or layout logic.
 - **Viewer panes render natively** (N5): Markdown, diagrams, SVG, tables, source views with syntax highlighting, diffs and quick edits, with annotations marked on the client's own text layout. A web engine is embedded only for content that runs code, scripted HTML (`viewer-sandboxed-html`) and dev-server pages (`viewer-webview`): rendered offscreen into an element of the window, so overlays, clipping and scrolling work as for any other pane, and holding no authority (no channel to the service, at most a narrow data channel for selections and quotes).
-- **Browser access ends with the web UI.** At cutover, `splitty serve`, the browser gateway with its token, session cookies, bootstrap codes and tickets, and the browser part of `splitty connect` are removed. Until then they stay: the web UI is tested headless through them (N4).
-- **BREAKING (at cutover):** no browser access. Terminal access without the app remains `splitty attach`, also over SSH.
+- **Browser access removal is complete** (2026-11-15, `remove-browser-access`, N4): the gateway, web client, process token, cookies, bootstrap codes and tickets are gone. Native clients and the CLI retain private sockets and owned pipes.
+- **Completed breaking change (2026-11-15):** no browser access. Terminal access without the app remains `splitty attach`, also over SSH.
 
 Phases:
 
@@ -44,19 +44,19 @@ Phases:
 2. **Local desktop**: windows, the dock on `ScreenState`, the terminal view, the local workspace, packaging next to the existing apps.
 3. **Hosts**: remote screens, ports and reverse forwards, the host directory and remembered screens.
 4. **Remaining features**: viewer panes with annotations, threads and reviews; settings, dialogs, command palette, context menus, notifications, templates, scratchpad, editor handoff, downloads and file offers, zoom.
-5. **Cutover**: parity checked against the specs; releases ship the GPUI app; the web client, the Electron shell, the WebView parts of the Tauri shell and the browser gateway are removed and the specs updated.
+5. **Cutover completed**: releases ship the GPUI app. `remove-electron-shell`, `remove-tauri-shell` and `remove-browser-access` removed the shells, web client and gateway. Remaining platform and feature checks are separate work.
 
 Out of scope:
 
 - Mobile clients. The client core should be usable by one later; GPUI's iOS platform is experimental and no mobile shell is part of this change.
 - A web build of the new client (GPUI's experimental web platform) or any other replacement for browser access.
-- A feature freeze of the web client before the spike (N3). Until the cutover is planned, new features keep their logic on the server or in pure functions, as the viewer's anchoring does, so that it carries over.
+- Retaining a development-only browser client or gateway; browser removal is complete.
 - Changes to the mux model, session keepers, the CLI's HTTP API over owner and scoped sockets and the native transport, except where the native client needs them; wire changes only with a capability, because hosts run older daemons.
 - Screen-reader accessibility beyond what GPUI provides (open question).
 
 ## Architecture gates before the local desktop
 
-- **Reusable feature boundaries:** UI independence alone is insufficient evidence of browser reuse. Keep authoritative service behavior in the existing Rust service, window-local reconciliation and policies behind UI/transport-independent boundaries, and GPUI/browser effects in adapters. Before duplicating a feature controller, identify its existing implementation and decide whether to reuse the server capability, extract a portable client policy, or retain a documented presentation-specific implementation. Do not move local focus, consent or pending edits into global server state.
+- **Reusable feature boundaries:** UI independence alone is insufficient evidence of browser reuse. Keep authoritative service behavior in the existing Rust service, window-local reconciliation and policies behind UI/transport-independent boundaries, and native UI and platform effects in adapters. Before duplicating a feature controller, identify its existing implementation and decide whether to reuse the server capability, extract a portable client policy, or retain a documented presentation-specific implementation. Do not move local focus, consent or pending edits into global server state.
 - **Independent client core:** connection identity, ordered session traffic, replay state, mux synchronization and owned-resource cleanup remain independent of GPUI and the emulator. The service continues to own PTYs and authoritative workspace state. A view or rendered document never selects a backend or acquires service authority.
 - **Cohesive terminal feature:** keep parsing, terminal modes, scrollback and engine-specific selection operations separate from GPUI presentation and session wiring. Start with one concrete Ghostty integration and small interfaces required by those responsibilities. Safe engine-specific types may be shared with the terminal renderer; they must not leak into workspace, layout or client-core APIs. A generic provider framework, multiple implementations and a duplicate engine-neutral cell model are not requirements. Capability differences must be explicit; a future replacement can require terminal-local adaptations.
 - **Separate native presentation:** GPUI owns text shaping/painting, focus, pointer geometry and IME composition. Clipboard actions and replay-triggered effects remain subject to application policy. Changing the emulator must not require rebuilding workspace, transport, clipboard policy or platform-lifetime logic. Rendering must not copy the entire scrollback or rebuild unchanged rows on every frame.
@@ -80,7 +80,7 @@ Ghostty supplies terminal state and protocol behavior; GPUI still supplies text 
 
 Image support is a separate compatibility item: Kitty graphics requires native decoding/texture presentation work and does not establish Sixel or iTerm2 parity with the web client's image addon. Choosing the core does not claim full desktop parity or complete image support. Document unsupported behavior and resolve the cutover requirements explicitly. Performance acceptance remains based on optimized native measurements, not the reputation or benchmarks of another terminal application.
 
-The bounded replacement is a separate implementation increment: reproducible native dependency build/linking; an owned, tested Rust boundary; adaptation of the current terminal view while preserving input, selection, scrollback, resize and replay behavior; architecture-model/documentation updates; then native smoke and optimized performance evidence. Retain the existing phase-0 evidence as the Alacritty baseline. Track the terminal replacement and the following local-screen workflow as separate increments with separate acceptance evidence. Host migration, image rendering and release cutover remain later work.
+The bounded replacement is a separate implementation increment: reproducible native dependency build/linking; an owned, tested Rust boundary; adaptation of the current terminal view while preserving input, selection, scrollback, resize and replay behavior; architecture-model/documentation updates; then native smoke and optimized performance evidence. Retain the existing phase-0 evidence as the Alacritty baseline. Track the terminal replacement and the following local-screen workflow as separate increments with separate acceptance evidence. Further host migration and image-rendering acceptance remain separately scoped work; release cutover is complete.
 
 ## Capabilities
 
@@ -91,23 +91,23 @@ To be decided when the change is next. Likely candidates:
 
 ### Modified Capabilities
 - `client-connections`: "Native Document Lifetime" and the document-bound handle rules become rules for a native window; WebView documents, reloads and the popout trust domain go.
-- `access-control`: REMOVED deltas, with their reason, for the browser requirements (Origin Allowlist, Fetch Metadata Same-Origin Rule, Process Token, Browser Session Establishment, Single-Use Bootstrap Codes, WebSocket Ticket Authentication, Browser UI Holds No Credential, Browser Gateway Credential Isolation) and for the WebView-specific window rules. "Rendered Documents Are Inert" is restated for native rendering and for an embedded engine without authority. The rules on untrusted host data, per-connection routing, viewer documents staying with their connection and server commands acting only on the sender's screens stay.
-- `server-modes`, `cli`: browser gateways, `splitty serve`, `splitty connect`.
+- `access-control`: browser and shell removal is covered by `remove-browser-access` and `remove-tauri-shell`. Any embedded document engine needs new explicit isolation rules; native routing, untrusted-data validation and private socket guarantees remain.
+- `server-modes`, `cli`: browser-command removal is complete; preserve native embedded/daemon modes and socket CLI access.
 - `desktop-remote`: whether separate remote windows remain once remote screens work on every platform.
 - `remote-screens`: possibly where the hub runs (open question).
 - `mux-protocol`: the role of `arrange_panes` and `select_tab` once the client edits the layout with precise ops.
 - `terminal-sessions`: paste and image paste without a browser paste event, OSC 8 confirmation, uploads as binary data (only with a capability).
-- `viewer-panes`, `viewer-annotations`: probably none. "Showing A Document" requires rendered HTML documents, which a native client meets with the static-HTML renderer (open question); reads, anchoring by quote, threads and reviews are protocol and stay. "Rendered Documents Are Inert" in `access-control` names Splitty's origin and `frame-src`, which only a browser client has.
+- `viewer-panes`, `viewer-annotations`: probably none. "Showing A Document" requires rendered HTML documents, which a native client meets with the static-HTML renderer (open question); reads, anchoring by quote, threads and reviews are protocol and stay. Embedded document engines need explicit isolation rules; there is no Splitty page origin or `frame-src` policy to reuse.
 - `display-zoom`: zoom as UI scale and font size instead of page zoom; the browser clause goes.
 
 ## Impact
 
 - New crates: the client core and the GPUI desktop app. The architecture model gains them with their allowed dependencies (client core: protocol types of splitty-core, the native client of the server crate, splitty-remote; desktop app: client core, GPUI, the embedded web engine).
-- Removed at cutover: `frontend/`, `frontend-electron/`, the WebView parts of `crates/splitty-tauri` (the IPC carrier, document sessions and bootstrap, navigation, capability, downloads), the browser gateway in `crates/splitty-server/src/http` (gateway, browser carrier, browser sessions, the browser listener, origin and fetch-metadata middleware), the process token in splitty-core, and the Playwright and WebView smoke scripts in `scripts/testing/`. The parts of the Tauri shell that are not about the WebView move to the new app: WSL helper management, the login PATH, editor handoff, the remote connect flow.
-- `frontend-client-core`: step 5 is dropped when this change goes ahead (N2); its design's inventory, ports, screen model, terminal sink and controllers carry over to the Rust core.
+- Removal completed: the web client, its desktop shells, gateway, process credentials and browser tooling are gone. The native service, hub, owner control router, keepers and native bridges remain. Moving any additional shell behavior into the app requires separate scope.
+- `frontend-client-core`: obsolete and deleted by `remove-browser-access`; its four server steps are archived. Further native client-core work follows concrete feature boundaries.
 - Packaging and release: GPUI app bundles replace the Tauri and Electron packages; an offscreen web engine such as CEF adds a three-digit number of megabytes and its own security updates; the release skill and CI change.
 - Docs: `docs/architecture.md` (Client Autonomy, Client connections, the Tauri sections, the viewer), `docs/networking.md`, `docs/development.md`, `docs/protocol.ts` for any wire change, `README.md`.
-- Tests: the vitest suites are the reference for the client core's Rust tests; GPUI's test context covers the UI in-process.
+- Tests: the removed web client's last-release suites are historical behavioral evidence for native tests; GPUI's test context covers the UI in-process.
 
 Open questions for the design:
 
@@ -119,12 +119,14 @@ Open questions for the design:
 - Where the hub runs: in the local service as today, or in the app process with splitty-remote as a library. The latter gives one path to hosts on every platform, with or without WSL, and may make separate remote windows unnecessary.
 - How the client calls the service: HTTP-shaped native requests (`docs/native-operations.json`: method and path, status codes, bodies as strings) or typed operations. HTTP stays for the CLI either way.
 - Optimistic reduce with the shared reducer, or ops with a short wait for the snapshot; how a host whose server version differs is handled (its snapshot is the truth).
-- What `splitty connect` becomes: removed, or "open this host in the desktop app".
-- Whether browser access leaves release builds before the cutover (a cargo feature for development and tests), for a smaller attack surface in the meantime.
+- Resolved (2026-11-15, `remove-browser-access`): `splitty connect` is removed; the app opens hosts itself.
+- Resolved (2026-11-15, `remove-browser-access`): no browser-access build feature remains.
 - Accessibility.
 - The development loop without hot reload: rebuild time of the desktop crate, and keeping the client core's tests free of UI so they stay fast.
 
 ## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The native app is the released desktop client. Browser access, the web client and their tooling are removed, completing N4; the native transport, hub, CLI socket operations and released-client wire compatibility remain. The earlier inventory and evaluation notes below are historical, not a plan to retain or refactor a second client.
 
 - 2026-11-07, `native-local-screens` architecture review: the four preparatory service changes already share template application, derived pane state, settings authority and hub decisions across clients. Client-side work remains substantial, but it is not all UI code and not all server authority. Current `splitty-client-core` is UI-free, not browser-portable: action methods accept concrete `Client`, the crate depends on native transport/remote/server, and `splitty-core` itself includes PTY/runtime dependencies. A portable client state/intent layer would need a deliberate dependency boundary; compiling the current crate to WebAssembly is not an existing capability.
 
@@ -188,6 +190,6 @@ Input for `design.md`:
 - 2026-11-06, GPUI ecosystem as checked on that day: `gpui` 0.2.2 on crates.io (Apache-2.0), with a Blade renderer (corrected by the 2026-11-07 spike; the newer pinned snapshot uses wgpu), Wayland and X11, Windows and macOS, a tokio bridge (`gpui_tokio`, Apache-2.0) and experimental web and iOS platforms. Zed's own crates that would be the obvious templates (`terminal`, `terminal_view`, `workspace`, `ui`, `markdown`, `markdown_preview`, `mermaid_render`) are GPL-3.0-or-later and must not be copied into this MIT project; they can only be read. gpui-component 0.9.0 (Apache-2.0) has a dock, text inputs, a text view with Markdown, simple HTML and range highlights, and a tree-sitter highlighter, but pins `gpui-pre =0.3.11`, a republished snapshot, so an app using it is tied to that snapshot. Discord announced on 2026-11-04 that its desktop client moves to GPUI, with its own patches on top. The API follows Zed's needs; versions are pinned exactly and upgraded deliberately.
 - 2026-11-06, previews and web engines for GPUI as checked on that day: Zed embeds no web engine and has no HTML preview; it renders previews natively (Markdown with pulldown-cmark and an HTML subset through html5ever, Mermaid through the `merman` crate, SVG through resvg, images, tabular data). Those libraries are MIT or Apache-2.0. For a real engine there are only third-party integrations: `gpui-webview` in gpui-component (wry; WebKitGTK in an X11 child window on Linux, since GTK cannot embed into a foreign Wayland surface; macOS; no Windows), `gpui-cef` (CEF rendered offscreen as a GPUI element on macOS, WebView2 as a child window on Windows, no Linux), an experimental Servo web view for Wayland in the `gpui-fusion` fork, `servo` 0.7.0 (MPL-2.0) and the `cef` crate 156 (Apache-2.0 or MIT) on crates.io, and Blitz 0.3 beta (HTML and CSS without scripts, MIT or Apache-2.0), integrated with iced but not with GPUI.
 - 2026-11-06, testing: GPUI's test context runs the UI without a window or GPU, with simulated keystrokes, actions, a simulated clock and reproducible randomized scheduling. With the client core in Rust, a UI test can run the real embedded service with real PTYs in the same process, at the in-process level of CLAUDE.md. What is lost is the black-box run against the built app in a headless browser; a test-only control channel in the binary, run under Xvfb as the WebView smokes are today, would replace it where needed.
-- 2026-11-06, provisional decisions, each also in `openspec/open-decisions.md`: N1 rebuild next to the web client with one cutover, no cleanup first; N2 a Rust client core without UI beside the GPUI app crate, replacing step 5 of `frontend-client-core`, after its steps 1 to 4; N3 the cutover is planned after the spike, without a web feature freeze before it; N4 browser access stays in release builds until the cutover and goes with the web client; N5 viewer formats render natively, and a web engine, rendered offscreen and without authority, only for pages that run code.
+- 2026-11-06, provisional decisions, each also in `openspec/open-decisions.md`: N1 rebuild next to the web client with one cutover, no cleanup first; N2 a Rust client core without UI beside the GPUI app crate, replacing step 5 of `frontend-client-core`, after its steps 1 to 4; N3 the cutover is planned after the spike, without a web feature freeze before it; N4 completed by `remove-browser-access` (2026-11-15): browser access and the web client are gone; N5 viewer formats render natively, and a web engine, rendered offscreen and without authority, only for pages that run code.
 - 2026-11-13, `remove-electron-shell`: the Electron shell (`frontend-electron/`) is removed. What this change says about Electron, its main process, preload or packaged assets no longer applies; the desktop shell around the web frontend is Tauri, and the native app (`crates/splitty-gpui`) is the default desktop app.
 - 2026-11-15, `remove-tauri-shell`: the Tauri shell (`crates/splitty-tauri`, package `splitty-gui`) is removed; the native app is the only desktop app. What this change says about the shell's WebView parts, its packaged documents and "the non-WebView parts of the Tauri shell, moved rather than copied" no longer applies. The shell's login-shell `PATH` adoption (`login_path.rs`) was not moved into the native app; the gap is a finding in `docs/issues/openspec-baseline-findings.md`. `desktop-remote` no longer has remote windows; it keeps the editor and SFTP handoffs, SSH paths, CLI editor requests and editor preferences.

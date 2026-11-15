@@ -148,7 +148,7 @@ impl Drop for Client {
 }
 
 /// Capacity acquired synchronously before starting a client setup task. The
-/// same context accounts for browser input received during preparation.
+/// same context accounts for native input received during preparation.
 pub struct Pending {
     carrier: admission::Carrier,
     opening: admission::Opening,
@@ -435,32 +435,23 @@ impl Connector {
     pub async fn local(&self, info: &splitty_core::daemon::DaemonInfo) -> io::Result<Client> {
         self.local_open(info, None, self.admit()?, |_| {}).await
     }
-    #[cfg(unix)]
-    pub async fn local_host(
+    /// Exercise the endpoint's host-open wire intent without a product launcher.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn endpoint_host_fixture(
         &self,
         info: &splitty_core::daemon::DaemonInfo,
         target: splitty_remote::ssh::SshTarget,
         update: bool,
     ) -> io::Result<Client> {
-        self.local_host_admitted(info, target, update, self.admit()?, |_| {})
-            .await
-    }
-    #[cfg(unix)]
-    pub async fn local_host_admitted(
-        &self,
-        info: &splitty_core::daemon::DaemonInfo,
-        target: splitty_remote::ssh::SshTarget,
-        update: bool,
-        pending: Pending,
-        progress: impl FnMut(Charged<wire::Progress>),
-    ) -> io::Result<Client> {
-        let open = wire::OpenHost {
+        let intent = wire::OpenHost {
             owner_instance: info.instance.clone().unwrap_or_default(),
             target: target.as_str().into(),
             update,
         };
-        self.local_open(info, Some(open), pending, progress).await
+        self.local_open(info, Some(intent), self.admit()?, |_| {})
+            .await
     }
+
     #[cfg(unix)]
     async fn local_open(
         &self,

@@ -2,8 +2,7 @@
 
 The native client (`crates/splitty-gpui`) is the desktop app that CI builds
 and releases publish for Windows, macOS (Apple silicon and Intel) and Linux; it
-is the only desktop app. The web client stays as a browser client, served by
-`splitty serve`. Builds and packages are described in
+is the desktop client. The CLI uses the private control and native endpoints. Builds and packages are described in
 [development](development.md#the-native-app); the acceptance records of the
 individual features are in the [GPUI runbook](gpui-spike.md).
 
@@ -16,14 +15,11 @@ checkout and confirm its reported root. Build prerequisites and platform setup
 are in [development](development.md#running-from-source) and the
 [GPUI runbook](gpui-spike.md#build-and-run).
 
-Client-core and the native app build without the frontend: they link the server
-without its `web-assets` feature. The workspace tests (`cargo test --workspace`)
-also build `splitty-server` itself, which embeds `frontend/dist`, and the
-architecture check needs LikeC4. Prepare both before Rust compilation:
+Workspace tests (`cargo test --workspace`) include the architecture check,
+which needs LikeC4. Prepare its package and the terminal library before
+compiling the app:
 
 ```sh
-pnpm install --dir frontend
-pnpm --dir frontend build
 pnpm install --dir architecture
 export GHOSTTY_VT_DIR="$(python3 scripts/bootstrap-libghostty-vt.py)"
 ```
@@ -206,8 +202,7 @@ not tried in a running window either.
 - Server mux state, session lifecycle and host launch defaults remain canonical.
   `splitty-client-core` owns UI-free source collections, transport/runtime policy
   and bounded resource admission; `splitty-gpui` owns interaction/projection.
-  The web frontend still has TypeScript orchestration; no WASM client-core
-  rollout or web cleanup was performed.
+  Native connections use the shared framed transport and operation catalog.
 - Keep logical host-group interest separate from current execution authority.
   Capture window owner, source/connection and Screen identity in callbacks;
   aliases, selection and raw IDs cannot retarget them. Default remote close is
@@ -226,8 +221,7 @@ not tried in a running window either.
   and schedules one woken weak continuation, preserving repeat/XIM ordering.
   Keep its version/archive/file provenance and Apache license. Do not replace
   this with larger application queues, input replay or hidden registry edits.
-- The Ghostty engine boundary remains separate from GPUI rendering. Existing
-  web/xterm workarounds are not automatically native feature requirements.
+- The Ghostty engine boundary remains separate from GPUI rendering. Terminal behavior belongs to the emulator adapter; input and painting belong to the view.
 
 ## Themes
 
@@ -235,8 +229,7 @@ The app resolves UI themes and terminal palettes in its own catalog
 (`crates/splitty-gpui/src/appearance/`): GPUI Kit theme sets and Ghostty theme
 files, bundled from `crates/splitty-gpui/themes/` and read from the themes
 directory. The service stores only the names; which palette name the
-terminal settings choose is the server core's rule, shared with the web
-client. [Themes](themes.md) describes the
+terminal settings choose is the server core's rule. [Themes](themes.md) describes the
 formats and the `splitty` block; `scripts/vendor-themes.py` refreshes the
 bundled third-party files. The Splitty themes in `themes/ui/splitty.json` and
 `themes/terminal/splitty/` are edited there directly.
@@ -376,8 +369,6 @@ connection failed as incompatible are not shown outside the update offer.
   still need their own acceptance. Local profiles/templates/transfers are not
   implicitly remote features. Native host-group reorder UI and remembered
   reference persistence remain unfinished.
-- The web client stays usable in a browser; there is no approved
-  requirement to remove web bridges or adopt full WASM.
 
 Start the next feature only with a fresh scope decision; avoid treating old
 planning ideas or every unchecked task as an instruction to implement all of

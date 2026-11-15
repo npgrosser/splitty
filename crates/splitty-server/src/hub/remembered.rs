@@ -3,7 +3,7 @@
 //! `GET` and `PUT /api/remote/screens` read and replace, and
 //! `PUT /api/remote/screens/host` changes for one host.
 //!
-//! The list belongs to the server, not to a browser profile, so every window
+//! The server owns the list, so every window
 //! on the machine sees the same one, and the desktop apps keep it with an
 //! embedded server too. The server only keeps it: when a screen connects and
 //! where it is shown is the client's business.

@@ -104,3 +104,7 @@ A new pane kind next to `terminal`: a plain textarea or contenteditable, no xter
 - Should `splitty note "quick thought" --tags splitty` ship from the start? If so it needs a control endpoint and, for use inside panes, an extension of the control socket route set (`access-control`).
 - Does `mux.welcome` list each screen's tags, or do clients learn them from snapshots only?
 - Config directory or data directory for notes? Templates live in the config directory today.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client, dockview and WebSocket transport are gone. Design note editing in native views and carry operations over native connections or a deliberately scoped control API; persistence and note/tag domain rules remain. Earlier textarea, DOM and frontend routing proposals are historical.

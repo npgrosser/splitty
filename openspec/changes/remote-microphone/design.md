@@ -12,14 +12,14 @@ See proposal.md for motivation and scope. Current state that shapes the approach
   - *On a host without a sound card,* the native module and `arecord` drop out, so a `rec` on `PATH` is what it uses.
   - *Settings and modes:* voice is a user setting (`voiceEnabled`), so it holds for all Claude Code sessions of the user on the host. The modes are hold (record while the key is held), tap, and a focus mode that records while the terminal has focus (DEC mode 1004).
   - *Possible own path:* the same module names `~/.cache/coder-audio/port` and `token` without using them in that version. If Claude Code gets its own way of receiving forwarded audio, this change should feed that instead of a `rec` on `PATH`.
-- **Focus events reach host panes.** Both renderers send `ESC [ I` and `ESC [ O` when an application enables mode 1004: xterm.js always did, ghostty-web since a fix on 2026-11-05. Pane input goes to the session unfiltered, for host panes through the hub.
+- **Native focus and host input.** Capture follows the native window and focused pane. Pane input reaches host sessions through the hub; implementation must verify application-requested DEC mode 1004 focus reports alongside capture cancellation on focus loss.
 - **Precedents for a pane process asking the window.**
   - `POST /api/editor/open` goes to exactly one capable attached client, is bounded and expires, and detaching cancels it.
   - `POST /api/file/offer` with `file-offer-v1` goes to registered attached connections. The first `file.accept` takes it, the others get `file.closed`, the file is read in chunks, and the outcome comes back as the HTTP status.
   - Audio runs opposite to a file offer: the window writes and the pane process reads.
 - **Upstream data.** Uploads send base64 chunks of at most 1 MiB in JSON messages; terminal output is the only binary frame type. 16 kHz mono S16LE is 32 KB/s.
 - **Session environment.** The server sets `SPLITTY_SESSION_ID` and `SPLITTY_SOCK` for each session, and `SPLITTY_AGENT_SOCK` for scoped agent access. Shell integration has a directory of its own per shell.
-- **Webview permissions.** Electron's permission handler allows only `notifications` and `clipboard-sanitized-write`, and only for the app's origin. Tauri has no microphone handling.
+- **Native permissions.** Capture must use the app platform's microphone permission and device APIs; it cannot rely on a web origin or shell permission handler.
 
 ## Direction
 
@@ -34,7 +34,7 @@ See proposal.md for motivation and scope. Current state that shapes the approach
 ## Considered alternatives
 
 - **Forward the local sound server over Splitty's SSH.** A `-R` Unix-socket forward of the local PulseAudio or PipeWire socket, plus `PULSE_SERVER` for the host's sessions. Rejected, for four reasons:
-  - It works only where a local PulseAudio exists (Linux, WSLg), not from macOS, Windows without WSL or a browser.
+  - It works only where a local PulseAudio exists (Linux, WSLg), not from macOS or Windows without WSL.
   - It needs SoX with its PulseAudio backend on the host.
   - It exposes the whole sound server (every source and playback) to every process of the user on the host for the connection's lifetime.
   - It goes against the hub's stance of opening SSH connections without forwards (`ClearAllForwardings`).
@@ -44,10 +44,9 @@ See proposal.md for motivation and scope. Current state that shapes the approach
 ## Architecture impact
 
 To be settled when the change is next. Likely:
-- **splitty binary:** `server.cli` (the recorder command), `server.http` and `server.control` (the endpoint), `server.client_session` and `server.ws` (registration, request, end and data messages), `server.hub` and `server.host` (relaying to a host's windows).
+- **splitty binary:** `server.cli` (the recorder command), `server.control` (the endpoint), `server.client_session` (registration, request, end and data messages), `server.hub` and `server.host` (relaying to a host's windows).
 - **splitty-core:** `core.pty` and `core.keeper` (the `PATH` entry in the session environment).
-- **Desktop and Electron shell:** `desktop.navigation` or a new desktop component (the webview's permission request), and the Electron shell's permission policy.
-- **Web frontend:** a capture module.
+- **Native app and client-core:** audio capture and OS permissions, request ownership, focus checks and bounded delivery.
 - **docs/architecture.md:** a section on audio capture next to file offers.
 
 ## Open Questions
@@ -57,10 +56,10 @@ To be settled when the change is next. Likely:
 - **Transport of audio**: base64 JSON chunks like uploads (simplest, about a third overhead on 32 KB/s) or a binary frame type from client to server.
 - **Agent socket**: whether a process with only `SPLITTY_AGENT_SOCK` may request the microphone. The recorder normally runs inside the agent itself.
 - **Bounds**: maximum duration of a capture, requests per second, and what the recorder does with a format it cannot produce from the window's audio.
-- **Remote windows**: they have no local service, so the request has to reach them through the native bridge like other host events. Check the bridge's message set.
-- **Platform details**:
-  - WebView2's permission event, and whether the app may grant it without a prompt for its own origin.
-  - WKWebView needs `NSMicrophoneUsageDescription` and the media-capture delegate.
-  - WebKitGTK has its own permission request.
-  - Browser clients need a secure context (localhost is one).
+- **Remote Screens**: requests reach the native window over its source connection through the hub; verify registration and audio messages against the native relay operation set.
+- **Platform details**: native device APIs, OS permission prompts and declarations, format conversion, device loss and cancellation on Windows, macOS and Linux. Capture runs on the computer displaying the native window, including on Windows when the service is in WSL.
 - **macOS hosts**: how Claude Code's native module behaves in an SSH session there, and whether a second path is worth it.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: Capture belongs in the native app, with native OS permissions and device lifetime. Browser capture, WebView permissions and frontend modules are no longer implementation targets. Requests remain connection-scoped through the hub, native session stream and owner control socket; consent, focus, cancellation and bounded audio delivery still need design.

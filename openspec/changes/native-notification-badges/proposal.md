@@ -28,3 +28,7 @@ None. Existing client-connection and access-control requirements already require
 ## Impact
 
 The Rust client core gains notification policy and a typed view of effective notification settings. The GPUI workspace consumes existing source-scoped events and projects unread state in its Drawer. The server, wire format, browser client and desktop carriers retain their current contracts. The architecture model and architecture guide will record the new client-core component and its GPUI relationship.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

@@ -84,10 +84,6 @@ jobs:
         with:
           toolchain: stable
 
-      # The server embeds frontend/dist; these tests open no page of it.
-      - name: Provide an empty frontend build
-        run: mkdir -p frontend/dist
-
       - name: Fetch the last release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -170,9 +166,8 @@ jobs:
           tar -xzf payloads/splitty-wsl-x86_64.tar.gz -C payloads/x86_64
           payloads/x86_64/splitty --version
 
-      # One executable with the server linked in, without the web frontend
-      # (no frontend/dist needed); it carries the servers for remote hosts
-      # named by SPLITTY_REMOTE_PAYLOAD_*.
+      # One executable with the server linked in; it carries the servers for
+      # remote hosts named by SPLITTY_REMOTE_PAYLOAD_*.
       - name: Build native app
         env:
           SPLITTY_COMMIT: ${{ github.sha }}
@@ -281,7 +276,7 @@ jobs:
 
       # For this runner's architecture: the terminal library is built for
       # the host. It carries the servers for remote hosts named
-      # by SPLITTY_REMOTE_PAYLOAD_*; it embeds no web frontend.
+      # by SPLITTY_REMOTE_PAYLOAD_*.
       - name: Build native app
         env:
           SPLITTY_COMMIT: ${{ github.sha }}

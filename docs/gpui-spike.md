@@ -13,9 +13,8 @@ separate.
 The current terminal uses statically linked `libghostty-vt` 1.0.0 through a
 UI-independent owned engine. The [terminal build instructions](development.md#native-terminal-library-for-gpui)
 describe its pinned native dependency. GPUI handles input and drawing, caching
-shaped content for unchanged visible rows. This branch evaluates a native client
-alongside the working web client; replacement and long-term coexistence remain
-open product choices.
+shaped content for unchanged visible rows. The native client is the desktop app; the server and CLI use the same
+service and native transport contracts.
 
 `--probe` retains the original terminal/Markdown fixture, including the optional
 CEF experiment. The [phase-0 evidence](#phase-0-evidence-and-limits-historical)
@@ -57,16 +56,6 @@ export PKG_CONFIG_PATH="$deps/prefix/usr/lib/x86_64-linux-gnu/pkgconfig${PKG_CON
 export CPATH="$deps/prefix/usr/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$deps/prefix/usr/lib/x86_64-linux-gnu${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export LD_LIBRARY_PATH="$deps/prefix/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-```
-
-The app builds without the frontend: client-core links the service crate without
-its `web-assets` feature. A build that also selects `splitty-server` (the
-`splitty` command, the workspace) embeds them; build them first as described in
-[development](development.md):
-
-```sh
-pnpm --dir frontend install --frozen-lockfile
-pnpm --dir frontend build
 ```
 
 Prepare the pinned native terminal library using the explicit setup described in
@@ -390,11 +379,10 @@ into refreshes. Separate embedded service instances cache their own settings, so
 an edit through another app instance becomes visible after restarting this
 native workspace; cross-process live synchronization is not implemented.
 
-Appearance font size and family apply to workspace chrome, matching the web
-client. Empty/zero overrides use resolved UI theme defaults. The supported size
+Appearance font size and family apply to workspace chrome. Empty/zero overrides use resolved UI theme defaults. The supported size
 range is 8–24 px; a CSS font list selects an available concrete family or a native
-UI generic. Terminal typography uses the web client's bundled terminal font
-(JetBrainsMono Nerd Font Mono, compiled in from `frontend/public`) at a
+UI generic. Terminal typography uses the crate-owned bundled terminal font
+(JetBrainsMono Nerd Font Mono) at a
 14 px baseline, with rows as tall as the font's ascent and descent; see
 [web look alignment](#macos-preview-and-web-look-alignment-2026-11-09). A
 proportional UI font therefore does not alter terminal cells. Display zoom
@@ -413,9 +401,7 @@ not submit settings mutations; explicit zoom shortcuts use the same owned API
 client for bounded ordered updates. Existing service startup may still persist
 configuration defaults or migrations through the ordinary settings loader.
 
-There is no native settings editor in this increment. The web client's settings
-remain the reference interface; the native read path and terminal engine consume
-the existing settings and theme contracts.
+The native settings editor reads and writes settings through its assigned local service. The current state is documented in [the native UI handoff](native-ui-handoff.md).
 
 Native display zoom uses the saved `appearance.zoom` and `zoom_scope` settings.
 Ctrl on Linux, or Cmd on macOS, with `+`/`=` and `-` selects the existing zoom

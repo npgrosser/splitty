@@ -114,11 +114,7 @@ pub fn info_path() -> PathBuf {
 
 /// Write daemon info atomically, readable only by the owner.
 ///
-/// This file used to hold the server token and be written with a plain
-/// `fs::write` into a directory created by a plain `create_dir_all`
-/// (security review SR-21): mode 0644 inside a 0755 directory
-/// under a typical umask. The auth-token module's 0700 handling did not cover
-/// it, because in the desktop flow that module is never reached.
+/// The configuration directory and publication are both owner-only.
 pub fn write_info(info: &DaemonInfo) -> io::Result<()> {
     info.validate()?;
     let json = serde_json::to_string_pretty(info).map_err(io::Error::other)?;

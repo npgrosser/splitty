@@ -123,7 +123,7 @@ pub async fn listen(
                                     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "stale hub delivery timed out"))??;
                                 return Err(io::Error::new(io::ErrorKind::InvalidData, negotiation::StaleInstance));
                             }
-                            let target = splitty_remote::ssh::SshTarget::parse(&host.target).map_err(invalid)?;
+                            let target = state.hub.native_target(&host.target, &mut write, &context.budget).await?;
                             let mut stopped = context.closing();
                             state.hub.serve_native_accepted((read, write), target, host.update,
                                 async { let _ = stopped.wait_for(|closed| *closed).await; },

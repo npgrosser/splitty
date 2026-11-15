@@ -1,4 +1,4 @@
-//! Service construction without a browser listener or browser credentials.
+//! Embedded and persistent terminal service construction.
 use crate::client_session;
 use splitty_core::{mux::Store, protocol::notify::NotificationEngine};
 use std::{

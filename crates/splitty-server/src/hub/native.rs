@@ -4,6 +4,31 @@ use super::*;
 use splitty_transport::{negotiation, peer::Peer, queue};
 
 impl Hub {
+    /// Validate owner host intent and report a permanent failure before preparation.
+    pub(crate) async fn native_target<W: tokio::io::AsyncWrite + Unpin>(
+        &self,
+        target: &str,
+        write: &mut W,
+        budget: &splitty_transport::budget::ConnectionBudget,
+    ) -> io::Result<SshTarget> {
+        match SshTarget::parse(target) {
+            Ok(target) => Ok(target),
+            Err(error) => {
+                let error = HubError::Target(error);
+                let frame = failure_frame(error.failure_budgeted(target, budget)?, budget)?;
+                tokio::time::timeout(
+                    wire::HANDSHAKE_TIMEOUT,
+                    splitty_transport::codec::write(write, &frame),
+                )
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "host failure delivery timed out")
+                })??;
+                Err(io::Error::other(error))
+            }
+        }
+    }
+
     pub async fn serve_native<R, W>(
         &self,
         mut read: R,
@@ -233,6 +258,60 @@ mod tests {
     use crate::hub::testing::ScriptedHost;
     use serde_json::{json, Value};
     use splitty_transport::budget::ConnectionBudget;
+
+    #[tokio::test]
+    async fn option_like_targets_have_a_permanent_error_before_host_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path());
+        let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+        let (mut read, mut write) = tokio::io::duplex(8192);
+        let budget = ConnectionBudget::default();
+        assert!(hub
+            .native_target("-oProxyCommand=command", &mut write, &budget)
+            .await
+            .is_err());
+        let frame = splitty_transport::codec::read(&mut read, &budget)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.kind, Kind::Closed);
+        let closed: wire::Closed = frame.decode().unwrap();
+        let failure: Value = serde_json::from_str(&closed.message).unwrap();
+        assert_eq!(failure["type"], "remote.error");
+        assert_eq!(failure["code"], "invalid_target");
+        assert!(!closed.retryable);
+        assert!(host.asked().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_preparation_waits_for_owned_cleanup_before_returning() {
+        use crate::hub::testing::ForwardGate;
+        let dir = tempfile::tempdir().unwrap();
+        let preparing = Arc::new(ForwardGate::default());
+        let cleanup = Arc::new(ForwardGate::default());
+        let host = ScriptedHost::new(dir.path())
+            .with_preparation_gate(preparing.clone())
+            .with_preparation_cleanup(cleanup.clone());
+        let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+        let context = queue::Context::default();
+        let closing = context.clone();
+        let task = tokio::spawn(async move {
+            let (reports, _received) = mpsc::channel(8);
+            hub.reach(SshTarget::parse("vm").unwrap(), false, reports, &context)
+                .await
+        });
+        preparing.entered().await;
+        closing.close();
+        cleanup.entered().await;
+        assert!(!task.is_finished(), "owned cleanup is still pending");
+        cleanup.release();
+        assert!(tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_err());
+        assert_eq!(host.asked(), ["prepare vm"]);
+    }
 
     fn legacy_ready() -> splitty_remote::handshake::LegacyMigration {
         splitty_remote::handshake::LegacyMigration::Ready {
@@ -467,6 +546,24 @@ mod tests {
         use crate::hub::testing::Prepare;
         let dir = tempfile::tempdir().unwrap();
         let cases = [
+            (
+                ScriptedHost::new(dir.path()).preparing(Prepare::UnsupportedKernel),
+                false,
+                "unsupported_host",
+                false,
+            ),
+            (
+                ScriptedHost::new(dir.path()).preparing(Prepare::Checksum),
+                false,
+                "install",
+                false,
+            ),
+            (
+                ScriptedHost::new(dir.path()).preparing(Prepare::DaemonFails),
+                false,
+                "daemon",
+                true,
+            ),
             (
                 ScriptedHost::new(dir.path())
                     .preparing(Prepare::SshFails("Host key verification failed.")),

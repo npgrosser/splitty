@@ -1,10 +1,9 @@
 //! The remote screen hub: a native host stream gives a window a connection
 //! to a host's daemon, so local and remote screens share one window. Desktop
-//! clients open such a stream themselves; the browser gateway opens one for
-//! each `/ws/remote` socket.
+//! clients open these streams directly.
 //!
-//! For each stream the hub reaches the host as `splitty connect` does
-//! (install, then the handshake with `--ensure-daemon`), checks the daemon's
+//! For each stream the hub installs its server, performs the handshake with
+//! `--ensure-daemon`, checks the daemon's
 //! protocol version, starts `splitty remote-bridge` there over SSH and relays
 //! the daemon's messages both ways, text as text and binary as binary, without
 //! reading them. Until the relay starts it speaks for itself: preparation
@@ -171,7 +170,7 @@ pub trait Forwarding: Send {
 
 /// The steps of host preparation, in the order they can occur. A native host
 /// stream reports them as the `phase` of transport progress reports; the
-/// browser gateway translates those into `remote.progress`.
+/// native client receives them before the host stream is ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Step {
     /// The server is being installed on the host.
@@ -554,12 +553,6 @@ impl Hub {
     /// Stop a forward, for `DELETE /api/remote/forwards`.
     pub async fn stop_forward(&self, target: &str, port: i64) -> Result<(), ForwardError> {
         self.forwards.stop(target, port).await
-    }
-
-    /// The local server listens on `port`, which is never shared with a
-    /// host.
-    pub fn reserve_local_port(&self, port: u16) {
-        self.reverses.reserve(port);
     }
 
     /// Share local port `local` as `port` of `target`, for `POST

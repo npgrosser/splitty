@@ -43,7 +43,7 @@ impl<'ast> Visit<'ast> for Routes {
                     lit: syn::Lit::Str(path),
                     ..
                 }) => path.value(),
-                // The loops of the gateway and the control socket that serve
+                // The control socket loop that serves
                 // catalog operations.
                 syn::Expr::Field(field) if matches!(&field.member, syn::Member::Named(name) if name == "path") =>
                 {
@@ -63,17 +63,14 @@ impl<'ast> Visit<'ast> for Routes {
     }
 }
 
-/// Every hand-registered route (the browser gateway's own routes, the
-/// control socket's and the job routes) is either a catalog operation or an
-/// adapter route, and every adapter route is registered; the gateway and the
-/// control socket serve catalog operations from the catalog itself.
+/// Every hand-registered control or job route has an explicit classification.
+/// Control operations are registered from the catalog itself.
 #[test]
 fn every_registered_method_and_path_has_an_explicit_classification() {
     let mut routes = Routes::default();
     for source in [
-        include_str!("../../http/gateway.rs"),
-        include_str!("../../http/routes.rs"),
-        include_str!("../../http/jobs.rs"),
+        include_str!("../../control/router.rs"),
+        include_str!("../../control/jobs.rs"),
     ] {
         routes.visit_file(&syn::parse_file(source).expect("valid Rust routes"));
     }
@@ -103,11 +100,7 @@ fn every_registered_method_and_path_has_an_explicit_classification() {
         "an adapter route was removed without updating its classification: {unregistered:?}"
     );
     assert!(
-        include_str!("../../http/gateway.rs").contains("for entry in catalog::OPERATIONS"),
-        "the gateway serves the catalog's operations"
-    );
-    assert!(
-        include_str!("../../http/routes.rs").contains("for entry in catalog::OPERATIONS"),
+        include_str!("../../control/router.rs").contains("for entry in catalog::OPERATIONS"),
         "the control socket serves the catalog's control operations"
     );
 }

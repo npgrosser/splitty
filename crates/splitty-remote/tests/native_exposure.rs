@@ -5,11 +5,11 @@
 //! excluding endpoints after the coordinator is killed without running Drop.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
-use splitty_remote::tunnel::exposure::{bind_gateway, check_sharing_supported, Share};
+use splitty_remote::tunnel::exposure::{check_sharing_supported, testing, Share};
 use splitty_transport::admission::Admission;
 use std::{
     fs, io,
-    net::{SocketAddr, TcpListener},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -135,6 +135,15 @@ impl Drop for Coordinator {
     }
 }
 
+/// The process standing in for an older gateway, ended with the test.
+struct Older(Child);
+impl Drop for Older {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 async fn coordinator(directory: &Path) {
     check_sharing_supported().expect("native production policy must support sharing");
     let port = fs::read_to_string(directory.join("port"))
@@ -213,16 +222,24 @@ async fn native_policy_retains_published_worker_after_coordinator_death() {
     });
     let worker =
         identity(coordinator.worker_pid().unwrap()).expect("actual published worker running");
-    let addresses = [
-        SocketAddr::from(([127, 0, 0, 1], port)),
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
-    ];
-    for address in addresses {
-        assert_eq!(
-            bind_gateway(address).await.err().unwrap().kind(),
-            io::ErrorKind::AddrInUse
-        );
-    }
+    // A gateway of an older Splitty process of this user, which records its
+    // claim in the same registry: the published share refuses it.
+    let mut older = Older(
+        Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let gateway = older.0.id();
+    assert_eq!(
+        testing::record_gateway(port, gateway)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::AddrInUse
+    );
     coordinator.child.kill().unwrap();
     assert!(!coordinator.child.wait().unwrap().success());
     assert_eq!(
@@ -230,18 +247,22 @@ async fn native_policy_retains_published_worker_after_coordinator_death() {
         Some(&worker),
         "same actual worker survives coordinator SIGKILL"
     );
-    for address in addresses {
-        assert_eq!(
-            bind_gateway(address).await.err().unwrap().kind(),
-            io::ErrorKind::AddrInUse,
-            "coordinator death must not release a surviving published generation"
-        );
-    }
-    let alternate = bind_gateway(SocketAddr::from(([127, 0, 0, 1], 0)))
+    assert_eq!(
+        testing::record_gateway(port, gateway)
+            .await
+            .err()
+            .unwrap()
+            .kind(),
+        io::ErrorKind::AddrInUse,
+        "coordinator death must not release a surviving published generation"
+    );
+    let selected = TcpListener::bind("127.0.0.1:0").unwrap();
+    let alternate = selected.local_addr().unwrap().port();
+    drop(selected);
+    assert_ne!(alternate, port);
+    testing::record_gateway(alternate, gateway)
         .await
-        .unwrap();
-    assert_ne!(alternate.local_addr().unwrap().port(), port);
-    drop(alternate);
+        .expect("only the shared port is reserved");
     fs::write(coordinator.directory.path().join("stop-worker"), b"stop").unwrap();
     wait("actual local worker did not exit", || {
         identity(worker.pid).is_none()
@@ -249,26 +270,30 @@ async fn native_policy_retains_published_worker_after_coordinator_death() {
     // On macOS, a transient orphan zombie may be reaped after our independent
     // observer sees SZOMB. Production authority must itself verify release.
     let deadline = Instant::now() + WAIT;
-    for address in addresses {
-        loop {
-            match bind_gateway(address).await {
-                Ok(replacement) => {
-                    assert_eq!(replacement.local_addr().unwrap(), address);
-                    assert_eq!(Share::reserve(port).await.err().unwrap().kind(), io::ErrorKind::AddrInUse,
-                        "an admitted browser endpoint must exclude new shares in either address family");
-                    drop(replacement);
-                    break;
-                }
-                Err(error)
-                    if error.kind() == io::ErrorKind::AddrInUse && Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!(
-                    "native worker exit did not release its own endpoint reservation: {error}"
-                ),
+    loop {
+        match testing::record_gateway(port, gateway).await {
+            Ok(()) => {
+                assert_eq!(
+                    Share::reserve(port).await.err().unwrap().kind(),
+                    io::ErrorKind::AddrInUse,
+                    "an admitted browser endpoint must exclude new shares"
+                );
+                break;
+            }
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse && Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => {
+                panic!("native worker exit did not release its own endpoint reservation: {error}")
             }
         }
     }
-    eprintln!("NATIVE_EXPOSURE_POSITIVE_EXERCISED: real native policy, worker {}, coordinator SIGKILL, IPv4/IPv6 exclusion and actual-exit reuse", worker.pid);
+    older.0.kill().unwrap();
+    older.0.wait().unwrap();
+    drop(
+        Share::reserve(port)
+            .await
+            .expect("the ended gateway's claim is released"),
+    );
+    eprintln!("NATIVE_EXPOSURE_POSITIVE_EXERCISED: real native policy, worker {}, coordinator SIGKILL, gateway exclusion and actual-exit reuse", worker.pid);
 }

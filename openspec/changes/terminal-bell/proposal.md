@@ -40,4 +40,6 @@ none
 
 ## Carried-over design notes
 
-- (2026-11-12, from `program-status`) The server's scanner reads every OSC to its end, so the BEL that ends one no longer counts as a bell. The native notification ledger already skips `bell` and `notification` events of a session whose connection holds a root program status record for it (program-status, "Status Notifications in the Window"); a bell notification added here goes through that rule. The program status marks on tabs, drawer screens and host groups (`crates/splitty-gpui/src/workspace/program_status.rs`) are the pattern for a bell's mark.
+- 2026-11-15, `remove-browser-access`: The web client and session_client.ts are gone. Bell presentation and sound belong to the native window and its notification policy. The referenced program-status requirement is now Program Status Notices In The Window; server BEL detection and connection routing remain.
+
+- (2026-11-12, from `program-status`) The server's scanner reads every OSC to its end, so the BEL that ends one no longer counts as a bell. The native notification ledger already skips `bell` and `notification` events of a session whose connection holds a root program status record for it (program-status, "Program Status Notices In The Window"); a bell notification added here goes through that rule. The program status marks on tabs, drawer screens and host groups (`crates/splitty-gpui/src/workspace/program_status.rs`) are the pattern for a bell's mark.

@@ -1,7 +1,7 @@
 # Connections, listeners and session lifetime
 
 The app owns its local terminal backend. Remote terminals belong to a
-daemon on the SSH host. A browser uses an explicitly started local gateway.
+daemon on the SSH host.
 These choices determine both the transport and what happens when a client closes.
 
 The diagrams below show runtime connections. The [LikeC4 model](../architecture/README.md)
@@ -35,7 +35,6 @@ the selected system SSH client.
 | Desktop, local | In-process channels, or the pipes of an app-owned child process | None | Local sessions end when the app exits |
 | Separate local daemon | Private Unix client socket, for example with `splitty attach` | None | Keeper-backed sessions outlive clients and ordinary daemon restarts |
 | Desktop, SSH host | The local backend's hub: native stream over SSH exec stdin/stdout, then the host's private client socket | None; uses the existing SSH service | Host sessions survive client exit and connection loss |
-| Explicit browser access | HTTP/WebSocket to a loopback gateway, then its selected backend | One explicitly requested loopback gateway | Determined by the selected backend, not the browser tab |
 
 Closing a pane deliberately can end its session. Closing a remote view or losing
 its connection only detaches it. Keeper persistence does not survive a host
@@ -55,35 +54,17 @@ The app assigns each window its backend. Remote screens reach their hosts only t
 so on Windows they use WSL's `ssh`. The UI is part of the app's executable; a
 remote host supplies terminal data and service responses, never UI code.
 
-## Explicit browser access and separate daemons
+## Separate daemons
 
 ```mermaid
-flowchart TB
-  browser["Browser tab"]
-  gateway["Explicit browser gateway<br/>127.0.0.1 or ::1"]
-  browser -->|"HTTP + WebSocket<br/>gateway credentials and exact origin"| gateway
-  gateway -->|"splitty serve<br/>in-process connection"| embedded["Gateway-owned embedded backend<br/>sessions end when serve exits"]
-  gateway -->|"splitty serve --daemon<br/>private Unix socket"| localdaemon["Separate local daemon<br/>persistent keeper sessions"]
-  gateway -->|"splitty connect HOST<br/>SSH exec stream"| remote["Host bridge + private Unix socket<br/>remote daemon and keepers"]
-  cli["splitty attach"] -->|"Private Unix socket"| localdaemon
+flowchart LR
+  cli["splitty attach"] -->|"Private native client socket"| daemon["Separate local daemon"]
+  daemon -->|"Private keeper sockets"| keepers["Keepers / PTYs"]
 ```
 
-The three gateway branches are alternatives selected at startup. Each gateway
-owns its browser credentials and serves UI assets locally. It is bound to one
-selected backend; the browser cannot substitute a private socket path or an
-upstream HTTP address for that assignment. Opening
-a browser gateway does not change a daemon's lifetime. Closing the last browser
-tab does not, by itself, stop the gateway or its selected backend.
-
-The gateway reaches its backend only as a native client: each `/api` route is an
-operation of the native catalog, `/ws` a native client connection and
-`/ws/remote`, where the backend may open hosts, a native host stream of its hub.
-The server has no second HTTP API or WebSocket relay for browsers.
-
-`splitty daemon start` opens private Unix endpoints, not HTTP. `splitty serve`
-creates an embedded workspace with its own lifetime; `splitty serve --daemon`
-explicitly selects the independent daemon. `splitty connect HOST` exposes only
-the local browser gateway: it does not forward a remote Splitty HTTP port.
+`splitty daemon start` opens private Unix endpoints. The owner control socket
+uses HTTP framing; the native client socket carries terminal sessions. Neither
+opens a terminal-service TCP listener. The app owns a separate embedded service.
 
 The native client socket is distinct from the narrower owner-control, restricted
 agent and keeper sockets. They are local surfaces with different operation sets,
@@ -94,7 +75,7 @@ processes already running as the same OS user.
 
 ```mermaid
 sequenceDiagram
-  participant Client as Local backend / gateway
+  participant Client as Local backend hub
   participant SSH as System SSH
   participant Host as Host commands
   participant Daemon as Daemon
@@ -119,7 +100,7 @@ sequenceDiagram
 
 The diagram groups the system SSH calls: probe, installation, discovery and the
 long-lived bridge are separate exec operations, not application messages on an
-already admitted terminal stream. No browser token travels over these calls.
+already admitted terminal stream.
 Both sides verify the native transport and expected service instance before
 application input is accepted. An incompatible legacy daemon may require an
 explicit, verified update confirmation; retries do not replay an ambiguous
@@ -140,7 +121,6 @@ until exit is observed; it does not stop the remote daemon or its keepers.
 | App window to local backend | The app's own in-process channel or owned child pipes |
 | Client to host's SSH service | System OpenSSH host-key verification and the selected user's keys/agent/configuration |
 | Host bridge to daemon | Private directory/socket permissions, OS peer UID and verified daemon instance |
-| Browser to explicit gateway | Gateway-local bootstrap/session credentials, exact Host/Origin and WebSocket admission checks |
 | Daemon to keeper | Private keeper endpoint and its ownership/protocol checks |
 
 SSH authenticates the remote OS login. It does not make every path under that
@@ -157,19 +137,19 @@ local service reachable through the host's loopback relay. These use their own
 owned SSH forwarding workers; normal terminal traffic uses exec pipes instead.
 See [forwarding and sharing](remote.md#ports) for the user flows.
 
-Browser gateways and reverse shares coordinate through one durable per-user
-exposure registry so a share cannot expose a Splitty gateway, including one from
-another configuration directory. A reservation exists before the forwarding
+Reverse shares coordinate through one durable per-user exposure registry
+across configuration directories. Live internal-listener claims written by older
+processes of the same user remain reserved against sharing. A reservation exists before the forwarding
 worker starts and remains until local worker termination is proved. An unknown
 process state or damaged registry blocks admission; it is not treated as empty.
 
 This registry deliberately has stricter path requirements than a native client
 socket. Non-sticky group/world-writable ancestors are refused, so an existing
-`0775` account-home `.local` or `.local/state` blocks browser gateways and reverse
+`0775` account-home `.local` or `.local/state` blocks reverse
 sharing on native Linux. Pinning one process's directory descriptor cannot
 prove that another process sees the same registry after an ancestor is renamed.
-Splitty neither changes those parent permissions nor falls back to an
-unregistered browser listener. The app's and daemon connections do not
+Splitty neither changes those parent permissions nor admits an
+unregistered share. The app's and daemon connections do not
 need this registry. See the [registry requirements](remote.md#forwarding-registry-requirements)
 for paths and platform restrictions.
 
@@ -179,11 +159,11 @@ Run `pnpm --dir architecture dev` from the repository root and select a view:
 
 | LikeC4 view | What to inspect |
 | --- | --- |
-| `connections` — Connection components | Native, browser and SSH boundaries across the existing modules |
+| `connections` — Connection components | Native and SSH boundaries across the existing modules |
 | `gpui` — splitty-gpui components | The app's windows, workspace view, terminal engine and startup |
 | `client_core` — splitty-client-core components | The app's UI-free sources, connections and app-owned backends |
 | `remote` — splitty-remote components | SSH invocation, payload installation, bridge, owner and supervision |
-| `server` — splitty-server components | Native endpoint, browser gateway, shared operations and client sessions |
+| `server` — splitty-server components | Native endpoint, control router, shared operations and client sessions |
 | `transport` — splitty-transport components | Framing, negotiation, cancellation and bounded delivery |
 
 The view definitions are in [architecture/views.c4](../architecture/views.c4).

@@ -1,7 +1,6 @@
 //! Transport-independent UI operations and their fixed authority boundary.
 //!
-//! Browser authentication and owner/grant administration belong to their
-//! adapters. A native UI client receives only the operations in [`catalog`].
+//! Owner/grant administration belongs to the control socket. A native UI client receives only the operations in [`catalog`].
 
 pub mod catalog;
 mod dispatch;
@@ -15,8 +14,8 @@ pub mod runtime;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-/// State of one terminal service. It has no browser token, session store,
-/// origin or listening address and can be shared by independent adapters.
+/// State of one terminal service, shared by independent native connections
+/// and the local control router.
 #[derive(Clone)]
 pub struct State {
     pub instance: String,

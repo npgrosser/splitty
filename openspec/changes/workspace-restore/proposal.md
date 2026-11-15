@@ -45,7 +45,7 @@ To be decided when the change is next. Likely candidates:
 - `agent-integration`: how an agent running in a pane reports its conversation ID and mode to Splitty (the CLI command the hook calls, the operation it submits, the shipped Claude Code plugin). Could instead be part of `workspace-restore`; a separate capability fits better if `terminal-intelligence` reuses the channel for agent states.
 
 ### Modified Capabilities
-- `server-modes`: "Two Server Modes" and "Embedded Mode Lifetime" state that an embedded server persists nothing; they change so that persistence means process continuity, and the desktop-hosted embedded server writes and reads a restore snapshot. "Session Respawn On Daemon Start" respawns from the restore recipes instead of the start command only. "Workspace Persistence In Daemon Mode" lists the new per-session fields.
+- `server-modes`: "Daemon And Embedded Modes" and "Embedded Service Lifetime" state that an embedded server persists nothing; they change so that persistence means process continuity, and the desktop-hosted embedded server writes and reads a restore snapshot. "Session Respawn On Daemon Start" respawns from the restore recipes instead of the start command only. "Workspace Persistence In Daemon Mode" lists the new per-session fields.
 - `workspace-model`: the session record gains the agent information, and an operation sets it ("Layout Operations" lists every operation).
 - `terminal-sessions`: "Startup Command and Restore Mode" gains a mode that types the command without running it.
 - `cli`: the command the hook calls.
@@ -70,6 +70,8 @@ Open questions for the design:
 - Ordering on shutdown: the snapshot must be taken before the server closes its sessions, so that they are not recorded as ended.
 
 ## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The native app owns embedded work; there is no serve-hosted workspace or web frontend to restore. Use the native UI for restore choices. The server-modes requirements are now Daemon And Embedded Modes and Embedded Service Lifetime; keeper continuity and the restore-recipe distinction remain.
 
 Input for `design.md`:
 - 2026-10-09: embedded mode makes Splitty a classic terminal application without a background daemon and with the client/server architecture hidden. Writing a restore snapshot from an embedded server is in line with that; a background process or user-visible server terms are not.

@@ -11,64 +11,15 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 | Layer | Technology |
 |-------|-----------|
 | Desktop app | GPUI with `libghostty-vt` (`crates/splitty-gpui`, `crates/splitty-client-core`; Windows, macOS, Linux) |
-| Browser UI (`frontend/`) | Svelte 5, TypeScript, Vite, Tailwind CSS; dockview-core for the layout |
-| Terminal in the browser UI | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
 | Backend | Rust (Tokio, Axum) |
 | PTY | portable-pty |
 | Config | TOML (`~/.config/splitty/config.toml`) |
 | Templates | YAML (`~/.config/splitty/templates/`) |
 
-## Frontend transport boundary
-
-This section concerns the web client in `frontend/`, which runs in a browser
-through an explicit gateway. Its native-document path (native assignment,
-`native_api.ts`, packaged pages) has no desktop host any more and stays in the
-code until the web client goes. The packaged entry completes a native
-assignment before importing UI modules.
-`protocol/connection.ts` then supplies the root `ConnSocket`; host views receive
-separate assigned native streams. Browser entries authenticate with their
-explicit gateway and pin its role, target and gateway identity before mounting.
-Neither shell globals nor URL parameters grant a connection. A failed or
-revoked native assignment stays native and never requests a token or ticket.
-
-All backend HTTP-shaped calls use `protocol/http.ts::apiFetch`, which routes
-native documents through the enumerated `native_api.ts` operation catalog.
-Settings, themes, profiles, templates and remote helpers use this adapter;
-unknown native routes, methods, headers or arguments fail before dispatch.
-Settings and profile data come from the service rather than the former
-loopback origin's browser storage.
-
-The remaining frontend network sites have these purposes:
-
-| Site | Purpose |
-| --- | --- |
-| `protocol/browser_assignment.ts` | Browser-only authenticated gateway role lookup; skipped after native assignment. |
-| `protocol/http.ts` | Browser gateway API calls, session exchanges and single-use WebSocket tickets; native mode rejects authentication/ticket calls and uses native operations for APIs. |
-| `protocol/websocket.ts` | Browser root session socket; native startup replaces the default connection before UI imports. |
-| `remote/api.ts` | Browser Hub WebSocket; native main documents use their assigned host opener, and native remote documents cannot open another host. |
-| Remote helper `deps.fetch` / `fx.fetch` calls | Injected `apiFetch` from the workspace, including host order, preferences, remembered screens and forwarding. |
-| `ghostty-web` WASM loader and `FontFace` | Ghostty loads an explicit build-emitted WASM URL; the font is a same-origin packaged resource. Neither uses a backend, CDN or library fallback path. CSS and dynamic module imports are build-produced resources. |
-
-`NativeSocket` handles native heartbeat Ping/Pong controls as well as data
-receipts; control replies do not consume application request or delivery slots.
-Reconnect discards terminal input and outstanding non-idempotent requests;
-uncertain mutations are reported rather than retried. Clipboard and image reads, multi-file
-paste/drop batches and delayed Ctrl+V capture one session-client generation.
-A disconnect, replacement welcome or disposed view prevents their remaining
-bytes and final path insertion from reaching another connection. Confirmed
-editor completions likewise cannot reply on a replacement generation.
-
-Dockview popouts use the parent's existing session/connection objects and the
-packaged `popout.html`; they start no independent backend connection or native
-grant. They share the parent's script trust domain. The parent closes its
-Dockview popouts on unload, while native document revocation independently
-closes its handles and pending operations. Backend/session IDs are always
-resolved inside the owning `ServerConnection`.
-
 ## Prerequisites
 
 - Rust (stable)
-- Node.js 24 and pnpm
+- Node.js 24 and pnpm for the architecture check only
 - (native app) Python 3 and a C/C++ toolchain for the terminal library; on
   Linux the development packages named under [The native app](#the-native-app)
 
@@ -95,8 +46,6 @@ static Linux server, which runs in a WSL distribution. Started without
 arguments the app picks the distribution and installs the backend that ships
 beside it; the [Windows preview runbook](gpui-spike.md#native-windows-preview)
 describes the explicit `--wsl-*` arguments for isolated previews and tests.
-The frontend assets must be built before compiling the Linux backend, which
-embeds them.
 
 The GPUI app uses statically linked `libghostty-vt` 1.0.0. It needs a matching
 native library for the machine running the app: Linux and macOS build it for
@@ -130,24 +79,7 @@ cargo build --locked --release -p splitty-gpui
 The script also accepts `--prefix` with an absolute path. An existing prefix
 that is not a matching bootstrap build is rejected; choose a new prefix.
 The GPUI build verifies the installed 1.0.0 headers and static archive before
-linking. On Linux and macOS the app links the server without the web frontend
-(client-core turns off the server's default `web-assets` feature), so
-`cargo build -p splitty-gpui` needs no `frontend/dist`. Cargo unifies features
-per build: built together with `splitty-server` or the whole workspace, the
-server embeds the frontend for both, and `frontend/dist` must exist.
-
-### Browser UI
-
-```bash
-# Backend with the embedded frontend on 127.0.0.1:9800, rebuilt on changes
-make dev
-```
-
-`make dev` starts an explicit loopback gateway and prints `SPLITTY_URL`; open
-that exact URL. It serves the embedded frontend from the same origin as its
-API. Rebuild frontend assets before restarting the backend to pick up UI
-changes. A separate Vite server and its proxy do not gain native authority or
-a browser gateway origin exception.
+linking.
 
 ## The native app
 
@@ -162,10 +94,8 @@ Linux and macOS executables when the build sets the four
 release does; the Windows executable is built without them, because it reaches
 hosts through its WSL backend.
 
-Every build needs the pinned terminal library
-([above](#native-terminal-library-for-gpui)). The app alone needs no
-`frontend/dist`; the `splitty` command (`splitty-server` with its default
-`web-assets` feature) embeds it and needs the frontend built first.
+Every app build needs the pinned terminal library
+([above](#native-terminal-library-for-gpui)). The server and CLI build with Rust.
 
 ### Linux
 
@@ -178,7 +108,7 @@ sudo apt install build-essential pkg-config rpm libxkbcommon-x11-dev \
 packaging/linux/native/build.sh        # or: make native-package
 ```
 
-It builds the frontend, the terminal library (unless `GHOSTTY_VT_DIR` names
+It builds the terminal library (unless `GHOSTTY_VT_DIR` names
 one), the app and the `splitty` command, and writes into `build/native-linux/`:
 
 | File | Content |
@@ -258,7 +188,7 @@ The desktop app installs from the packages of [The native app](#the-native-app)
 (`make native-package`). The server and CLI install on their own:
 
 ```bash
-make build/splitty        # server and CLI binary (embeds the frontend)
+make build/splitty        # server and CLI binary
 make install-no-gui       # → ~/.local/bin/splitty
 
 # Uninstall
@@ -288,7 +218,7 @@ The weekly schedule runs the dependency audit and CodeQL, so new advisories
 and analysis queries are checked without rebuilding unchanged code. Both
 workflows can also be started manually; a manual CI run includes all tests
 and build checks. CodeQL uses the repository workflow for Actions,
-JavaScript/TypeScript, Python and Rust; GitHub's default setup must remain
+Python and Rust; GitHub's default setup must remain
 disabled because it overrides custom CodeQL workflows.
 
 CI lints and tests the native app with the workspace on Linux, builds it on
@@ -376,7 +306,7 @@ New builds retain artifacts for at most three days, including failed releases
 and standalone Windows builds. Reruns of older tags use the retention settings
 from that tag, but successful release reruns are also cleaned up.
 
-On a Windows PC with the Windows Rust toolchain, Node and pnpm, the native
+On a Windows PC with the Windows Rust toolchain, the native
 installer also builds locally in a few minutes, from WSL:
 
 ```bash
@@ -387,10 +317,9 @@ It brings a checkout on a Windows drive (`SPLITTY_WINDOWS_CHECKOUT`, by default
 `%USERPROFILE%\Code\splitty-windows-preview`, cloned when missing) to the
 committed `HEAD`, runs `packaging/windows/build.ps1` there and, with `--install`,
 starts the setup. `SPLITTY_WINDOWS_PATH` adds Windows directories to the build's
-`PATH`, for a pnpm that is not on it; `SPLITTY_GHOSTTY_VT_DIR` names the Windows
+`PATH`, for tools not already on it; `SPLITTY_GHOSTTY_VT_DIR` names the Windows
 path of a built terminal library (without it the build runs the bootstrap with
-Windows Python); `--skip-tests` skips the type check and the Windows unit
-tests. The script prints the
+Windows Python); `--skip-tests` skips the Windows unit tests. The script prints the
 setup's Windows path. Uncommitted changes are not built, and the version is the
 one the sources carry.
 

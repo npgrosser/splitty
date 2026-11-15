@@ -67,4 +67,6 @@ Open questions for the design:
 
 ## Carried-over design notes
 
+- 2026-11-15, `remove-browser-access`: The web client and Frontend Security Headers are gone. Native views consume session facts over native connections; browser DOM/CSP and xterm presentation references are historical. Preserve server-side parsing, OSC semantics and per-source notification policy.
+
 - 2026-11-15, `remove-tauri-shell`: the Windows WSL payload check that bundles `shell-integration/` lives in `windows-installer.yml` (formerly `windows-tauri.yml`).

@@ -1,4 +1,4 @@
-//! Shared operation implementations. Browser/native adapters only decode and authorize.
+//! Shared operation implementations. Native connections and the control router decode and authorize.
 use super::reply::{IntoReply, Payload, Reply};
 use super::State as ServiceState;
 use crate::hub::Hub;

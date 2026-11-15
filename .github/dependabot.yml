@@ -11,14 +11,6 @@ updates:
       cargo-minor-patch:
         update-types: [minor, patch]
 
-  - package-ecosystem: npm
-    directory: /frontend
-    schedule:
-      interval: weekly
-    groups:
-      frontend-minor-patch:
-        update-types: [minor, patch]
-
   # Also keeps the commit-SHA pins in the workflows current.
   - package-ecosystem: github-actions
     directory: /

@@ -2,8 +2,6 @@
 
 A graphical terminal multiplexer for Linux, macOS and Windows.
 
-![Splitty with a test run, a dev server and a git log on one screen, the scratchpad of the left terminal open below it, and the drawer listing two local screens and a screen on the host devbox](docs/images/workspace.png)
-
 ## The idea
 
 Splitty brings terminals from your own machine and multiple SSH hosts into
@@ -41,8 +39,6 @@ separate layouts on named screens. The drawer lists every screen, local and
 remote, with what runs in it.
 
 ### Remote hosts
-
-![The drawer with the host devbox and its screen api, and the Hosts panel showing the host connected with port 8000 forwarded](docs/images/remote-hosts.png)
 
 - **Remote screens.** Pick a host from your `~/.ssh/config` or type one in,
   and its screens open next to your local ones. Splitty installs itself on the
@@ -185,7 +181,6 @@ browser downloaded the archive, run
 | Desktop, local terminals | In-process service on macOS and Linux, owned child pipes to the WSL backend on Windows | End when the app quits |
 | Explicit local daemon | Private Unix socket | Independent of the app |
 | SSH host | SSH data channel to the host’s private socket | Survive disconnects and app exit |
-| Explicit browser access | Loopback HTTP/WebSocket gateway to one selected backend | Follow that backend’s lifetime |
 
 - The server holds the layout and the terminals, so several windows can show
   the same screens and stay in sync.
@@ -233,13 +228,12 @@ both and what ships with the app.
 
 ## Security
 
-Whoever controls Splitty gets a shell with your rights, so it is built to be
-reachable only by you. Desktop connections use IPC or pipes; daemons use
-private Unix sockets, and remote connections travel over SSH. Only explicit
-browser access starts a loopback HTTP/WebSocket gateway, with single-use
-sign-in codes, `HttpOnly` cookies and origin checks. Shells in panes never
-receive a browser credential. Processes running as your own user are not isolated from
-Splitty, as with tmux.
+Whoever controls Splitty gets a shell with your rights. Desktop connections use
+in-process channels or owned pipes; daemons use private Unix sockets, and
+remote connections travel over SSH. The terminal service has no TCP listener.
+Owner, grant and keeper sockets use private paths and peer checks. Deliberate
+application forwards and reverse shares have separate admission rules.
+Processes running as your own user are not isolated from Splitty.
 
 The full model is in [`SECURITY.md`](SECURITY.md). Please report
 vulnerabilities privately through
@@ -271,8 +265,7 @@ vulnerabilities privately through
 
 ## Building from source
 
-You need Rust (stable), Node.js 24 with pnpm (the `splitty` command embeds the
-assets built in `frontend/`; the desktop app alone does not), Python 3 and a C toolchain for the terminal library and,
+You need Rust (stable), Node.js 24 with pnpm for the architecture check only, Python 3 and a C toolchain for the terminal library and,
 on Linux, the development packages listed in
 [Development](docs/development.md#the-native-app).
 

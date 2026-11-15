@@ -174,3 +174,7 @@ These are proposed defaults for review, dated 2026-11-07. Central decision-log i
 - **NR6 (provisional, tbd):** each explicit remote Screen termination confirms its assessed impact; default Screen close and window close only detach remote work.
 - **NR7 (provisional, tbd):** 8 remote sources, 4 pending opens, 200 metadata rows per host, aggregate 128 opened Screens / 128 pane-session-or-pending admissions, 16 MiB simultaneous staged Screen observations and a 15-second catalog/snapshot observation deadline.
 - **NR8 (provisional, tbd):** remote loopback link opening remains unavailable with an explanation until its deliberate forwarding flow exists; empty remote Screens are never refilled through local creation policy.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

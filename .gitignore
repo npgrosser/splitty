@@ -2,9 +2,6 @@
 /build/
 /target/
 
-# Frontend
-frontend/dist/
-frontend/.build-stamp
 node_modules/
 
 # IDE / Editor / AI

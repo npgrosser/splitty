@@ -97,3 +97,7 @@ The native UI endpoint introduced by `native-client-transports` is not the MCP d
 - Session ownership: agent-owned sessions that end with the MCP connection, or screen-owned sessions that survive?
 - Multiple agents: namespace isolation or shared access?
 - Virtual terminal: per session or on demand?
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The browser gateway, process token and TCP CLI target are gone. MCP must use the owner control socket or an explicitly scoped grant socket with the existing route restrictions, or a deliberately designed native connection. Earlier authenticated HTTP/WebSocket descriptions do not imply a network listener or bearer credential.

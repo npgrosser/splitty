@@ -1,17 +1,15 @@
 # The `splitty` command
 
 One executable is the server, the daemon and the CLI. `splitty --help` lists
-every command; this page covers the ones you use by hand, and the
-[browser UI](#browser-ui) that `splitty serve` and `splitty connect` show. Remote access
-(`splitty connect`) is described in [Remote development](remote.md#splitty-connect),
-`splitty open` and `splitty download` in [Files and editors](files-and-editors.md),
-and the managed jobs for agents in [the jobs guide](cli-jobs.md).
+every public command. See [Remote development](remote.md) for host connections,
+[Files and editors](files-and-editors.md) for `splitty open` and `splitty download`,
+and [the jobs guide](cli-jobs.md) for managed jobs for agents.
 
 ## Server modes
 
 | Mode | Started by | Sessions end when |
 |------|------------|-------------------|
-| **Embedded** | The app, `splitty serve` | The app or `serve` process ends |
+| **Embedded** | The app | The app ends |
 | **Daemon** | `splitty daemon start` | You end them (`daemon stop --end-sessions`), a reboot, or a logout that kills user processes |
 
 Workspace persistence is a property of the mode, not of a screen: a daemon
@@ -21,53 +19,6 @@ preferences are still persisted. The app owns its local embedded backend on
 every platform and closes its sessions when it ends: on Linux and macOS the
 backend runs inside the app's process, on Windows in WSL. A separately started
 daemon remains independent of the app.
-
-Native daemon clients use a private Unix socket. The app talks to its local
-backend in-process, or on Windows over the pipes of the `wsl.exe` process it
-started. Browser access is explicit: `serve` and `connect`
-open a loopback browser gateway. Remote native connections travel through SSH;
-a daemon itself opens no TCP listener.
-
-## `splitty serve`
-
-Serves the backend and the [browser UI](#browser-ui) together. Like [ttyd](https://github.com/tsl0922/ttyd) but with screens, splits and tabs.
-
-```bash
-splitty serve                           # listen on 127.0.0.1:9800
-splitty serve --addr 127.0.0.1:8080     # another loopback port
-splitty serve --open                    # open the browser with a single-use launch code
-splitty serve --daemon --open           # browser view of an existing daemon
-splitty serve --oneshot-token           # random process token, not persisted to disk
-SPLITTY_ADDR=127.0.0.1:8080 splitty serve
-```
-
-On startup `serve` prints `SPLITTY_PORT`, `SPLITTY_BOOTSTRAP` and `SPLITTY_URL`, using the port actually bound. Opening the launch URL exchanges its single-use code for the gateway's HttpOnly cookie. The code is useless afterwards. Listeners accept canonical `127.0.0.1` or `::1` addresses, including a localhost name resolving to one of those addresses; other addresses are refused. For IPv6, use `--addr '[::1]:8080'`.
-
-Plain `serve` owns its embedded workspace; `serve --daemon` instead opens independent native client connections to the existing daemon and never creates another workspace. Every tab has its own attachment, file/editor state and lifetime. The gateway serves local assets and terminates browser credentials itself. Its `splitty-session-<instance>` cookie name and one-use credentials are distinct from those of other gateways. Cookies are scoped by hostname, not port; use the advertised numeric loopback URL, and open forwarded development servers through their advertised `localhost` URLs. This separation does not isolate a gateway from every other service on the same hostname. Host connections opened from the main workspace retain the same SSH setup progress and fixed host assignment.
-
-`serve --desktop-stdio` is refused. Where the app's backend is a process of its own, on Windows, the app starts the internal `desktop-backend --transport native-v1 --backend embedded --owner` in WSL; its stdout carries frames rather than text launch lines, and `--owner` keeps the service across window clients. On Linux and macOS the app runs the service in its own process. This internal mode accepts no browser address or token.
-
-## Browser UI
-
-`splitty serve` and `splitty connect` show Splitty's web client in a browser. It
-is a second client of the same protocol: screens, splits, tabs, remote screens,
-ports, file transfers, viewer panes and reviews work as in the app, against the
-backend the gateway was started for. It has its own look and labels, and differs
-from the app in a few places:
-
-- Terminals are drawn by xterm.js or ghostty-web (Settings → Terminal →
-  Renderer); their known problems are in [Known issues](known-issues.md#browser-ui).
-- A remote screen starts from the arrow next to **New screen** in the drawer
-  (**On a host…**) or **New screen on host…** in the command palette.
-- Dropping files offers **Upload into a folder**, with a destination you can
-  edit, besides temporary storage.
-- Settings → **Editors** edits the editor rules that the app reads from
-  `config.toml` ([Files and editors](files-and-editors.md#open-files-in-your-editor-splitty-open---editor)).
-- Selecting text in a terminal copies it to the clipboard.
-- It reads its own theme files (`*.toml`) from the themes folder; the app's
-  themes are described in [Themes](themes.md).
-- The page can be installed as a PWA from the browser.
-- A page of `splitty connect` cannot ask to open an editor (`splitty open --editor`).
 
 ## `splitty daemon`
 
@@ -88,7 +39,9 @@ So after installing a new version, `splitty daemon restart` updates without endi
 
 Corrupt or unreadable discovery is an explicit error, including for `daemon status --json`; it is never treated as permission to create a replacement workspace. Dead records are removed only while holding the native instance lock and after rereading the same record. A starting or running daemon's publication cannot be deleted by a stale status/stop request. A new start replaces stale publication only after acquiring that lock.
 
-`daemon start --addr` and `--token` are usage errors. For a browser, use `splitty serve --daemon --addr 127.0.0.1:8080 --open`; stopping that gateway leaves the daemon and its sessions running. The app continues to own its separate local workspace.
+### Internal backend
+
+On Windows the app starts `desktop-backend --transport native-v1 --backend embedded --owner` in WSL. Its stdout carries native frames, and `--owner` keeps the service across window clients. On Linux and macOS the app runs the service in its own process. Native daemon clients use the private client socket; the owner control socket carries CLI operations with HTTP framing over Unix sockets.
 
 ## `splitty attach`
 
@@ -97,14 +50,14 @@ Show a session of the daemon in the terminal you are in, for example over a plai
 ```bash
 splitty attach                 # pick a pane from a numbered list
 splitty attach 3f9a            # a pane or session id, or a unique prefix (4+ characters)
-ssh -t user@vm splitty attach  # from another machine
+ssh -t me@192.0.2.10 splitty attach  # from another machine
 ```
 
 From another machine, this needs `splitty` on the host's `PATH`. The copy Splitty installs on a host is not on it: it lives in `~/.local/share/splitty/remote/<version>/`, and that path changes with every update.
 
 What you type goes to the session, and its output comes back; windows that show the same session keep showing it. **Ctrl+\\** detaches (`--detach-key ctrl-]` picks another key) and leaves the session running. When its process exits, `attach` prints the exit code and ends. Attaching takes over the PTY size, as the size badge in a window does, and the window gets it back once you detach and type there.
 
-`attach` verifies the private client endpoint and server instance recorded in `daemon.json`, without reading a token file. An explicitly named browser gateway remains available with `--addr` and `--token`. Without a daemon it controls a session's keeper directly, and a daemon started meanwhile takes over without the terminal noticing. A plain `splitty serve` instance is reachable through that explicit gateway path. The app exposes no implicit browser endpoint. It needs a terminal (`ssh -t`), runs on Linux and macOS, and is refused under an agent grant.
+`attach` verifies the private client endpoint and server instance recorded in `daemon.json`. Without a daemon it controls a session's keeper directly, and a daemon started meanwhile takes over without the terminal noticing. It needs a terminal (`ssh -t`), runs on Linux and macOS, and is refused under an agent grant.
 
 ## Commands inside a pane
 
@@ -148,14 +101,10 @@ and both you and the agent can read their output. Provision own-job access with
 `splitty agent exec <agent-id> -- claude`. See the [managed jobs guide](cli-jobs.md)
 for cursors, reconnects, permissions and daemon-versus-app lifetime.
 
-## Signing in
+## Upgrading command-line usage
 
-The browser never holds a long-lived secret:
+`splitty serve`, `splitty connect` and `splitty issue-bootstrap` are removed. Their temporary hidden stubs exit with status 2 and point to `splitty daemon start` for persistent local work, the desktop app for hosts, and `splitty attach` (also `ssh -t me@192.0.2.10 splitty attach`) for terminal access. The stubs remain until the next minor release after this change ships. `serve --desktop-stdio` points to `desktop-backend --transport native-v1 --backend embedded`.
 
-1. The browser launcher (`serve --open`, `connect`) opens a URL with a **single-use launch code** that expires after two minutes.
-2. The page exchanges it for an **`HttpOnly` session cookie** and removes the code from the address bar.
-3. Each WebSocket connection uses a **single-use ticket** valid for ten seconds.
-
-Explicit HTTP CLI callers authenticate with the **process token** from `auth-token` in the configuration directory (`~/.config/splitty` on Linux, `~/Library/Application Support/splitty` on macOS), or with `--token`. A file-backed browser gateway creates the token file with mode `0600` when needed. If you open the UI without a launch code, Splitty asks for that token once and turns it into a session. To rotate a file-backed token, stop the gateways using it, delete the file and restart them. `connect` uses a random process-local token and never reads this file. `splitty issue-bootstrap --addr 127.0.0.1:9800` mints a fresh launch code for an explicit gateway. The app and daemon connections use no browser cookies, tokens or launch codes.
+The `--addr` and `--token` options are usage errors, and `SPLITTY_ADDR` has no effect. An existing `auth-token` file in the configuration directory is unused and left untouched; it can be deleted.
 
 Details, guarantees and limits are in [`SECURITY.md`](../SECURITY.md).

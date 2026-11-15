@@ -62,7 +62,7 @@ Line numbers refer to the tree at commit `b495e1c`.
 - **Fixed in `mux-layout-consistency` (2026-11-07): parsed rejected ops were reported selectively.**
   Every parsed dispatch rejection except `select_tab` now reaches its originating client, whose
   frontend resyncs the named screen. Existing malformed/unknown-message policy remains unchanged.
-- **Workspace directory reconciliation is still incomplete between open windows.** Screenless nudges
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Workspace directory reconciliation was incomplete between web windows.** Screenless nudges
   now announce order/activation changes, but the web client ignores them. A nudge naming a removed
   screen requests a snapshot that the server intentionally does not send. A directory snapshot/event
   and connection-local reconciliation are separate follow-up work; notification delivery alone does
@@ -70,9 +70,10 @@ Line numbers refer to the tree at commit `b495e1c`.
 - **Resolved: failed spawns no longer announce a nonexistent session.** Only successful
   spawns produce `mux.pane_spawned`; a failed spawn reports `mux.op_failed` to its origin.
   Accepted model changes still notify peers, including when their process effects fail.
-- **No backpressure**: each client's outgoing queue is unbounded (`ws/sender.rs:27`).
-- **Connect race**: a client joins the broadcast list (`ws/handler.rs:63`) before `mux.welcome` is sent (`:73`).
-- Ordering only holds within one op: broadcasts spawn one task per client per batch (`ws/mod.rs`).
+- **Stale paths checked (2026-11-15, `remove-browser-access`):** the old `ws/sender.rs`,
+  `ws/handler.rs` and `ws/mod.rs` findings describe an obsolete implementation. The retained
+  `client_session` and native transport use bounded delivery and ordered welcome/batches;
+  removing the gateway does not remove those guarantees.
 - `mux.welcome` does not include the active screen.
 
 ### control-api
@@ -90,7 +91,7 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 - `daemon stop` exits 0 when SIGTERM fails (`main.rs:521-523`).
 - **Fixed in `cli-control`:** the shared bounded HTTP client preserves non-JSON 401/403 errors, and incomplete explicit address/token pairs fail as usage errors.
-- `issue-bootstrap` without a token file creates a fresh token that cannot match the running daemon
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: `issue-bootstrap` without a token file creates a fresh token that cannot match the running daemon
   (`main.rs:295`), which ends in a confusing auth failure.
 - Daemon liveness is a bare `kill(pid, 0)` (`daemon/mod.rs:73`); after PID reuse a stale info file counts as live.
 - `send-keys` cannot send a literal `\n` (no backslash escape, `main.rs:330`).
@@ -99,10 +100,10 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 ### server-modes
 
-- `serve` panics via `unwrap` on a bind failure instead of printing a clean error (`main.rs:496`).
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: `serve` panics via `unwrap` on a bind failure instead of printing a clean error (`main.rs:496`).
 - Because session status never becomes "exited" (see workspace-model), restore respawns sessions whose process had
   already exited while the pane stayed open (`daemon/mod.rs:108`).
-- **Windows re-entry hands out a spent bootstrap code**: `windows_wsl.rs:958-967` returns the stored URL whose code
+- **Resolved by shell removal (2026-11-15, `remove-tauri-shell`); browser credentials also removed by `remove-browser-access`.** Historical Windows re-entry handed out a spent bootstrap code: `windows_wsl.rs:958-967` returns the stored URL whose code
   was already redeemed, and the launcher never sends the `bootstrap` stdin line the server supports
   (contradicting the comment at `main.rs:797-806`).
 - `startedAt` / `daemon status` show raw Unix seconds; `chrono_now` claims ISO 8601 (`main.rs:1215`).
@@ -129,21 +130,21 @@ Line numbers refer to the tree at commit `b495e1c`.
   `~/Library/Application Support/splitty/run/`, and `agent-<uuid>.sock` there exceeds the 104 bytes of a macOS socket
   address for user names longer than about 8 characters, so agent grants fail. A hub's server on a Mac uses
   `~/.config/splitty/run/` and is not affected. Not reproduced yet.
-- **Fixed (2026-10-14): `splitty serve` ignored SIGTERM** (found while checking the remote screens by hand). Only
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Fixed (2026-10-14): `splitty serve` ignored SIGTERM** (found while checking the remote screens by hand). Only
   Ctrl+C shut it down; a `kill` or a service manager's stop ended the process at once, and the hub's forward `ssh`
   processes lived on, holding their local ports, so the next server forwarded the same host port to another one.
   `serve` now shuts down the same way on SIGTERM (`main.rs`, `shutdown_signal`); SIGKILL still leaves them behind.
 
 ### terminal-sessions
 
-- **Links in a terminal of the web client had to be copied by hand** (seen 2026-10-14). Found and fixed the
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Links in a terminal of the web client had to be copied by hand** (seen 2026-10-14). Found and fixed the
   same day: OSC 8 hyperlinks asked with `window.confirm` and a local pane's OSC 8 links took xterm's
   `window.open()`; the ghostty-web renderer gave local panes no links at all. All now go through
   `lib/terminal/hyperlinks.ts` and `openExternalTarget`. Long URLs that a TUI hard-wraps were
   matched only up to the line break; sessions now start with `FORCE_HYPERLINK=1`, so Claude Code sends them as
   OSC 8 hyperlinks that open whole from every line (Codex sends them without it). Plain text that a program wraps
   itself is still matched per line, and xterm.js underlines only the hovered line of a wrapped hyperlink.
-- **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium and Edge** (verified in
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium and Edge** (verified in
   Chromium on 2026-10-15): both call `navigator.clipboard.readText()`
   (`lib/context_menus.ts`, `Workspace.svelte`), which the page's own `Permissions-Policy: clipboard-read=()` blocks
   ("The Clipboard API has been blocked because of a permissions policy"). The paste shortcuts work, since they use
@@ -169,7 +170,9 @@ Line numbers refer to the tree at commit `b495e1c`.
 - `shell_name` claims to be case-insensitive but is not (`pty/startup.rs:75-87`).
 - **Fixed: TUIs such as Claude Code and Codex rendered garbled** (escape sequence tails such as `;153;153;153m`
   shown as text, lines shifted or duplicated) until a resize made them repaint (2026-11-06). Causes, in
-  `frontend/src/lib/terminal/` unless named otherwise:
+  `frontend/src/lib/terminal/` unless named otherwise. The web-only causes below are
+  resolved by removal (2026-11-15, `remove-browser-access`); sizing and Rust replay
+  fixes remain applicable to native clients and `splitty attach`:
   - panes on an inactive screen took a new size into their emulator without reporting it, and a resize overtook
     output still batched or still in xterm.js's parser (`terminal_session.ts`, `ordered_output.ts`);
   - the synchronized update (DEC 2026) around each frame's batch landed inside a sequence that the frame boundary
@@ -200,7 +203,7 @@ Line numbers refer to the tree at commit `b495e1c`.
     output on separate tasks (`protocol/sizing.rs`, `watch_size` and `stream_output` in `protocol/dispatcher.rs`),
     and the `watch` channel coalesces sizes, so a client can parse a repaint at the old size or old output at the
     new one.
-  - **A reattach can show old live frames before the replay.** Frames sent before the server handled `detach` that
+  - **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **A reattach can show old live frames before the replay.** Frames sent before the server handled `detach` that
     arrive after the new `attach` count as replay (`attach_registry.ts`), so the fresh emulator gets them twice, the
     first copy possibly starting inside a sequence. Happens when a snapshot rebuilds a screen while a session
     writes; a fix needs a marker for the replay's start.
@@ -222,10 +225,10 @@ Line numbers refer to the tree at commit `b495e1c`.
     running streams (`keeper/client.rs`).
   - **A keeper replay above 8 MiB is cut silently** (`install` and `MAX_BEHIND` in `keeper/process.rs`), only with a
     scrollback size above that.
-  - **Output after `created` can be lost** when the native IPC delivers it in the same chunk as `created`: the view
+  - **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Output after `created` can be lost** when the native IPC delivers it in the same chunk as `created`: the view
     is wired only after the awaited promise (`createTerminalSession` in `terminal_mount.ts`). Affects the direct
     spawn path, not panes the server spawns.
-  - **Output is credited before xterm.js parses it**; past xterm.js's 50 MB write buffer limit a write throws and
+  - **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Output is credited before xterm.js parses it**; past xterm.js's 50 MB write buffer limit a write throws and
     its batch is lost (`native_socket.ts`, `ordered_output.ts`).
 - Not specced yet: shell-integration injection (`ZDOTDIR`, the Bash startup bootstrap and
   `SPLITTY_SHELL_INTEGRATION` in `pty/session.rs`). Belongs to a later terminal-intelligence capability.
@@ -234,7 +237,7 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 Hardening candidates, not open holes.
 
-- **The session cookie reaches every server on `127.0.0.1`** (found while planning `remote-screens`).
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **The session cookie reaches every server on `127.0.0.1`** (found while planning `remote-screens`).
   Cookies are not port-scoped, so the browser sends `splitty-session` to any loopback server it visits,
   for example a dev server in a Docker container. SR-31 stops *page script* from other ports (Fetch
   Metadata), but such a *server* receives the cookie in the request header and can replay it outside a
@@ -250,18 +253,23 @@ Hardening candidates, not open holes.
   environment either (`pty/session.rs:110-119`).
 - The control socket's peer-uid check only exists on Linux; elsewhere only file modes protect it
   (`control.rs:137-144`). SECURITY.md describes the check without that limitation.
-- `--token` accepts any value, without a minimum length (`main.rs:286-288`).
-- Browser sessions never expire and cannot be revoked short of a restart; the session store is unbounded
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: `--token` accepts any value, without a minimum length (`main.rs:286-288`).
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: Browser sessions never expire and cannot be revoked short of a restart; the session store is unbounded
   (`http/session.rs`).
 - `state.json` and `daemon.log` are written with the default umask, protected only by the 0700 directory
   (`daemon/persistence.rs:23-26`, `main.rs:1017-1021`).
 - `grant_command_allowed` lets layout commands through to grant sockets whose routes answer 404 there, so an agent
   under a grant gets a not-found error instead of a refusal (found on 2026-11-06).
-- Binding `[::1]` passes the loopback and Host checks, but the origin allowlist only has `127.0.0.1`/`localhost`
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: Binding `[::1]` passes the loopback and Host checks, but the origin allowlist only has `127.0.0.1`/`localhost`
   (`http/mod.rs:61-66`), so the UI gets 403 from its own server. Broken, not insecure.
 - Not specced yet, needs a capability decision (likely a future capability of the native app): OSC 52 clipboard
   policy, link scheme checks, template command confirmation, WSL protections (non-root default user, credential
   redaction in logs).
+- **An invalid host target over the owner connection has no `remote.error`** (found 2026-11-15,
+  `remove-browser-access`). SSH Target Validation specifies `remote.error` with code `invalid_target`.
+  A daemon's client endpoint answers so; the owner backend (`native/helper/owner.rs`) closes the
+  stream with the plain message "invalid owner host target". No SSH starts either way, and the
+  desktop app validates targets before it opens a stream.
 
 ### packaging and releases
 
@@ -334,65 +342,6 @@ Hardening candidates, not open holes.
   accepted at that moment open for its lifetime, since the hub's `ssh` children do not close inherited
   descriptors.
 
-### web frontend
-
-Found by the inventory of `frontend/src` for `frontend-client-core` (2026-11-04). The draft change named in each
-entry fixes it; entries without one are small fixes or belong to `frontend-client-core`.
-
-- **The web window projects templates itself** (found 2026-11-13 by `server-side-save-rules`, open).
-  `lib/template_intent.ts` repeats the core's template projection without all of its validation, and
-  `lib/template_guard.ts` and the native dialog each list a template's command panes. The projection gives a new
-  or replaced screen its layout before the server's snapshot; removing it needs the server to report the
-  projection or the window to wait for the snapshot, together with how the web window starts a screen.
-- **Applied templates did not reach the server — resolved 2026-11-06** (`server-templates`).
-  One `apply_template` intent now registers the complete layout and runs server-owned spawns. The window uses
-  queued optimistic snapshots, so applying in a new screen no longer depends on mounting within one frame.
-- **Fixed by `hub-host-decisions` (2026-11-06): newer-host update offers and keeper wording.**
-  Windows consume explicit hub update eligibility. Unknown, equal and newer versions, unverified instances
-  and hosts without session preservation or a matching replacement receive no ordinary update offer.
-- **Fixed by `settings-authority` (2026-11-06): fractional scroll values and settings drift.**
-  The server validates numeric and editor fields atomically, publishes defaults and limits, and broadcasts
-  complete settings to connected windows. Failed optimistic updates restore confirmed values.
-- **Fixed by `server-derived-pane-state` (2026-11-06): client-owned exit closure.**
-  The server applies its close-on-exit policy after the final-output drain grace, including unattended panes;
-  managed jobs retain their outcome. Supporting windows no longer race to close the same pane.
-- **Keyboard resizes are not reported.** Ctrl+Shift+Arrow resizes through dockview's `setSize`
-  (`lib/workspace/keyboard_shortcuts.ts`), but the bridge reports only panel moves and divider drags
-  (`lib/connection/screen_binding.ts`), so the server keeps the old sizes.
-- **Floating bounds go stale on the server.** `float_pane` always sends fixed bounds
-  (`layout/group_controls_renderer.ts`), and `move_float` is never sent after a floating group moves or resizes.
-- **Two neighbor searches.** `findNeighborGroup` (`lib/panes.ts`) uses DOM rectangles and counts floating groups,
-  unlike `workspace-model`'s neighbor resolution in the server's grid.
-- **Port bounds differ.** Mod+O accepts any port above 0, the context menu only ports above 1024.
-- **Dropped and pasted paths are inserted differently.** The drop path quotes shell metacharacters
-  (`drop_upload.ts`), the paste path joins raw paths (`image_paste.ts`); there are two batch runners.
-- **Clicking a desktop notification never navigates to its pane.** `setNavigateCallback` (`lib/notifications.ts`)
-  is never called, so the click only focuses the window.
-- **Every outgoing WebSocket message is logged in production.** `trace` in `lib/protocol/websocket.ts` calls
-  `console.log` unconditionally.
-- **The active screen changes without telling the server's hooks.** `createScreen`, `addRemoteScreen` and
-  `removeScreen` in `stores/screens.svelte.ts` set the active screen without `onSetActive`; `removeScreen` picks
-  the neighbor, the server the first screen.
-- **Saved forwards are all-or-nothing.** `parseSavedForwards` (`lib/remote/ports.ts`) rejects the whole list when a
-  host has more than 32, so raising the server's limit would blank saved forwards in older windows.
-- **Dead code.** `DockviewManager.addTerminalPane`, `moveScreen` in the screens store, the UI command
-  `overlay.toggle`, the Drawer's "Templates" placeholder, `SplittyWebSocket.reconnect`, `setAuthState`,
-  `loadTheme`, the unread `terminal.theme` setting, and the identical `getUnreadForPane`/`getUnreadForSession`.
-  `editor_target.ts` exists in `frontend/` and, in Rust, as `native_workspace/editor_uri.rs` in
-  `splitty-client-core`; the shared vectors in `testdata/` check both.
-- Found on 2026-11-06 with `splitty-open`:
-  - `terminalDirectoryItems` matches only `terminal-…` pane IDs, so terminals the CLI creates (`pane-…`) get no folder
-    actions in their context menu.
-  - `applyScreenSnapshot` restores the window's previous active tabs, so a snapshot alone cannot change the shown tab;
-    viewer panes whose revision rose and new viewer panes the server made active are the exceptions.
-  - A snapshot that adds, removes or moves a terminal pane still rebuilds the screen (only viewer and job panes are
-    applied in place), and keys typed before the rebuilt terminal has attached again are lost.
-  - A panel added in the window can be closed by a snapshot the server built before it received the window's op.
-  - A grid that holds only viewer panes used to extract an invalid empty-slot template. Resolved 2026-11-06
-    (`server-templates`): server extraction rejects screens without tiled terminals with a visible error.
-  - The server commands `pane.copy` and `pane.clear` do nothing for viewer panes.
-  - `socket.ts`: a doc comment sits above the wrong function, and `belongsToConnection` is used only by its test.
-
 ### native app
 
 - **Fixed (2026-11-14): a replay before a view's first layout was parsed at 80×24.** A server that decides
@@ -436,7 +385,7 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   only through the built-in steps up to 3.0 (`Zoom::from_values`, `Zoom::apply`,
   `crates/splitty-client-core/src/zoom.rs`). A server that widens the zoom limit would store a level the
   window does not show. The current server's limit is the same range.
-- **A CLI in a pane of the desktop app no longer asks SSH questions** (found on 2026-11-13). A service asks
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **A CLI in a pane of the desktop app no longer asks SSH questions** (found on 2026-11-13). A service asks
   its SSH questions through its clients (`ssh-prompts-v1`), and the fallback to `SPLITTY_ASKPASS_PROGRAM` is gone
   from `crates/splitty-remote/src/ssh.rs`, with the variable the app set for the processes it started. A
   `splitty` process that runs `ssh` itself, such as `splitty connect <host>` typed in a pane, has no askpass
@@ -464,6 +413,8 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 
 ## Stale documentation
 
+- **`README.md` has no screenshots** (2026-11-15, `remove-browser-access`): the earlier ones showed the
+  web client and went with it; captures of the desktop app are missing.
 - **`terminal-sessions` has a contradictory profile-failure scenario** (found 2026-11-07 during
   `native-shell-profile-picker`): Session Creation Failure says a disabled/unavailable requested
   profile always fails, while Shell Program Selection and the current resolver correctly specify
@@ -471,27 +422,27 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   effective profile/fallback reason. Reconcile the older failure scenario separately; failure
   remains correct when no fallback can start.
 
-- **`docs/protocol.ts`** still describes screen ownership, attach/detach, single-attach, `lastClientId`,
-  `set_screen_ownership` and the `mux.connect` handshake (lines 11, 25-28, 42, 132-148, 191, 232, 254-261, 460-517,
-  624, 666, flows around 723-766), all removed in `fa5e5b7` (March 2026). Op names `split_panel`/`close_panel`/
-  `move_panel` are now `split_pane`/`close_pane`/`move_pane`; `float_pane`, `dock_pane`, `move_float`,
-  `reorder_screens` are missing. Binary output frames exist (line 9 says "may come later"). It promises 404 for
-  not-found on `/api/mux/op` (the code returns 400) and token auth on all endpoints (the control socket has none).
-  Until it is fixed, treat the Rust types as the payload reference.
-- **`docs/architecture.md`**: the CLI Flow section (lines 67-98) describes `/api/command` round-trips, `focus` and
+- **`docs/protocol.ts` transport and flow text corrected (2026-11-15, `remove-browser-access`).**
+  The header and sections 5–6 no longer claim a WebSocket handshake, single-attach flows,
+  client-owned layout dispatch or token auth. Native text/binary framing is documented.
+  Payload declarations outside the browser-removal list were deliberately retained: the older
+  ownership, `lastClientId`, `set_screen_ownership` and `mux.connect` shapes and any mismatches
+  with Rust types still need a separate wire-reference audit. Rust types remain authoritative.
+- **Resolved by documentation rewrite (2026-11-15, `remove-browser-access`).** Historical `docs/architecture.md`: the CLI Flow section (lines 67-98) describes `/api/command` round-trips, `focus` and
   `switch-screen`, none of which the CLI uses or has.
 - **`roadmap/01-multiplexer-backend.md`** marks ownership, attach/detach, `close`, `focus` and `switch-screen` as done.
-- **`docs/protocol.ts`** (sessions): line 183 says `panelId`, the wire field is `paneId`; lines 40-49 claim
-  client-owned sessions die with the client; line 426 lists `session.exited` as a session event, but only the
+- **`docs/protocol.ts`** (sessions): line 183 says `panelId`, the wire field is `paneId`; the legacy ownership payload remains
+  (its lifetime comment was corrected on 2026-11-15 by `remove-browser-access`); line 426 lists `session.exited` as a session event, but only the
   notification engine sends it (the session end signal is `closed` with `exitCode`).
 - **`roadmap/05-persistent-daemon.md`**: `daemon.json` holds no token any more (it has `socket`); the command is
   `splitty daemon …`, not `splitty-server daemon …`.
 - **Config paths**: docs say `~/.config/splitty`, the code uses the platform config dir (different on macOS). This
-  also affects the token path in SECURITY.md's rotation note.
+  no longer affects a token rotation note: that note was removed with browser credentials
+  (2026-11-15, `remove-browser-access`).
 - **`docs/architecture.md:109`** and README.md:108 say the desktop app connects to a running daemon, which is only
   true on macOS/Linux.
 - **README.md:20,51**: daemon sessions "survive restarts". They are respawned as new processes; scrollback is lost.
-- **Code comments**: `main.rs:679-682` says a pane process cannot get the token (it can read the 0600 token file,
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Code comments**: `main.rs:679-682` says a pane process cannot get the token (it can read the 0600 token file,
   as SECURITY.md's threat model states); `daemon/mod.rs:1-5,48-53` still say `daemon.json` holds the token;
   `frontend/src/lib/protocol/http.ts` has a garbled fragment in its header comment.
 
@@ -510,7 +461,7 @@ that area touches them.
 - **workspace-model:** `move_pane` sizes (`resultingSizes`, `sourceResultingSizes`); successful `float_pane`/`dock_pane`/`move_float`; active-pane fallback
   in a stack; closing the last root pane; closing a floating pane; `newPaneIndex: 0`; `set_active_screen`;
   active-screen fallback on close.
-- **web frontend:** `RenderedDocument`'s fallback for engines without `adoptedStyleSheets` (the cleaned sheet
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **web frontend:** `RenderedDocument`'s fallback for engines without `adoptedStyleSheets` (the cleaned sheet
   serialized into a `<style>` of the shadow root and parsed again) has no test.
 - **mux-protocol:** everything except the binary frame layout: welcome contents, heartbeat, malformed input,
   resync, `pane_spawned`/`op_failed`, nudge propagation and spawn-before-nudge ordering, `command` broadcast,
@@ -518,8 +469,9 @@ that area touches them.
 - **control-api:** `/api/mux/op` success and rejection at the HTTP level, `/api/command`, `/api/mux/neighbor`,
   `/api/session/{id}/send`, response fields of `/api/mux/screens` and `/api/mux/status`, malformed bodies.
 - **cli:** discovery order, no-server error and exit codes, implicit targeting, command output formats,
-  `send-keys` escapes, `issue-bootstrap`, the "already running" and stale-file daemon messages. `connect` end to end
-  runs only where the SSH lab of `tests/remote_connect.rs` can (an `sshd` and unprivileged namespaces), not in CI.
+  `send-keys` escapes, the "already running" and stale-file daemon messages. The browser-command
+  coverage gap is resolved by removal (2026-11-15, `remove-browser-access`); the hub
+  end-to-end checks still require the SSH lab of `tests/remote_connect.rs`.
 - **server-modes:** most of it: stale `daemon.json` handling, single instance, `state.json` save/load and
   persist-after-change, respawn with the same IDs, the desktop daemon-or-embedded fallback, the 3-second Windows
   shutdown. Covered: the two `--desktop-stdio` tests and the daemon lifecycle tests (`tests/daemon_lifecycle.rs`:
@@ -538,13 +490,14 @@ that area touches them.
   connector fails globally), an unauthorized setup with saved rules, a PUT while the host is connected, saved port
   and rival listener untouched after a restore conflict, and that no timed retry follows; two requests racing for
   the 32nd slot; the refusal of forwards configured in the SSH configuration, end to end.
-- **access-control:** the manual-token path of `POST /api/session`, empty `Host`, mixed-resolution hostnames,
-  bind/`--remote` refusal on `daemon start`, session invalidation on restart, `SPLITTY_TOKEN` being ignored,
-  the peer-uid check, `daemon start` output, release builds rejecting dev origins, `connect` end to end outside the
-  SSH lab (see cli), and all
-  UI-side guarantees (bootstrap parameter removed from the URL, fresh ticket per reconnect, nothing in
-  `localStorage`).
-- **file-transfer,** left when it was archived (2026-10-29): checked end to end once by hand against a local `serve`
+- **access-control:** browser authentication, origin, cookie, bootstrap, ticket and development-origin
+  coverage gaps are resolved by removal (2026-11-15, `remove-browser-access`). The remaining
+  surfaces still need their own coverage: owner/grant/keeper peer-UID checks, native endpoint
+  identity, daemon startup output and hub setup outside the SSH lab. Removal alone proves none
+  of these retained guarantees.
+- **file-transfer:** the browser acceptance record below is historical after removal
+  (2026-11-15, `remove-browser-access`); native file transfers still need their own acceptance.
+  When archived (2026-10-29), checked end to end once by hand against a local `serve`
   in Chromium (Playwright, one-off: a 1.5 MiB drop, its sanitized name, mode and pasted path; `splitty download`
   saved and dismissed). Untested: the same through the hub to an SSH host, pasting files from the system
   clipboard, uploads over 10 MiB.
@@ -558,7 +511,7 @@ that area touches them.
   (kept and ended sessions), `config.toml` and `daemon.json`. Each creates, attaches, resizes and re-attaches a
   session. Its first run (0.3.1 against 0.3.2) found the dropped settings under server-modes. Still untested across
   versions: the desktop window as a peer (the native app's client core, its capability fallbacks and layout ops) and
-  any older client of a newer daemon beyond the `splitty` command; everything over SSH (`connect`, the hub reading
+  any older client of a newer daemon beyond the `splitty` command; everything over SSH (the hub reading
   the other build's `remote-handshake`, installing or updating a host's daemon, `remote-migrate`); managed jobs,
   agent grants, viewer panes, annotations and scratchpads in `state.json`, and the other files below the
   configuration directory (templates, themes); the macOS and Windows (WSL) builds; versions older
@@ -593,7 +546,7 @@ that area touches them.
   `crates/splitty-remote/src/askpass.rs`): the change feed is the process's, so a question of a parallel test
   moved it before this test's own question was listed, and the test took a question id from an empty list. It
   now waits for its broker's list first. A process has one broker outside tests.
-- **Fixed (2026-11-13): the `--open` smoke test read the launcher's file before it was written.** Seen once, in
+- **Resolved by removal (2026-11-15, `remove-browser-access`).** Historical: **Fixed (2026-11-13): the `--open` smoke test read the launcher's file before it was written.** Seen once, in
   the release run of v0.4.0 (`explicit_serve_open_and_token_options_stay_gateway_local`,
   `crates/splitty-server/tests/http_surface.rs`): the test waited for the file the fake browser launcher appends
   the URL to and read it as soon as it existed; the shell's redirect creates the file before `printf` writes, so

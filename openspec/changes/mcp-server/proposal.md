@@ -52,3 +52,7 @@ Open questions for the design:
 - Virtual terminal: worth the overhead for every session, or only on demand when an agent asks for a screen snapshot?
 - Read-only mode: where is it enforced? The control socket has no per-client permissions; a mode enforced only in the MCP wrapper is a convenience, not a security boundary.
 - How realistic is the daily use case? The individual capabilities are clear, a scenario where agents use it every day is not yet sharp. Keep the first stages lean to find out.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The browser gateway, process token and TCP CLI target are gone. MCP must use the owner control socket or an explicitly scoped grant socket with the existing route restrictions, or a deliberately designed native connection. Earlier authenticated HTTP/WebSocket descriptions do not imply a network listener or bearer credential.

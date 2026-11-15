@@ -82,3 +82,7 @@ Agents act as ACP servers and Splitty as the client, giving bidirectional, struc
 
 - Event granularity for app parsers (see proposal.md).
 - When to open the parser boundary to external plugins.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client and Frontend Security Headers are gone. Native views consume session facts over native connections; browser DOM/CSP and xterm presentation references are historical. Preserve server-side parsing, OSC semantics and per-source notification policy.

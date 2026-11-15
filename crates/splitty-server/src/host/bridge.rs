@@ -45,7 +45,7 @@ where
     let connector = crate::native::client::Connector::default();
     let mut daemon = connector.local(info).await?;
     // The verified daemon instance crosses the bridge; its local filesystem
-    // path and the browser adapter's credentials never do.
+    // path remains local to the host.
     negotiation::offer(&mut read, &mut write, &context.budget, &daemon.ready).await?;
     let _stream = opening.admit().map_err(io::Error::other)?;
     let mut client = Peer::start(read, write, &daemon.ready, context);
@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use splitty_transport::{codec::Frame, wire};
     #[test]
-    fn a_host_stream_cannot_acquire_hub_or_browser_authority() {
+    fn a_host_stream_cannot_acquire_local_hub_authority() {
         use crate::service::catalog::{Scope, OPERATIONS};
         for description in OPERATIONS
             .iter()

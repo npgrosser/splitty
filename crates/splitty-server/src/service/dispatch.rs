@@ -1,5 +1,5 @@
 //! Native entry point: fixed operation and trusted role, then the same domain
-//! implementations used by browser/control adapters. No URL routing or auth.
+//! implementations used by native connections and the control router.
 use super::catalog::{ArgumentType, ErrorStyle, Operation, Rejection, Request, Role};
 use super::operations as op;
 use super::reply::{IntoReply, Payload, Reply};

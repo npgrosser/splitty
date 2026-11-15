@@ -2,7 +2,7 @@
 //! the other. Written over a message stream and a writer, so a scripted server
 //! can drive it in tests, and independent of the carrier: it reads frames
 //! through [`SessionFrame`] and writes each session message as one JSON text,
-//! which the carrier (WebSocket or native framing) frames itself.
+//! which the carrier (native framing) frames itself.
 
 use std::io::Write;
 use std::time::Duration;
@@ -65,17 +65,6 @@ pub enum View<'a> {
 }
 pub trait SessionFrame {
     fn view(&self) -> View<'_>;
-}
-impl SessionFrame for tokio_tungstenite::tungstenite::Message {
-    fn view(&self) -> View<'_> {
-        use tokio_tungstenite::tungstenite::Message;
-        match self {
-            Message::Text(text) => View::Text(text.as_str()),
-            Message::Binary(bytes) => View::Binary(bytes),
-            Message::Close(_) => View::Closed,
-            _ => View::Other,
-        }
-    }
 }
 impl SessionFrame for splitty_transport::budget::Charged<splitty_transport::peer::Incoming> {
     fn view(&self) -> View<'_> {
@@ -253,7 +242,26 @@ mod tests {
     use super::*;
     use crate::client_session::codec::encode_binary_frame;
     use futures::channel::mpsc as channel;
-    use tokio_tungstenite::tungstenite::Message;
+    enum Message {
+        Text(String),
+        Binary(Vec<u8>),
+    }
+    impl Message {
+        fn text(text: impl Into<String>) -> Self {
+            Self::Text(text.into())
+        }
+        fn binary(bytes: impl Into<Vec<u8>>) -> Self {
+            Self::Binary(bytes.into())
+        }
+    }
+    impl SessionFrame for Message {
+        fn view(&self) -> View<'_> {
+            match self {
+                Self::Text(text) => View::Text(text),
+                Self::Binary(bytes) => View::Binary(bytes),
+            }
+        }
+    }
 
     const SID: &str = "sess-1";
 

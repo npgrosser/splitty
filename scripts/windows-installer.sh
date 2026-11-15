@@ -4,12 +4,12 @@ set -euo pipefail
 # Build the Windows installer on this PC, from WSL, in a few minutes instead
 # of waiting for the release workflow: bring a checkout on a Windows drive to
 # this repository's HEAD and run packaging/windows/build.ps1 there (the
-# Windows Rust toolchain, Node and pnpm; the Linux payload in this WSL
+# Windows Rust toolchain; the Linux payload in this WSL
 # distribution). Uncommitted changes are not built.
 #
 # Usage:
 #   scripts/windows-installer.sh [--skip-tests] [--install]
-#     --skip-tests  skip the frontend type check and the Windows unit tests
+#     --skip-tests  skip the Windows unit tests
 #     --install     start the built setup afterwards
 #
 # Environment:
@@ -17,7 +17,7 @@ set -euo pipefail
 #                             (default: %USERPROFILE%\Code\splitty-windows-preview);
 #                             cloned from this repository when it does not exist
 #   SPLITTY_WINDOWS_PATH      extra Windows PATH entries for the build, separated
-#                             by ';' (for example where pnpm is installed)
+#                             by ';'
 #   SPLITTY_GHOSTTY_VT_DIR    the Windows libghostty-vt prefix of the native app,
 #                             as a Windows path; without it the build runs
 #                             scripts/bootstrap-libghostty-vt.py with Windows Python

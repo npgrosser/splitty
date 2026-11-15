@@ -2,10 +2,7 @@
 //! Every share operation fails before preparing/spawning SSH; explicit browser
 //! access remains a separately owned loopback listener.
 use splitty_transport::{admission::Admission, worker::Worker};
-use std::{
-    io,
-    net::{SocketAddr, TcpListener},
-};
+use std::io;
 fn unsupported() -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported,
         "reverse sharing is unavailable without a shared Windows/WSL loopback reservation authority")
@@ -29,28 +26,4 @@ impl Share {
     ) -> io::Result<Worker> {
         Err(unsupported())
     }
-}
-pub struct GatewayListener {
-    listener: tokio::net::TcpListener,
-}
-impl GatewayListener {
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.listener.local_addr()
-    }
-    pub async fn accept(&self) -> io::Result<(tokio::net::TcpStream, SocketAddr)> {
-        self.listener.accept().await
-    }
-}
-pub async fn bind_gateway(address: SocketAddr) -> io::Result<GatewayListener> {
-    if !address.ip().is_loopback() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "browser listeners require loopback",
-        ));
-    }
-    let listener = TcpListener::bind(address)?;
-    listener.set_nonblocking(true)?;
-    Ok(GatewayListener {
-        listener: tokio::net::TcpListener::from_std(listener)?,
-    })
 }

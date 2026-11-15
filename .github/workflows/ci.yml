@@ -64,9 +64,7 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: |
-            frontend/pnpm-lock.yaml
-            architecture/pnpm-lock.yaml
+          cache-dependency-path: architecture/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -93,12 +91,6 @@ jobs:
         run: |
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
           echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
-
-      # The server embeds and serves frontend/dist; the HTTP surface tests check
-      # the headers of the real app document.
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
 
       # Git for Windows refuses a checkout that holds such a file.
       - name: File names every system can check out
@@ -157,16 +149,13 @@ jobs:
           fi
           unshare --user --map-current-user --keep-caps --net true
 
-      - name: Require real SSH reconnect, forwarding crash and kept-session migration
+      - name: Require real SSH hub, forwarding and kept-session migration
         env:
           SPLITTY_TEST_SSHD_ROOT: ${{ runner.temp }}/splitty-sshd/root
           SPLITTY_TEST_REQUIRE_SSH_LAB: '1'
           SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: |
-          cargo test --locked -p splitty-server --test remote_connect fixture_cleanup_refuses_processes_outside_its_network_namespace -- --exact --nocapture
-          cargo test --locked -p splitty-server --test remote_connect connect_reconnects_and_hands_over_sessions_through_real_ssh -- --exact --nocapture
-          cargo test --locked -p splitty-server --test remote_connect exposure_crash::a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_killed -- --exact --nocapture
-          cargo test --locked -p splitty-server --test remote_connect the_hub_updates_a_host_daemon_of_another_version -- --exact --nocapture
+          cargo test --locked -p splitty-server --test remote_connect -- --nocapture
 
   # The packages a release publishes for Linux, built the way release.yml
   # builds them: a release build on the oldest supported runner, packed by
@@ -181,16 +170,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -215,12 +194,6 @@ jobs:
         run: |
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
           echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
-
-      # The splitty command built beside the app embeds frontend/dist (and,
-      # built in the same cargo invocation, so does the app's server).
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
 
       # The release ships the static server as the `splitty` command; this
       # build of the same crate stands in for it.
@@ -301,16 +274,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
@@ -322,40 +285,12 @@ jobs:
           # Pull requests restore the default branch's cache and save none.
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
-
       # The release builds this server for aarch64 hosts (remote-aarch64);
       # a debug build catches compile and link errors at a fraction of the time.
       - name: Build the server for aarch64-unknown-linux-musl
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
         run: cargo build --locked -p splitty-server --target aarch64-unknown-linux-musl
-
-  frontend:
-    name: Frontend
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Check, test and build
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm check && pnpm test && pnpm build
 
   audit:
     name: Dependency audit
@@ -376,11 +311,6 @@ jobs:
         with:
           version: 11
 
-      # Documented exceptions: auditConfig in each pnpm-workspace.yaml.
-      - name: npm advisories (frontend)
-        working-directory: frontend
-        run: pnpm audit
-
       - name: npm advisories (architecture tooling)
         working-directory: architecture
         run: pnpm audit
@@ -395,16 +325,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
@@ -427,10 +347,6 @@ jobs:
           /usr/sbin/sysctl -n kern.osrelease
           /usr/sbin/lsof -v
           sudo -n -u nobody /usr/bin/python3 -c 'import os, sys; assert os.geteuid() != 0 and os.geteuid() != int(sys.argv[1])' "$(id -u)"
-
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
 
       - name: Build pinned native terminal library
         run: |
@@ -470,7 +386,7 @@ jobs:
       - name: Verify native endpoint peer-user boundary
         run: cargo test --locked -p splitty-server --test native_endpoint -- --nocapture
 
-      - name: Verify native exposure and explicit gateway positive controls
+      - name: Verify native exposure and process lifecycle
         env:
           SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: |
@@ -479,7 +395,6 @@ jobs:
           cargo test --locked -p splitty-server --test daemon_lifecycle process_inventory::inventory_observes_owned_ipv4_and_ipv6_listeners -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle owned_native_child_pipes_end_only_their_embedded_sessions -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions -- --exact
-          cargo test --locked -p splitty-server --test daemon_lifecycle an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_cleanly -- --exact
           cargo build --locked -p splitty-server
 
       - name: Enforce macOS core test result

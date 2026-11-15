@@ -70,6 +70,9 @@ pub enum Prepare {
     Installs(&'static str),
     /// `ssh` fails with status 255 and this error output.
     SshFails(&'static str),
+    UnsupportedKernel,
+    Checksum,
+    DaemonFails,
 }
 
 /// A daemon on a scripted host.
@@ -115,6 +118,8 @@ pub struct ScriptedHost {
     stop_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
     /// The kernel the probe reports.
     kernel: &'static str,
+    /// Local ports the exposure registry holds for another claim.
+    reserved_shares: HashSet<u16>,
     /// The host's ports in use there.
     busy: Arc<Mutex<HashSet<u16>>>,
     /// How many of the next reverse forwards fail as if the host were
@@ -148,6 +153,7 @@ impl ScriptedHost {
             forward_gates: Arc::default(),
             stop_gates: Arc::default(),
             kernel: "Linux",
+            reserved_shares: HashSet::new(),
             busy: Arc::default(),
             failing_reverses: Arc::default(),
             reverses: Arc::default(),
@@ -157,6 +163,13 @@ impl ScriptedHost {
     /// The probe reports `kernel`, such as `Darwin`.
     pub fn with_kernel(mut self, kernel: &'static str) -> Self {
         self.kernel = kernel;
+        self
+    }
+
+    /// Sharing local `port` is refused as the exposure registry refuses a
+    /// port that another claim holds.
+    pub fn with_reserved_share(mut self, port: u16) -> Self {
+        self.reserved_shares.insert(port);
         self
     }
 
@@ -351,7 +364,22 @@ impl Connector for ScriptedHost {
         Box::pin(async move {
             self.ask(format!("prepare {}", target.as_str()));
             let arch = match self.prepare {
-                Prepare::Installed => "x86_64",
+                Prepare::Installed | Prepare::DaemonFails => "x86_64",
+                Prepare::UnsupportedKernel => {
+                    return Err(splitty_remote::install::InstallError::UnsupportedKernel {
+                        host: target.as_str().into(),
+                        kernel: "FreeBSD".into(),
+                        allocation: None,
+                    }
+                    .into())
+                }
+                Prepare::Checksum => {
+                    return Err(splitty_remote::install::InstallError::Checksum {
+                        host: target.as_str().into(),
+                        allocation: None,
+                    }
+                    .into())
+                }
                 Prepare::Installs(arch) => {
                     on_install(arch);
                     arch
@@ -407,6 +435,16 @@ impl Connector for ScriptedHost {
                 )));
             }
             self.ask("handshake".into());
+            if matches!(self.prepare, Prepare::DaemonFails) {
+                return Err(splitty_remote::handshake::HandshakeError::Ssh(
+                    splitty_remote::ssh::classify(
+                        target.as_str(),
+                        exit_status(1),
+                        "daemon startup refused",
+                    ),
+                )
+                .into());
+            }
             let (daemon, started) = {
                 let mut running = self.daemon.lock().expect("daemon");
                 let started = running.is_none();
@@ -612,9 +650,20 @@ impl Connector for ScriptedHost {
 
     fn reserve_share(
         &self,
-        _local: u16,
+        local: u16,
     ) -> BoxFuture<'_, Result<Option<splitty_remote::tunnel::exposure::Share>, HubError>> {
-        Box::pin(async { Ok(None) })
+        Box::pin(async move {
+            if self.reserved_shares.contains(&local) {
+                return Err(HubError::LocalShare {
+                    port: local,
+                    error: std::io::Error::new(
+                        std::io::ErrorKind::AddrInUse,
+                        "requested local port is reserved",
+                    ),
+                });
+            }
+            Ok(None)
+        })
     }
 
     fn reverse<'a>(

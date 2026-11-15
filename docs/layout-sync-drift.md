@@ -1,5 +1,7 @@
 # Design Decision: Layout Sync between Dockview and the Mux Model
 
+> Historical note — 2026-11-15, `remove-browser-access`: This document is historical: it analyzes dockview versus mux layout drift in the removed web client. Native layout behavior is described in `architecture.md`.
+
 - **Status:** Open — decision deferred, gathering data
 - **Affects:** `mux.op` protocol, PTY lifecycle, CLI control, multi-window / daemon restore
 - **Written:** 2026-08-01, after debugging "split creates a blank pane"

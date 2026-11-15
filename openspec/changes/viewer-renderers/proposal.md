@@ -34,3 +34,7 @@ To be decided when the change is next. Likely candidates:
 - Frontend: lazily loaded renderers (Mermaid, a Graphviz build in WebAssembly, pdf.js), their bundle size in the desktop apps, the overlay as a floating group.
 - Security: diagram libraries turn text into SVG inside the window; their output passes the same sanitizer, and none of them may evaluate the document as code. pdf.js runs with `isEvalSupported` and scripting off.
 - Open questions: which Graphviz build; whether the overlay is a floating entry of the layout or a transient view outside it; how a renderer from outside the bundle is installed and trusted.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client and its JavaScript rendering libraries are gone. Choose native renderers for inert documents; any format requiring a web runtime needs an explicitly isolated embedded engine. The viewer protocol and server document reads remain.

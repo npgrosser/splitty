@@ -1,6 +1,4 @@
-//! Ports of the host forwarded next to the daemon's (`splitty connect
-//! --forward`), or each by an `ssh` of its own ([`PortTunnel`], the remote
-//! screen hub's forwards).
+//! Host ports forwarded by an owned SSH worker for the remote screen hub.
 //!
 //! Each forward is bound to `127.0.0.1` here and reaches `localhost:<port>` on
 //! the host, a name `sshd` resolves there, so a dev server that listens only on
@@ -45,69 +43,6 @@ impl Forward {
     pub fn url(&self) -> String {
         format!("http://localhost:{}", self.local)
     }
-}
-
-/// Why a `--forward` list was rejected.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ForwardError {
-    #[error(
-        "invalid --forward entry '{entry}': expected PORT or LOCAL:REMOTE, with ports from 1 \
-         to 65535"
-    )]
-    Invalid { entry: String },
-
-    #[error("--forward names port {port} of the host twice")]
-    RemoteTwice { port: u16 },
-
-    #[error("--forward names local port {port} twice")]
-    LocalTwice { port: u16 },
-}
-
-/// The forwards of every `--forward` list, in order. A list is comma-separated
-/// and each entry is `PORT` or `LOCAL:REMOTE`; a host port or a local port
-/// named twice, across all lists, is rejected.
-pub fn parse_forwards<S: AsRef<str>>(lists: &[S]) -> Result<Vec<PortForward>, ForwardError> {
-    let mut forwards: Vec<PortForward> = Vec::new();
-    for entry in lists.iter().flat_map(|list| list.as_ref().split(',')) {
-        let entry = entry.trim();
-        let forward = parse_entry(entry).ok_or_else(|| ForwardError::Invalid {
-            entry: entry.to_owned(),
-        })?;
-        if forwards.iter().any(|known| known.remote == forward.remote) {
-            return Err(ForwardError::RemoteTwice {
-                port: forward.remote,
-            });
-        }
-        if forwards.iter().any(|known| known.local == forward.local) {
-            return Err(ForwardError::LocalTwice {
-                port: forward.local,
-            });
-        }
-        forwards.push(forward);
-    }
-    Ok(forwards)
-}
-
-fn parse_entry(entry: &str) -> Option<PortForward> {
-    match entry.split_once(':') {
-        Some((local, remote)) => Some(PortForward {
-            local: parse_port(local)?,
-            remote: parse_port(remote)?,
-        }),
-        None => parse_port(entry).map(|port| PortForward {
-            local: port,
-            remote: port,
-        }),
-    }
-}
-
-/// A port from 1 to 65535 in decimal digits; `u16::from_str` would also take
-/// a sign.
-fn parse_port(text: &str) -> Option<u16> {
-    if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    text.parse().ok().filter(|port| *port != 0)
 }
 
 /// Reserve the local port of `forward`: the one asked for when it is free here,
@@ -529,107 +464,6 @@ mod tests {
         PortForward { local, remote }
     }
 
-    #[test]
-    fn a_port_forwards_to_the_same_port_and_a_pair_picks_the_local_one() {
-        assert_eq!(parse_forwards(&["3000"]), Ok(vec![forward(3000, 3000)]));
-        assert_eq!(
-            parse_forwards(&["8080:3000"]),
-            Ok(vec![forward(8080, 3000)])
-        );
-        assert_eq!(
-            parse_forwards(&["1", "65535"]),
-            Ok(vec![forward(1, 1), forward(65535, 65535)])
-        );
-        assert_eq!(parse_forwards::<&str>(&[]), Ok(vec![]));
-    }
-
-    /// Comma lists and repeated flags add up, in order; spaces around an entry
-    /// are allowed.
-    #[test]
-    fn lists_and_repeated_flags_add_up_in_order() {
-        assert_eq!(
-            parse_forwards(&["3000,5173", "8080:80", " 9000 , 4000:4001 "]),
-            Ok(vec![
-                forward(3000, 3000),
-                forward(5173, 5173),
-                forward(8080, 80),
-                forward(9000, 9000),
-                forward(4000, 4001),
-            ])
-        );
-    }
-
-    #[test]
-    fn an_entry_that_does_not_parse_is_rejected() {
-        for entry in [
-            "",
-            "0",
-            "70000",
-            "65536",
-            "-1",
-            "+3000",
-            "3000x",
-            "x",
-            "30 00",
-            ":3000",
-            "3000:",
-            "0:3000",
-            "3000:0",
-            "1:2:3",
-            "localhost:3000",
-            "3000-3005",
-        ] {
-            assert_eq!(
-                parse_forwards(&[entry]),
-                Err(ForwardError::Invalid {
-                    entry: entry.trim().to_owned()
-                }),
-                "{entry:?}"
-            );
-        }
-        // An empty entry in a list, as a trailing comma leaves one.
-        assert_eq!(
-            parse_forwards(&["3000,"]),
-            Err(ForwardError::Invalid {
-                entry: String::new()
-            })
-        );
-        assert_eq!(
-            ForwardError::Invalid {
-                entry: "70000".into()
-            }
-            .to_string(),
-            "invalid --forward entry '70000': expected PORT or LOCAL:REMOTE, with ports from 1 \
-             to 65535"
-        );
-    }
-
-    #[test]
-    fn a_port_named_twice_is_rejected() {
-        assert_eq!(
-            parse_forwards(&["3000,3000"]),
-            Err(ForwardError::RemoteTwice { port: 3000 })
-        );
-        assert_eq!(
-            parse_forwards(&["3000", "8080:3000"]),
-            Err(ForwardError::RemoteTwice { port: 3000 })
-        );
-        assert_eq!(
-            parse_forwards(&["8080:3000,8080:5173"]),
-            Err(ForwardError::LocalTwice { port: 8080 })
-        );
-        // `3000` takes local port 3000 as well.
-        assert_eq!(
-            parse_forwards(&["3000", "3000:5173"]),
-            Err(ForwardError::LocalTwice { port: 3000 })
-        );
-        assert_eq!(
-            ForwardError::RemoteTwice { port: 3000 }.to_string(),
-            "--forward names port 3000 of the host twice"
-        );
-    }
-
-    /// Never `127.0.0.1`, whose cookies belong to Splitty servers.
     #[test]
     fn a_forward_is_announced_as_localhost() {
         let forward = Forward {

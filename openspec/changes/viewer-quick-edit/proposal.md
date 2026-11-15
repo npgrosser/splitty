@@ -26,3 +26,7 @@ To be decided when the change is next. Likely candidates:
 - Server: a `viewer.write` message beside `viewer.read`, a write that keeps the file's permissions and fails rather than replacing a changed file.
 - Frontend: CodeMirror's editable mode, the unsaved state, the conflict prompt.
 - Open questions: writing in place or through a temporary file and a rename (keeps hard links and ownership versus atomicity); whether to keep a backup of the previous version; whether a `text` document (a terminal selection) can be edited and saved as a new file.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client and CodeMirror editor are gone. Editing, unsaved state and conflict prompts belong to the native viewer; server-side version checks, file permissions and connection-scoped writes remain design requirements.

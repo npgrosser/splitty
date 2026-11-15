@@ -443,9 +443,6 @@ impl Ssh {
     pub(crate) fn context(&self) -> queue::Context {
         self.context.clone().unwrap_or_default()
     }
-    pub(crate) fn owner_context(&self) -> Option<queue::Context> {
-        self.context.clone()
-    }
 
     /// The host, for commands and their standard input and output only
     /// ([`stdio_only_options`]).

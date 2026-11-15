@@ -13,18 +13,11 @@ path = "src/lib.rs"
 name = "splitty"
 path = "src/main.rs"
 
-[features]
-default = ["web-assets"]
-# Embeds frontend/dist, which `splitty serve` and the browser gateways serve.
-# The native client links the server without it and builds without the
-# frontend; Cargo turns it on again when one build also selects this crate.
-web-assets = ["dep:rust-embed", "dep:mime_guess"]
-
 [dependencies]
 splitty-core = { path = "../splitty-core" }
 splitty-transport = { path = "../splitty-transport" }
 splitty-remote = { path = "../splitty-remote" }
-axum = { version = "0.8", features = ["ws"] }
+axum = "0.8"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,25 +29,16 @@ hex = "0.4"
 sha2 = "0.10"
 semver = "1"
 http-body-util = "0.1"
-# The chunks of offered files (`ws::files`).
+# The chunks of offered files (`client_session::files`).
 base64 = "0.22"
-# Plain HTTP only: the CLI talks to 127.0.0.1, never over TLS, so no TLS stack
-# is compiled in (security review SR-29, see docs/security/findings.md).
+# The CLI uses HTTP framing over private Unix sockets.
 reqwest = { version = "0.12", features = ["json"], default-features = false }
 thiserror = "2"
 futures = "0.3"
-# The bridge's client side of the daemon's WebSocket (plain ws:// to loopback,
-# no TLS); already in the tree through axum.
-tokio-tungstenite = "0.29"
 http = "1"
-# Use the validated Tungstenite handshake/header definitions with a streaming,
-# budgeted carrier rather than its independently growing message buffers.
-hyper = { version = "1", features = ["server", "client", "http1"] }
+# HTTP client framing for verified legacy daemon migration.
+hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-tower = { version = "0.5", features = ["util"] }
-rust-embed = { version = "8", features = ["interpolate-folder-path"], optional = true }
-mime_guess = { version = "2", optional = true }
-open = "5"
 # `splitty download` of a folder: deflate only, through flate2's pure-Rust
 # backend (already in the tree), and the archive's own directory.
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
@@ -74,6 +58,6 @@ async-trait = { workspace = true }
 splitty-core = { path = "../splitty-core", features = ["testing"] }
 splitty-remote = { path = "../splitty-remote", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
-# `cookies` is needed so integration tests can hold the HttpOnly session cookie
-# the way a browser does.
-reqwest = { version = "0.12", features = ["json", "cookies"], default-features = false }
+tower = { version = "0.5", features = ["util"] }
+# Message values in the in-process native session test harness.
+tokio-tungstenite = "0.29"

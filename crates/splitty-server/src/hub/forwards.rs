@@ -900,8 +900,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let host = ScriptedHost::new(dir.path());
         let manager = forwards_manager(&host, dir.path());
+        let local = free_port();
         let row = manager
-            .save_with_restore("vm1", 5173, None, Some("Personal".into()), Some(false))
+            .save_with_restore(
+                "vm1",
+                5173,
+                Some(local.into()),
+                Some("Personal".into()),
+                Some(false),
+            )
             .await
             .unwrap();
         assert!(!row.enabled);

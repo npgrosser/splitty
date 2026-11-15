@@ -3,7 +3,7 @@
 Builds the complete Splitty Windows installer locally.
 
 .DESCRIPTION
-Builds the frontend on Windows, the static Linux backend in WSL, and the
+Builds the static Linux backend in WSL and the
 Windows application with the native MSVC toolchain, then packs the NSIS
 installer.
 
@@ -12,7 +12,7 @@ WSL distribution used for the Linux payload. The WSL default is used when
 omitted.
 
 .PARAMETER SkipTests
-Skips the frontend type check and the Windows unit tests of the native app.
+Skips the Windows unit tests of the native app.
 
 The native app links the pinned libghostty-vt. GHOSTTY_VT_DIR names its
 install prefix; when it is unset, scripts\bootstrap-libghostty-vt.py builds it
@@ -100,7 +100,6 @@ if ($repoRoot.StartsWith("\\")) {
 }
 
 $wsl = Get-RequiredApplication -Names @("wsl.exe") -InstallHint "Install WSL 2 and Ubuntu or Debian first."
-$pnpm = Get-RequiredApplication -Names @("pnpm.cmd", "pnpm.exe") -InstallHint "Install Node.js 24 and pnpm 10."
 $cargo = Get-RequiredApplication -Names @("cargo.exe") -InstallHint "Install Rust with the MSVC toolchain from https://rustup.rs/."
 $rustup = Get-RequiredApplication -Names @("rustup.exe") -InstallHint "Install Rust with the MSVC toolchain from https://rustup.rs/."
 $git = Get-RequiredApplication -Names @("git.exe") -InstallHint "Install Git for Windows."
@@ -108,15 +107,6 @@ $git = Get-RequiredApplication -Names @("git.exe") -InstallHint "Install Git for
 $wslPrefix = @()
 if (-not [string]::IsNullOrWhiteSpace($Distro)) {
     $wslPrefix = @("-d", $Distro)
-}
-
-Write-Host "[1/4] Preparing frontend"
-Invoke-InDirectory -Directory (Join-Path $repoRoot "frontend") -Script {
-    Invoke-External -FilePath $pnpm -ArgumentList @("install", "--frozen-lockfile")
-    if (-not $SkipTests) {
-        Invoke-External -FilePath $pnpm -ArgumentList @("check")
-    }
-    Invoke-External -FilePath $pnpm -ArgumentList @("build")
 }
 
 $commitOutput = & $git -C $repoRoot rev-parse HEAD
@@ -136,7 +126,7 @@ if ([string]::IsNullOrWhiteSpace($repoRootWsl)) {
     throw "WSL returned no Linux path for $repoRoot."
 }
 
-Write-Host "[2/4] Building WSL and remote backend payloads"
+Write-Host "[1/3] Building WSL and remote backend payloads"
 $payloadScriptWsl = "$repoRootWsl/packaging/windows/build-wsl-payload.sh"
 $resourcesWsl = "$repoRootWsl/build/windows-payload"
 $remotePayloadsWsl = "$repoRootWsl/build/remote-payloads"
@@ -169,7 +159,7 @@ $payloadArguments = @($wslPrefix) + @(
 )
 Invoke-External -FilePath $wsl -ArgumentList $payloadArguments
 
-Write-Host "[3/4] Compiling Windows application"
+Write-Host "[2/3] Compiling Windows application"
 Invoke-External -FilePath $rustup -ArgumentList @("target", "add", "x86_64-pc-windows-msvc")
 
 $env:SPLITTY_COMMIT = $commit
@@ -205,7 +195,7 @@ Invoke-InDirectory -Directory $repoRoot -Script {
     )
 }
 
-Write-Host "[4/4] Creating per-user NSIS installer"
+Write-Host "[3/3] Creating per-user NSIS installer"
 $bundleDirectory = Join-Path $repoRoot "target\x86_64-pc-windows-msvc\release\bundle\native"
 # Only this build's installer is left there, whatever versions came before.
 if (Test-Path -LiteralPath $bundleDirectory) {

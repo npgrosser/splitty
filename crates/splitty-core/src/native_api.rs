@@ -265,13 +265,6 @@ operations! {
 
 /// These are classified explicitly and can never become native UI operations.
 pub const ADAPTER_ROUTES: &[(&str, &str)] = &[
-    ("GET", "/health"),
-    ("POST", "/api/session"),
-    ("POST", "/api/ws-ticket"),
-    ("POST", "/api/bootstrap"),
-    ("GET", "/api/client-assignment"),
-    ("GET", "/ws"),
-    ("GET", "/ws/remote"),
     ("GET", "/api/agents"),
     ("POST", "/api/agents"),
     ("GET", "/api/agents/{id}"),

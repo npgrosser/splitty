@@ -30,3 +30,7 @@ None; extend the existing workspace and connection contracts.
 Shared mux operation/reducer and both existing server mux entry points; the application protocol capability and `docs/protocol.ts`; UI-free client connection, source/window workspace and native worker; GPUI Drawer interaction and existing tests. No new crate, transport or dependency is expected. Update the affected architecture component descriptions and the workspace/client connection concepts together.
 
 This is a bounded native-parity increment of [native-ui-gpui](../native-ui-gpui/proposal.md) and the native evaluation direction in the [roadmap](../../../roadmap/README.md); it does not complete a separate numbered milestone or authorize cutover from the web client.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-browser-access`: The web client that this change originally preserved is gone. Its UI, browser transports, frontend checks and parallel implementation references are historical; remaining native behavior, service APIs, data formats and released-client compatibility keep their scope. System-browser activation for forwarded services remains a native feature.

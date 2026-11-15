@@ -18,7 +18,7 @@
 # scripts as resources.
 #
 # With --executable the script only packs. Without it, it builds first: the
-# frontend, the pinned terminal library unless GHOSTTY_VT_DIR names one, and
+# pinned terminal library unless GHOSTTY_VT_DIR names one, and
 # release builds of the app and of the `splitty` command for this Mac. The
 # servers for remote hosts are built in when the SPLITTY_REMOTE_PAYLOAD_*
 # variables name them (crates/splitty-remote/build.rs); a release sets all
@@ -90,11 +90,9 @@ fi
 numeric_version=${version%%-*}
 
 if [ -z "$executable" ]; then
-    echo "[1/4] Building the frontend, the app and the splitty command"
+    echo "[1/4] Building the app and the splitty command"
     (
         cd "$repo_root"
-        pnpm --dir frontend install --frozen-lockfile
-        pnpm --dir frontend build
         if [ -z "${GHOSTTY_VT_DIR:-}" ]; then
             GHOSTTY_VT_DIR=$(python3 scripts/bootstrap-libghostty-vt.py)
             export GHOSTTY_VT_DIR

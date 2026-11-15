@@ -7,7 +7,6 @@
 //! # Modules
 //!
 //! - [`ids`] -- Strongly-typed identifiers (pane, screen, session, node, client, floating).
-//! - [`auth`] -- Token-based authentication: generation, persistence, and constant-time validation.
 //! - [`config`] -- User and server configuration (TOML on disk, camelCase JSON on the wire).
 //! - [`daemon`] -- Daemon lifecycle helpers: info file, PID checks, state persistence, session restore.
 //! - [`keeper`] -- Session keepers: the process that keeps a daemon session's PTY and program alive across daemon restarts, its protocol and the daemon's side of it.
@@ -17,7 +16,6 @@
 //! - [`template`] -- Saved layout templates (YAML-based CRUD).
 //! - [`theme`] -- Theme system: palette-based token derivation, bundled and custom themes.
 
-pub mod auth;
 pub mod config;
 pub mod daemon;
 pub mod ids;
