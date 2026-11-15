@@ -233,9 +233,20 @@ mod tests {
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod view_tests {
-    use crate::workspace::{chrome::view_tests::with_view, Update, Workspace};
-    use gpui_kit::{px, size, Entity, VisualTestContext};
-    use splitty_client_core::{owned_service::StartupPhase, workspace::WindowWorkspace};
+    use crate::workspace::{
+        chrome::view_tests::{with_prepared_view, with_view},
+        Update, Workspace,
+    };
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::{px, size, Context, Entity, VisualTestContext, Window};
+    use splitty_client_core::{
+        appearance::{
+            test_support::{settings_snapshot, Availability},
+            AppearanceMemory, ColorScheme, RememberedAppearance,
+        },
+        owned_service::StartupPhase,
+        workspace::WindowWorkspace,
+    };
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
@@ -281,6 +292,68 @@ mod view_tests {
                 "the failure is on the page, not in the status line"
             );
         });
+    }
+
+    /// settings, Native Appearance Before The Local Service Answers.
+    #[test]
+    fn the_window_starts_with_the_remembered_appearance_and_remembers_the_services() {
+        let directory =
+            std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4().simple()));
+        let path = directory.join("last-appearance.json");
+        let remembered = RememberedAppearance {
+            theme_mode: "fixed".into(),
+            theme: "splitty-light".into(),
+            theme_dark: "splitty-dark".into(),
+            theme_light: "splitty-light".into(),
+            font_size: 0,
+            font_family: String::new(),
+            zoom: 1.25,
+            zoom_scope: "window".into(),
+            terminal_theme: "default".into(),
+            terminal_theme_dark: "default".into(),
+            terminal_theme_light: "default".into(),
+        };
+        AppearanceMemory::open(path.clone())
+            .remember(remembered.clone())
+            .unwrap();
+        let fallback = crate::appearance::NativeAppearance::fallback("UI").surface;
+        let start = path.clone();
+        let prepare = move |workspace: &mut Workspace, window: &mut Window, cx: &mut Context<_>| {
+            workspace.remember_appearance(AppearanceMemory::open(start), window, cx)
+        };
+        with_prepared_view(prepare, |window, view| {
+            window.simulate_resize(size(px(900.), px(560.)));
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            // No service has answered: the page shows the remembered look.
+            assert!(window.debug_bounds("startup-page").is_some());
+            window.update(|_, cx| {
+                let appearance = view.read(cx).appearance();
+                assert_eq!(appearance.scheme, ColorScheme::Light);
+                assert_ne!(appearance.surface, fallback);
+                assert_eq!(appearance.zoom.level(), 1.25);
+                assert!(!cx.theme().mode.is_dark());
+            });
+
+            // The service's settings replace it and are what the file holds.
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            let owner = model.lifecycle_token();
+            deliver(window, &view, Update::Workspace(Box::new(model)));
+            let snapshot = settings_snapshot(owner.connection_id(), 1, Availability::Full);
+            let service = RememberedAppearance::from_snapshot(&snapshot);
+            assert_ne!(service, remembered);
+            deliver(window, &view, Update::Appearance(snapshot));
+            window.update(|_, cx| {
+                let appearance = view.read(cx).appearance();
+                assert_eq!(appearance.scheme, ColorScheme::Dark);
+                assert_eq!(appearance.zoom.level(), 1.);
+            });
+            assert_eq!(
+                AppearanceMemory::open(path.clone()).stored(),
+                Some(&service)
+            );
+        });
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

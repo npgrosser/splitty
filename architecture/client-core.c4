@@ -58,7 +58,7 @@ model {
     }
 
     appearance = component 'appearance' {
-      description 'Charged local appearance and Drawer projection: settings with the UI theme and terminal palette names and the OS preference they were read for. The application resolves the names in its own theme catalog.'
+      description 'Charged local appearance and Drawer projection: settings with the UI theme and terminal palette names and the OS preference they were read for. The application resolves the names in its own theme catalog. The selection a window applied last is kept in a private file of the application for the start of the next window; no service reads it.'
       metadata { module 'splitty_client_core::appearance' }
     }
 

@@ -145,6 +145,20 @@ The hidden Windows window still waits up to one second for the backend's
 appearance before it shows. Not yet seen in a real Windows window; the
 provisional choices are NSP-1 to NSP-3 in `openspec/open-decisions.md`.
 
+The page is drawn in the appearance the last window applied. The settings
+live with the local service, on Windows inside the WSL distribution, so the
+app keeps the selection it applied (UI theme mode and names, interface font,
+zoom, terminal palette names) in `last-appearance.json` in the configuration
+directory of the computer it runs on, on Windows `%APPDATA%\splitty\`
+(`AppearanceMemory` in `splitty-client-core`'s `appearance/remembered.rs`).
+`Workspace::new` resolves it in the theme catalog while the window is built
+(`remember_appearance`), and every applied snapshot of the local service
+rewrites the file when its selection differs. The file is no setting: no
+service reads it, and without a usable file the built-in look is shown as
+before. A smoke run and a start with an explicit WSL target leave it alone.
+Not yet seen on Windows; the provisional choices are NRA-1 to NRA-3 in
+`openspec/open-decisions.md`.
+
 ## Actions that need a newer server
 
 A feature whose operation needs a `mux.welcome` capability is gated in the

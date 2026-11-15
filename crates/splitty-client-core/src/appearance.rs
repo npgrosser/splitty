@@ -12,7 +12,9 @@ use crate::settings::{
     SettingsDomain, SettingsEdit, SettingsField, SettingsLimits, SettingsMetadata, SettingsValue,
 };
 
+mod remembered;
 mod terminal_preferences;
+pub use remembered::{AppearanceMemory, RememberedAppearance};
 pub use terminal_preferences::TerminalPreferences;
 
 /// The family of the terminal font the web client bundles.
@@ -244,13 +246,32 @@ impl AppearanceSnapshot {
 }
 
 fn theme_name(settings: &AppearanceSettings, scheme: ColorScheme) -> &str {
-    if settings.theme_mode == "auto" {
+    theme_for(
+        &settings.theme_mode,
+        &settings.theme,
+        &settings.theme_dark,
+        &settings.theme_light,
+        scheme,
+    )
+}
+
+/// The UI theme of the settings `mode`, `theme`, `dark` and `light`
+/// (`appearance.themeMode`, `theme`, `themeDark`, `themeLight`) for the
+/// operating system's preference.
+fn theme_for<'a>(
+    mode: &str,
+    theme: &'a str,
+    dark: &'a str,
+    light: &'a str,
+    scheme: ColorScheme,
+) -> &'a str {
+    if mode == "auto" {
         match scheme {
-            ColorScheme::Light => &settings.theme_light,
-            ColorScheme::Dark => &settings.theme_dark,
+            ColorScheme::Light => light,
+            ColorScheme::Dark => dark,
         }
     } else {
-        &settings.theme
+        theme
     }
 }
 

@@ -124,8 +124,8 @@ mod tests {
 pub(super) mod view_tests {
     use super::{Command, Destination, GroupTarget, Workspace};
     use gpui_kit::{
-        px, size, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
-        TestAppContext, VisualTestContext,
+        px, size, AppContext, Context, Entity, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, TestAppContext, VisualTestContext, Window,
     };
     use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
     use std::{
@@ -139,6 +139,15 @@ pub(super) mod view_tests {
     pub(in crate::workspace) fn with_view(
         run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>),
     ) {
+        with_prepared_view(|_, _, _| {}, run)
+    }
+
+    /// A view whose workspace `prepare` completes while the window is built,
+    /// where `Workspace::new` completes the app's.
+    pub(in crate::workspace) fn with_prepared_view(
+        prepare: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+        run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>),
+    ) {
         let mut app = TestAppContext::single();
         app.update(gpui_kit::init);
         let content = Rc::new(RefCell::new(None));
@@ -146,7 +155,7 @@ pub(super) mod view_tests {
             let content = content.clone();
             move |window, cx| {
                 let view = cx.new(|cx| {
-                    let (workspace, worker) = Workspace::new_with_worker(
+                    let (mut workspace, worker) = Workspace::new_with_worker(
                         false,
                         Arc::new(AtomicBool::new(false)),
                         window,
@@ -154,6 +163,7 @@ pub(super) mod view_tests {
                         |_, _, _| Worker::ui_test_fixture(),
                     );
                     worker.shutdown().unwrap();
+                    prepare(&mut workspace, window, cx);
                     workspace
                 });
                 *content.borrow_mut() = Some(view.clone());

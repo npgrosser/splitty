@@ -9,7 +9,9 @@ use crate::terminal::TerminalColors;
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::theme::{Theme, ThemeColor, ThemeConfig, ThemeMode};
 use gpui_kit::{px, rgb, App, Hsla, Rgba};
-use splitty_client_core::appearance::{terminal_palette_name, AppearanceSnapshot, ColorScheme};
+use splitty_client_core::appearance::{
+    terminal_palette_name, AppearanceSnapshot, ColorScheme, RememberedAppearance,
+};
 use splitty_client_core::settings::SettingsField;
 use splitty_client_core::zoom::{Zoom, ZoomSteps};
 use std::rc::Rc;
@@ -167,6 +169,37 @@ impl NativeAppearance {
         // fallback ones of a service without metadata.
         result.zoom_steps = ZoomSteps::from_limits(snapshot.limits(SettingsField::Zoom));
         result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope, &result.zoom_steps);
+        result
+    }
+
+    /// The presentation of the selection a window applied last, for the
+    /// start of the next one: resolved as a snapshot of the same settings is,
+    /// with the zoom levels of a service that names none.
+    pub fn from_remembered(
+        remembered: &RememberedAppearance,
+        os_scheme: ColorScheme,
+        catalog: &ThemeCatalog,
+        available_fonts: &[String],
+        ui_family: &str,
+        mono_family: &str,
+    ) -> Self {
+        let mut result = Self::resolve(
+            &ThemeSelection {
+                ui_theme: remembered.ui_theme(os_scheme),
+                os_scheme,
+                terminal_theme: &remembered.terminal_theme,
+                terminal_theme_dark: &remembered.terminal_theme_dark,
+                terminal_theme_light: &remembered.terminal_theme_light,
+                font_size: remembered.font_size,
+                font_family: &remembered.font_family,
+            },
+            catalog,
+            available_fonts,
+            ui_family,
+            mono_family,
+        );
+        result.zoom =
+            Zoom::from_values(remembered.zoom, &remembered.zoom_scope, &result.zoom_steps);
         result
     }
 
@@ -747,6 +780,74 @@ mod tests {
         );
         assert!(luminance(rgb(light.surface).into()) > luminance(rgb(light.text).into()));
         assert!(luminance(rgb(light.terminal.background).into()) > 0.5);
+    }
+
+    /// settings, Native Appearance Before The Local Service Answers.
+    #[test]
+    fn a_remembered_selection_resolves_as_the_settings_it_was_taken_from() {
+        let catalog = ThemeCatalog::load(None);
+        let mut remembered = RememberedAppearance {
+            theme_mode: "auto".into(),
+            theme: "splitty-dark".into(),
+            theme_dark: "splitty-dark".into(),
+            theme_light: "splitty-light".into(),
+            font_size: 15,
+            font_family: String::new(),
+            zoom: 1.25,
+            zoom_scope: "window".into(),
+            terminal_theme: "default".into(),
+            terminal_theme_dark: "default".into(),
+            terminal_theme_light: "default".into(),
+        };
+        let shown = |remembered: &RememberedAppearance, scheme| {
+            NativeAppearance::from_remembered(remembered, scheme, &catalog, &[], "UI", "Mono")
+        };
+        let light = shown(&remembered, ColorScheme::Light);
+        let expected = resolve(
+            &ThemeSelection {
+                os_scheme: ColorScheme::Light,
+                font_size: 15,
+                ..selection("splitty-light")
+            },
+            &catalog,
+        );
+        assert_eq!(
+            (light.notice.as_deref(), light.scheme),
+            (None, ColorScheme::Light)
+        );
+        assert_eq!(
+            (
+                light.surface,
+                light.text,
+                light.font_size,
+                light.terminal.background
+            ),
+            (
+                expected.surface,
+                expected.text,
+                15.,
+                expected.terminal.background
+            )
+        );
+        assert_eq!(
+            (light.zoom.level(), light.zoom.window_scale()),
+            (1.25, 1.25)
+        );
+        assert_eq!(
+            shown(&remembered, ColorScheme::Dark).scheme,
+            ColorScheme::Dark
+        );
+
+        // A level the built-in steps do not hold waits for the service's.
+        remembered.zoom = 40.;
+        remembered.zoom_scope = "terminals".into();
+        let zoom = shown(&remembered, ColorScheme::Dark).zoom;
+        assert_eq!((zoom.level(), zoom.window_scale()), (1., 1.));
+        // A theme that is gone shows the default one of the preference.
+        remembered.theme_light = "removed-theme".into();
+        let missing = shown(&remembered, ColorScheme::Light);
+        assert_eq!(missing.scheme, ColorScheme::Light);
+        assert!(missing.notice.is_some());
     }
 
     #[test]

@@ -8,6 +8,10 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-remembered-appearance` NRA-1 to NRA-3** (2026-11-15, provisional, tbd; recorded in the change's proposal, behavior in the `settings` spec):
+  - **NRA-1:** the native app keeps the appearance selection it last applied in `last-appearance.json` in the configuration directory of the computer it runs on (Windows `%APPDATA%\splitty\`), as a private file; the directory follows `SPLITTY_CONFIG_DIR`. Alternatives: the platform's cache directory, or the Windows state file that holds the chosen distribution.
+  - **NRA-2:** one file for all windows and instances, whichever WSL distribution the backend runs in; the last applied appearance wins, and a smoke run or an explicit WSL target neither reads nor writes it. Alternative: one remembered selection per distribution.
+  - **NRA-3:** the hidden Windows window keeps its wait of at most one second for the backend's appearance (NSP-2), so a warm start shows the workspace directly. Alternative: show the window at once whenever a remembered appearance was applied.
 - **`tab-group-transfer` TGT-1 to TGT-5** (2026-11-14, provisional, tbd; recorded in the change's design, behavior in the `workspace-model`, `mux-protocol` and `control-api` specs):
   - **TGT-1:** a whole tab group moves to another Screen with one op, `move_tab_group_to_screen`, naming its slot; every check comes first, so a rejection changes nothing. Alternative: one `move_pane_to_screen` per tab.
   - **TGT-2:** as for a single pane: a managed job's pane refuses the whole group, viewer panes and floating groups move, the panes join the target's first slot, an emptied source goes. Alternative: keep the moved group as a group of its own beside the target's groups.

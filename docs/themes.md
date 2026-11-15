@@ -46,9 +46,11 @@ there.
 
 Put files into `themes/` in the configuration directory
 (`~/.config/splitty/themes/`, macOS
-`~/Library/Application Support/splitty/themes/`), on the computer the app runs
-on. They are offered the next time the settings open. A file that cannot be
-loaded is named there.
+`~/Library/Application Support/splitty/themes/`, Windows
+`%APPDATA%\splitty\themes\`), on the computer the app runs on. On Windows
+that is the Windows side, not the WSL distribution the settings live in. They
+are offered the next time the settings open. A file that cannot be loaded is
+named there.
 
 | File | Read as |
 |---|---|

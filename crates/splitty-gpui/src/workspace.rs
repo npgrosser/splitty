@@ -46,7 +46,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::{
-    AppearanceSnapshot, ColorScheme, DrawerVisibilityOutcome, DrawerVisibilityResult,
+    AppearanceMemory, AppearanceSnapshot, ColorScheme, DrawerVisibilityOutcome,
+    DrawerVisibilityResult, RememberedAppearance,
 };
 use splitty_client_core::native_workspace::{
     Command as WorkerCommand, CommandKind as Command, PtySize, Update, WindowPresenceCell, Worker,
@@ -1292,6 +1293,9 @@ pub struct Workspace {
     /// The themes and palettes the settings can name; reloaded with the
     /// settings view.
     themes: Rc<ThemeCatalog>,
+    /// The file that keeps the applied appearance for the next start; `None`
+    /// for a window that remembers nothing.
+    appearance_memory: Option<AppearanceMemory>,
     appearance_error: Option<String>,
     appearance_generation: u64,
     drawer_visible: bool,
@@ -1447,9 +1451,55 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Self, Worker) {
-        Self::new_with_worker(smoke, outcome, window, cx, |receiver, sender, scheme| {
-            Worker::start_with_backend(receiver, sender, scheme, backend)
-        })
+        // A smoke run is a test and an explicit WSL target an isolated
+        // preview: neither shows nor replaces what the app's windows remember.
+        let remembers = !smoke
+            && !matches!(
+                backend,
+                splitty_client_core::owned_service::LocalBackend::Wsl(_)
+            );
+        let (mut workspace, worker) =
+            Self::new_with_worker(smoke, outcome, window, cx, |receiver, sender, scheme| {
+                Worker::start_with_backend(receiver, sender, scheme, backend)
+            });
+        if remembers {
+            workspace.remember_appearance(
+                AppearanceMemory::open(AppearanceMemory::default_path()),
+                window,
+                cx,
+            );
+        }
+        (workspace, worker)
+    }
+
+    /// Keep the applied appearance in `memory` from now on, and show what it
+    /// holds until the local service's appearance arrives: the service may
+    /// take seconds to start, and its settings stay the only source of what
+    /// is shown afterwards.
+    pub(crate) fn remember_appearance(
+        &mut self,
+        memory: AppearanceMemory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.appearance_generation == 0 {
+            if let Some(remembered) = memory.stored() {
+                let available_fonts = window.text_system().all_font_names();
+                let next = NativeAppearance::from_remembered(
+                    remembered,
+                    Self::window_scheme(window),
+                    &self.themes,
+                    &available_fonts,
+                    &self.ui_family,
+                    &self.mono_family,
+                );
+                self.zoom = PresentedZoom::new(next.zoom);
+                next.apply_component_theme(cx);
+                self.appearance = next;
+                cx.notify();
+            }
+        }
+        self.appearance_memory = Some(memory);
     }
 
     pub(crate) fn new_with_worker(
@@ -1685,6 +1735,7 @@ impl Workspace {
                 startup: startup_page::Startup::default(),
                 appearance: NativeAppearance::fallback(&ui_family),
                 themes,
+                appearance_memory: None,
                 tab_prefs: TabPrefs::default(),
                 scroll_to_bottom: true,
                 clipboard_writes: false,
@@ -1879,6 +1930,10 @@ impl Workspace {
         self.appearance = next;
         self.appearance_generation = snapshot.generation();
         self.appearance_error = failure;
+        if let Some(memory) = &mut self.appearance_memory {
+            // The next start falls back to the built-in look if this fails.
+            let _ = memory.remember(RememberedAppearance::from_snapshot(snapshot));
+        }
         self.settings.update(cx, |view, cx| {
             view.set_snapshot(snapshot.clone(), window, cx)
         });
