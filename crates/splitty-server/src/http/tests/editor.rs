@@ -1,4 +1,4 @@
-//! In-process router and real WebSocket protocol coverage, without a child server.
+//! Owner control operations and native session messages, without a child server.
 use super::*;
 use axum::response::IntoResponse;
 
@@ -39,7 +39,7 @@ async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(n
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let mut socket = served.open_local_for(native).await;
+    let mut socket = served.open_local().await;
     let welcome = message_type(&mut socket, "mux.welcome").await;
     assert!(welcome["capabilities"]
         .as_array()
@@ -129,14 +129,6 @@ async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(n
             .expect("response");
         assert!(response.status().is_client_error());
     }
-    let url = format!("http://127.0.0.1:{}/api/editor/open", served.port);
-    let response = reqwest::Client::new()
-        .post(url)
-        .json(&input)
-        .send()
-        .await
-        .expect("HTTP");
-    assert_eq!(response.status().as_u16(), 401);
     served
         .state
         .client_state

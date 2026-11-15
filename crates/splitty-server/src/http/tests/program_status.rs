@@ -1,9 +1,8 @@
 //! mux-protocol, Program Status Capability and Program Status Events, and
 //! the greeting halves of program-status's "Status while nobody streams" and
 //! "Record rebuilt after a restart": sessions of the server's own backend
-//! report through their output, and connections of the WebSocket or the
-//! native transport receive the root records. In-process, since the router,
-//! the transports and the watcher are the server's own.
+//! report through their output, and native session connections receive the
+//! root records from the server's watcher.
 use super::*;
 use splitty_core::ids::{PaneId, ScreenId};
 use splitty_core::mux::Op;
@@ -107,11 +106,10 @@ async fn report(session: &Arc<dyn SessionHandle>, report: &str) {
 /// (the greeting half).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn root_records_reach_every_connection() {
-    run_root_records_reach_every_connection(false).await;
-    run_root_records_reach_every_connection(true).await;
+    run_root_records_reach_every_connection().await;
 }
 
-async fn run_root_records_reach_every_connection(native: bool) {
+async fn run_root_records_reach_every_connection() {
     if !pty_available() {
         return;
     }
@@ -131,7 +129,7 @@ async fn run_root_records_reach_every_connection(native: bool) {
         .await
     );
 
-    let mut a = served.open_local_for(native).await;
+    let mut a = served.open_local().await;
     let welcome = json_of(next(&mut a).await);
     assert_eq!(welcome["type"], "mux.welcome", "{welcome}");
     for capability in ["program-status-v1", "notification-notices-v1"] {
@@ -156,7 +154,7 @@ async fn run_root_records_reach_every_connection(native: bool) {
 
     // `a` streams the session, `b` does not.
     send(&mut a, json!({"type":"attach","id":sid})).await;
-    let mut b = served.open_local_for(native).await;
+    let mut b = served.open_local().await;
     assert_eq!(json_of(next(&mut b).await)["type"], "mux.welcome");
     let greeting = after_greetings(&mut b).await;
     assert_eq!(greeting["type"], "program_status.changed", "{greeting}");
@@ -322,11 +320,10 @@ impl Terminal for Kept {
 /// and to one that connects later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_record_read_again_is_sent_without_notify() {
-    run_a_record_read_again_is_sent_without_notify(false).await;
-    run_a_record_read_again_is_sent_without_notify(true).await;
+    run_a_record_read_again_is_sent_without_notify().await;
 }
 
-async fn run_a_record_read_again_is_sent_without_notify(native: bool) {
+async fn run_a_record_read_again_is_sent_without_notify() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start_with(hub(&host, dir.path()), |addr| {
@@ -335,7 +332,7 @@ async fn run_a_record_read_again_is_sent_without_notify(native: bool) {
     .await;
     let state = &served.state;
 
-    let mut connected = served.open_local_for(native).await;
+    let mut connected = served.open_local().await;
     assert_eq!(json_of(next(&mut connected).await)["type"], "mux.welcome");
     let (sid, session) = pane_session(state, "s1", "p1", |id| {
         splitty_core::pty::testing::sh_opts(id, "")
@@ -347,7 +344,7 @@ async fn run_a_record_read_again_is_sent_without_notify(native: bool) {
     assert_eq!(event["status"]["state"], "blocked");
     assert!(event.get("notify").is_none(), "{event}");
 
-    let mut later = served.open_local_for(native).await;
+    let mut later = served.open_local().await;
     assert_eq!(json_of(next(&mut later).await)["type"], "mux.welcome");
     let greeting = after_greetings(&mut later).await;
     assert_eq!(greeting["type"], "program_status.changed", "{greeting}");

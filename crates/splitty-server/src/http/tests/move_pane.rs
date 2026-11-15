@@ -62,10 +62,9 @@ async fn a_cli_move_nudges_both_screens_and_a_moved_shell_still_splits() {
     let host = ScriptedHost::new(dir.path());
     let served =
         Served::start_with(hub(&host, dir.path()), |addr| shell_state(addr, dir.path())).await;
-    // The CLI's own gateway over the same service.
+    // The CLI's owner router over the same service.
     let cli = TestState {
         listen_addr: ADDR.into(),
-        allowed_origins: Arc::new(allowed_origins(ADDR)),
         ..served.state.clone()
     };
     let app = router(&cli, hub(&host, dir.path()));

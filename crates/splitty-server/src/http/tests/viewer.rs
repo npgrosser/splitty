@@ -182,11 +182,10 @@ async fn read(socket: &mut Socket, read: serde_json::Value) -> serde_json::Value
 }
 
 /// viewer-panes, Reading A Document (A file in two chunks, Nothing changed)
-/// and Viewer Capability, through the connection handler on both carriers:
-/// the WebSocket of the window and a native connection.
+/// and Viewer Capability, through independent native session connections.
 #[tokio::test]
 async fn a_window_reads_a_document_over_its_own_connection() {
-    for native in [false, true] {
+    for connection in 0..2 {
         let dir = tempfile::tempdir().expect("dir");
         let host = ScriptedHost::new(dir.path());
         let served = Served::start(hub(&host, dir.path()), dir.path()).await;
@@ -205,7 +204,7 @@ async fn a_window_reads_a_document_over_its_own_connection() {
             &served.state,
             json!({"type": "open_viewer", "paneId": "p1", "newPaneId": "v2", "source": {"kind": "text", "title": "Selection", "text": "an answer"}}),
         );
-        let mut socket = served.open_local_for(native).await;
+        let mut socket = served.open_local().await;
         let welcome = message_type(&mut socket, "mux.welcome").await;
         assert!(
             welcome["capabilities"]
@@ -219,7 +218,10 @@ async fn a_window_reads_a_document_over_its_own_connection() {
             json!({"type": "viewer.read", "requestId": "r1", "paneId": "v1", "offset": 0}),
         )
         .await;
-        assert_eq!(first["type"], "viewer.chunk", "native {native}: {first}");
+        assert_eq!(
+            first["type"], "viewer.chunk",
+            "connection {connection}: {first}"
+        );
         assert_eq!(first["size"], bytes.len());
         assert_eq!(first["eof"], false);
         let decode = |chunk: &serde_json::Value| {

@@ -1,5 +1,5 @@
 //! Waits for a review and agents' replies through the served router,
-//! answered by real WebSocket windows: control-api, Review Requests;
+//! answered by native session connections: control-api, Review Requests;
 //! viewer-annotations, Waiting For A Review; mux-protocol, Review Answers and
 //! Change Propagation to Other Clients. The waiting request is held on the
 //! HTTP listener and on the owner control socket; no shell is started.
@@ -47,7 +47,7 @@ fn workspace(state: &TestState) {
 
 /// The router served with [`workspace`].
 async fn serve(host: &ScriptedHost, dir: &Path) -> Served {
-    Served::start_with(hub(host, dir), |addr| {
+    Served::start_http_with(hub(host, dir), |addr| {
         let state = state(addr, dir);
         workspace(&state);
         state
@@ -142,7 +142,6 @@ fn wait_over_http(served: &Served) -> tokio::task::JoinHandle<(u16, Value)> {
             .build()
             .expect("client")
             .post(url)
-            .bearer_auth("process-token")
             .json(&request())
             .send()
             .await
@@ -162,7 +161,7 @@ fn wait_over_control(control: &axum::Router) -> tokio::task::JoinHandle<(StatusC
 fn raw_wait(host: &str) -> Vec<u8> {
     let body = request().to_string();
     format!(
-        "POST {WAIT_PATH} HTTP/1.1\r\nhost: {host}\r\nauthorization: Bearer process-token\r\n\
+        "POST {WAIT_PATH} HTTP/1.1\r\nhost: {host}\r\n\
          content-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
         body.len()
     )
@@ -501,15 +500,15 @@ async fn an_agents_reply_nudges_every_window() {
 /// mux-protocol, Review Texts And Anchors (A review on request); and
 /// viewer-annotations, The Review (Added just before the review): a window
 /// that saves a comment and asks for the review right after it, over the
-/// WebSocket and over a native carrier, gets a review that holds the comment
+/// native session dispatcher, gets a review that holds the comment
 /// with its number.
 #[tokio::test]
 async fn a_review_holds_the_comment_a_window_saved_just_before() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = serve(&host, dir.path()).await;
-    for (native, pane) in [(false, "v2"), (true, "v3")] {
-        let mut socket = served.open_local_for(native).await;
+    for pane in ["v2", "v3"] {
+        let mut socket = served.open_local().await;
         let welcome = message_type(&mut socket, "mux.welcome").await;
         assert!(
             welcome["capabilities"]
@@ -551,7 +550,7 @@ async fn a_review_holds_the_comment_a_window_saved_just_before() {
         assert_eq!(
             reviewed["text"],
             format!("# Review of Plan\n\n## General comments\n\n- #1 Split it.\n\n## #2 Line 2, comment\n> retry three times\n\nWhy three?\n\nReply in a thread: splitty comments reply {pane} <number> '<text>'\n"),
-            "native: {native}"
+            "pane: {pane}"
         );
         assert_eq!(reviewed["count"], 2);
     }

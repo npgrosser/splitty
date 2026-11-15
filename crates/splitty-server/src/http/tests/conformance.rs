@@ -2,10 +2,13 @@
 //! adapters observe the same service, without starting a second workspace.
 use super::*;
 use crate::service::catalog::{Operation, Request as NativeRequest, Role};
+use axum::response::IntoResponse;
 use serde_json::Value;
+use splitty_core::daemon::DaemonInfo;
 use splitty_core::ids::{PaneId, ScreenId};
 use splitty_core::mux::{Op, ScreenOp};
 use splitty_core::native_api::directory::Directory;
+use std::os::unix::fs::PermissionsExt;
 
 #[tokio::test]
 async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_instance() {
@@ -19,7 +22,6 @@ async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_in
             .uri("/api/daemon/stop")
             .header("content-type", "application/json")
             .header("host", ADDR)
-            .header("authorization", "Bearer process-token")
             .body(axum::body::Body::from(
                 json!({"instance":instance}).to_string(),
             ))
@@ -31,20 +33,6 @@ async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_in
         .await
         .unwrap();
     assert_eq!(reply.status(), StatusCode::CONFLICT);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1), state.owner_shutdown.notified())
-            .await
-            .is_err()
-    );
-    let browser = browser_router(&state);
-    assert_eq!(
-        browser
-            .oneshot(request(&state.instance))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NOT_FOUND
-    );
     assert!(
         tokio::time::timeout(Duration::from_millis(1), state.owner_shutdown.notified())
             .await
@@ -321,7 +309,7 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
             stored.as_array().unwrap().len()
         );
         assert_eq!(serde_json::to_value(&native).unwrap(), native_wire);
-        let router = browser_router(&state);
+        let router = service_router(&state);
         let (status, http_wire) =
             exchange(&router, api("GET", "/api/remote/directory", None)).await;
         assert_eq!(status, StatusCode::OK);
@@ -596,9 +584,9 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
         );
     }
     // Backend authority remains useful on the same assigned Remote stream.
-    // Compare a real template mutation/read and domain failures with browser
+    // Compare a real template mutation/read and domain failures with service
     // dispatch; these must not be mistaken for forbidden local-hub operations.
-    let browser = browser_router(&state);
+    let service = service_router(&state);
     let template = json!({"name":"Remote template","panes":{"shell":{"command":"printf remote"}},"layout":{"slot":"shell"}});
     for (operation, args, method, path, body) in [
         ("home.get", json!({}), "GET", "/api/home/settings", None),
@@ -646,7 +634,7 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
             StatusCode::from_u16(reply.status).unwrap(),
             serde_json::from_str(&reply.body).unwrap_or_else(|_| json!(reply.body)),
         );
-        let expected = exchange(&browser, api(method, path, body.as_ref())).await;
+        let expected = exchange(&service, api(method, path, body.as_ref())).await;
         assert_eq!(actual, expected, "Remote backend parity: {operation}");
     }
     id += 1;
@@ -659,8 +647,7 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     assert!(host.asked().is_empty());
     peer.shutdown().await;
     server.await.unwrap().unwrap();
-    // The gateway's API carrier is a client of the service until it is dropped.
-    drop(browser);
+    drop(service);
     assert!(
         splitty_core::pty::testing::wait_until(WAIT, || state
             .client_state
@@ -881,9 +868,9 @@ pub(super) async fn native(
 async fn settings_metadata_and_rejection_match_http_and_native() {
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
-    let browser = browser_router(&state);
+    let service = service_router(&state);
     let (status, metadata) =
-        exchange(&browser, api("GET", "/api/home/settings/metadata", None)).await;
+        exchange(&service, api("GET", "/api/home/settings/metadata", None)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(metadata["defaults"]["drawer"]["sidebarWidth"], 200);
     assert_eq!(
@@ -894,23 +881,10 @@ async fn settings_metadata_and_rejection_match_http_and_native() {
         native(&state, Operation::HomeMetadata, json!({})).await,
         (status, metadata)
     );
-    let unauthenticated = axum::http::Request::get("/api/home/settings/metadata")
-        .header("host", ADDR)
-        .body(axum::body::Body::empty())
-        .unwrap();
-    assert_eq!(
-        browser
-            .clone()
-            .oneshot(unauthenticated)
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
     let before = state.config.read().unwrap().clone();
     let invalid = json!({"editors":{"extensions":[{"extension":"../bad","editor":"zed"}]}});
     let (status, body) =
-        exchange(&browser, api("PATCH", "/api/home/settings", Some(&invalid))).await;
+        exchange(&service, api("PATCH", "/api/home/settings", Some(&invalid))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["field"], "editors.extensions.0.extension");
     assert_eq!(
@@ -926,7 +900,7 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
     let host = ScriptedHost::new(dir.path());
     let mut state = state(ADDR, dir.path());
     Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
-    let browser = browser_router(&state);
+    let service = service_router(&state);
     // A custom source may deliberately share a built-in display name. The
     // resolved identifier must describe the actual source on both adapters.
     std::fs::create_dir_all(&state.themes_dir).unwrap();
@@ -941,12 +915,12 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
         ("missing-palette", "splitty-dark", "Splitty Dark"),
     ] {
         let native_theme = native(&state, Operation::ThemeGet, json!({"name": requested})).await;
-        let browser_theme = exchange(
-            &browser,
+        let service_theme = exchange(
+            &service,
             api("GET", &format!("/api/home/theme?name={requested}"), None),
         )
         .await;
-        assert_eq!(native_theme, browser_theme);
+        assert_eq!(native_theme, service_theme);
         assert_eq!(native_theme.0, StatusCode::OK);
         assert_eq!(native_theme.1["id"], resolved);
         assert_eq!(native_theme.1["name"], label);
@@ -962,12 +936,12 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
     .await;
     state.config.write().unwrap().terminal.theme = "splitty-light".into();
     let native_theme = native(&state, Operation::ThemeGet, json!({"name": "splitty-dark"})).await;
-    let browser_theme = exchange(
-        &browser,
+    let service_theme = exchange(
+        &service,
         api("GET", "/api/home/theme?name=splitty-dark", None),
     )
     .await;
-    assert_eq!(native_theme, browser_theme);
+    assert_eq!(native_theme, service_theme);
     assert_eq!(native_theme.1["id"], "splitty-dark");
     assert_eq!(native_theme.1["terminalPalette"], "splitty-light");
     assert_eq!(native_theme.1["terminal"], light["terminal"]);
@@ -977,7 +951,7 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
         .iter()
         .filter(|entry| entry.method == "GET" && entry.arguments.iter().all(|arg| arg.optional))
     {
-        let expected = exchange(&browser, api("GET", operation.path, None)).await;
+        let expected = exchange(&service, api("GET", operation.path, None)).await;
         let actual = native(&state, operation.operation, json!({})).await;
         assert_eq!(actual, expected, "{}", operation.name);
     }
@@ -1050,7 +1024,7 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
     ] {
         assert_eq!(
             native(&state, operation, args).await,
-            exchange(&browser, api(method, path, body.as_ref())).await,
+            exchange(&service, api(method, path, body.as_ref())).await,
             "{operation:?}"
         );
     }
@@ -1375,22 +1349,22 @@ async fn native_jobs_keep_shared_idempotency_ownership_and_error_contracts() {
     }
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
-    let browser = browser_router(&state);
+    let service = service_router(&state);
     let launch = json!({"requestId":splitty_core::ids::JobId::new(),"argv":["/bin/sh","-c","read line"],"cwd":dir.path(),"placement":{"kind":"screen"},"background":true});
     let (status, launched) = native(&state, Operation::JobLaunch, json!({"body":launch})).await;
     assert_eq!(status, StatusCode::CREATED, "{launched}");
     let (replayed_status, replayed) =
-        exchange(&browser, api("POST", "/api/jobs", Some(&launch))).await;
+        exchange(&service, api("POST", "/api/jobs", Some(&launch))).await;
     assert_eq!(replayed_status, StatusCode::OK, "{replayed}");
     assert_eq!(launched["jobId"], replayed["jobId"]);
     assert_eq!(
         native(&state, Operation::JobList, json!({})).await,
-        exchange(&browser, api("GET", "/api/jobs", None)).await
+        exchange(&service, api("GET", "/api/jobs", None)).await
     );
     let id = launched["jobId"].as_str().expect("job");
     assert_eq!(
         native(&state, Operation::JobInspect, json!({"id":id})).await,
-        exchange(&browser, api("GET", &format!("/api/jobs/{id}"), None)).await
+        exchange(&service, api("GET", &format!("/api/jobs/{id}"), None)).await
     );
     let native_logs = native(
         &state,
@@ -1398,12 +1372,12 @@ async fn native_jobs_keep_shared_idempotency_ownership_and_error_contracts() {
         json!({"id":id,"waitMs":"31000"}),
     )
     .await;
-    let browser_logs = exchange(
-        &browser,
+    let control_logs = exchange(
+        &service,
         api("GET", &format!("/api/jobs/{id}/logs?waitMs=31000"), None),
     )
     .await;
-    assert_eq!(native_logs, browser_logs);
+    assert_eq!(native_logs, control_logs);
     assert_eq!(native_logs.0, StatusCode::BAD_REQUEST);
     let unauthorized_actor = NativeRequest {
         operation: Operation::JobList,
@@ -1425,65 +1399,6 @@ async fn native_jobs_keep_shared_idempotency_ownership_and_error_contracts() {
         StatusCode::OK
     );
     state.client_state.jobs.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_native_reverse_request_cannot_share_a_fresh_browser_gateway() {
-    let dir = tempfile::tempdir().expect("dir");
-    let host = ScriptedHost::new(dir.path());
-    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let browser = browser_router(&served.state);
-    // Building another gateway must not replace the first port's exclusion.
-    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("second gateway listener");
-    let other_address = other_listener.local_addr().expect("address");
-    let _other_gateway = browser_router(&TestState {
-        listen_addr: other_address.to_string(),
-        ..served.state.clone()
-    });
-    let body = json!({"target":"vm1","port":8080,"local":served.port});
-    for (operation, method, path) in [
-        (
-            Operation::ReverseOpen,
-            "POST",
-            "/api/remote/reverse-forwards",
-        ),
-        (
-            Operation::ReversePreferencesSave,
-            "PUT",
-            "/api/remote/reverse-forward-preferences",
-        ),
-    ] {
-        // Native first, before any browser reverse/remote handler is invoked.
-        let result = native(&served.state, operation, json!({"body":body})).await;
-        assert_eq!(result.0, StatusCode::CONFLICT, "{result:?}");
-        assert_eq!(result.1["code"], "local_port_reserved");
-        assert_eq!(
-            result,
-            exchange(
-                &browser,
-                at(&served.state.listen_addr, api(method, path, Some(&body)))
-            )
-            .await
-        );
-    }
-    assert!(
-        host.asked().is_empty(),
-        "reserved destinations must never spawn SSH"
-    );
-    let other = native(
-        &served.state,
-        Operation::ReverseOpen,
-        json!({"body":{"target":"vm1","port":8080,"local":other_address.port()}}),
-    )
-    .await;
-    assert_eq!(other.0, StatusCode::CONFLICT);
-    assert_eq!(other.1["code"], "local_port_reserved");
-    assert!(!dir
-        .path()
-        .join("config/remote-reverse-forwards.json")
-        .exists());
 }
 
 #[tokio::test]
@@ -1901,7 +1816,7 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
             .dispatch_screen(&"empty".into(), op)
             .unwrap();
     }
-    let browser = browser_router(&state);
+    let service = service_router(&state);
     let owner = crate::http::build_control_router(state.service.clone());
     let (mut peer, task) = framed(&state, Role::Remote).await;
     for (id, screen_id, expected) in [(1, "screen", 200), (2, "missing", 404), (3, "empty", 400)] {
@@ -1909,7 +1824,7 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
         framed_call(&peer, id, "template.extract", json!({"body":body}));
         let native = framed_reply(&mut peer).await;
         let http = exchange(
-            &browser,
+            &service,
             api("POST", "/api/templates/extract/screen", Some(&body)),
         )
         .await;
@@ -1978,13 +1893,13 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
 async fn a_save_by_name_answers_alike_over_http_and_native() {
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
-    let browser = browser_router(&state);
+    let service = service_router(&state);
     let template = |name: &str| json!({"name": name, "panes": {"shell": {"command": "make"}}, "layout": {"slot": "shell"}});
     let save =
         |name: &str, overwrite: bool| json!({"template": template(name), "overwrite": overwrite});
     assert_eq!(
         exchange(
-            &browser,
+            &service,
             api("POST", "/api/templates", Some(&save("v1.2", false)))
         )
         .await,
@@ -2005,14 +1920,14 @@ async fn a_save_by_name_answers_alike_over_http_and_native() {
     );
     assert_eq!(
         exchange(
-            &browser,
+            &service,
             api("POST", "/api/templates", Some(&save("V1 2", false)))
         )
         .await,
         taken
     );
     assert_eq!(
-        exchange(&browser, api("GET", "/api/templates/v1-2", None))
+        exchange(&service, api("GET", "/api/templates/v1-2", None))
             .await
             .1["name"],
         "v1.2",
@@ -2031,7 +1946,7 @@ async fn a_save_by_name_answers_alike_over_http_and_native() {
         (
             "HTTP",
             exchange(
-                &browser,
+                &service,
                 api("POST", "/api/templates", Some(&save("V1 2", true))),
             )
             .await,
@@ -2053,12 +1968,12 @@ async fn a_save_by_name_answers_alike_over_http_and_native() {
     assert_eq!(
         unnamed,
         exchange(
-            &browser,
+            &service,
             api("POST", "/api/templates", Some(&save("...", false)))
         )
         .await
     );
-    let (_, list) = exchange(&browser, api("GET", "/api/templates", None)).await;
+    let (_, list) = exchange(&service, api("GET", "/api/templates", None)).await;
     assert_eq!(list, json!([{"slug": "v1-2", "displayName": "V1 2"}]));
 }
 
@@ -2094,10 +2009,10 @@ async fn the_control_socket_routes_exactly_the_catalogs_control_operations() {
 
 /// control-api, Two Control Transports (Malformed request on both
 /// transports), and access-control, JSON Request Bodies: the control socket
-/// and the browser gateway answer a malformed request alike, and neither
-/// reads a body without a JSON content type.
+/// decoder refuses malformed requests and non-JSON content types before
+/// changing the workspace.
 #[tokio::test]
-async fn malformed_requests_are_answered_alike_on_both_transports() {
+async fn malformed_control_requests_leave_the_workspace_unchanged() {
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
     state
@@ -2113,14 +2028,12 @@ async fn malformed_requests_are_answered_alike_on_both_transports() {
         .mux_store
         .session_id_for_pane(&PaneId::from("p1"))
         .expect("session");
-    let browser = browser_router(&state);
     let control = crate::http::build_control_router(state.service.clone());
     let request = |method: &str, path: &str, content_type: Option<&str>, body: &str| {
         let mut request = Request::builder()
             .method(method)
             .uri(path)
-            .header("host", ADDR)
-            .header("authorization", "Bearer process-token");
+            .header("host", ADDR);
         if let Some(content_type) = content_type {
             request = request.header("content-type", content_type);
         }
@@ -2174,14 +2087,9 @@ async fn malformed_requests_are_answered_alike_on_both_transports() {
             StatusCode::BAD_REQUEST,
         ),
     ] {
-        let over_gateway = exchange(&browser, request(method, path, content_type, body)).await;
         let over_socket = exchange(&control, request(method, path, content_type, body)).await;
-        assert_eq!(
-            over_gateway.0, expected,
-            "{method} {path}: {over_gateway:?}"
-        );
-        assert!(over_gateway.1["error"].is_string(), "{over_gateway:?}");
-        assert_eq!(over_socket, over_gateway, "{method} {path}");
+        assert_eq!(over_socket.0, expected, "{method} {path}: {over_socket:?}");
+        assert!(over_socket.1["error"].is_string(), "{over_socket:?}");
     }
     assert_eq!(workspace(), before, "no request changed the workspace");
 }
@@ -2233,4 +2141,182 @@ async fn native_arguments_and_bodies_are_decoded_in_the_operations_error_style()
         body["error"].is_string() && body.get("code").is_none(),
         "{body}"
     );
+}
+
+#[tokio::test]
+async fn native_host_open_pins_the_local_hub_before_any_ssh_and_keeps_remote_authority() {
+    use crate::{
+        hub::{testing::ScriptedHost, Hub},
+        native::client::Connector,
+    };
+    use splitty_transport::wire::{self, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = state(ADDR, dir.path());
+    let host = ScriptedHost::new(dir.path()).with_keeping_daemon("0.0.1", 1);
+    Arc::make_mut(&mut state.service).hub = Arc::new(Hub::new(
+        Box::new(host.clone()),
+        dir.path().join("hub"),
+        None,
+    ));
+    let native = Native::start(&state, &dir.path().join("client.sock")).await;
+    let connector = Connector::default();
+    let mut stale = native.info.clone();
+    stale.instance = Some("0".repeat(32));
+    let denied = connector
+        .local_host(
+            &stale,
+            splitty_remote::ssh::SshTarget::parse("vm1").unwrap(),
+            false,
+        )
+        .await;
+    assert_eq!(
+        denied.err().unwrap().kind(),
+        std::io::ErrorKind::ConnectionAborted
+    );
+    assert!(
+        host.asked().is_empty(),
+        "stale discovery cannot start host preparation"
+    );
+    for embedded in [false, true] {
+        let target = if embedded { "vm2" } else { "vm1" };
+        let target = splitty_remote::ssh::SshTarget::parse(target).unwrap();
+        let expected = wire::Purpose::Host {
+            target: target.as_str().into(),
+        };
+        let mut client = if embedded {
+            connector.host(state.service.clone(), target, false).await
+        } else {
+            connector.local_host(&native.info, target, true).await
+        }
+        .unwrap();
+        assert_eq!(client.ready.purpose, expected);
+        // remote-screens, Progress on a native host stream: progress went out
+        // as transport reports; the first application message is ready.
+        let message = tokio::time::timeout(WAIT, client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let body: Value = message.frame.decode().unwrap();
+        assert_eq!(body["type"], "remote.ready");
+        drop(message);
+        let welcome = tokio::time::timeout(WAIT, client.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            welcome.frame.decode::<Value>().unwrap()["type"],
+            "mux.welcome"
+        );
+        drop(welcome);
+        client
+            .sender()
+            .json(
+                Kind::Request,
+                &wire::Request {
+                    id: 1,
+                    operation: "host.list".into(),
+                    args: serde_json::Map::new(),
+                },
+            )
+            .unwrap();
+        assert!(
+            tokio::time::timeout(WAIT, client.recv())
+                .await
+                .unwrap()
+                .is_none(),
+            "host streams cannot gain local hub authority"
+        );
+        client.shutdown().await;
+    }
+    assert_eq!(
+        host.asked()
+            .iter()
+            .filter(|call| call.starts_with("prepare "))
+            .count(),
+        2
+    );
+    assert_eq!(
+        host.asked()
+            .iter()
+            .filter(|call| call.as_str() == "stop")
+            .count(),
+        1,
+        "only the explicitly requested keeper-safe update replaces a daemon"
+    );
+    native.stop().await;
+}
+
+#[tokio::test]
+async fn transport_worker_exhaustion_is_busy_in_both_browser_and_native_reply_shapes() {
+    use crate::hub::{ForwardError, HubError};
+    use splitty_remote::{ssh::SshError, tunnel::PortTunnelError};
+    for error in [
+        HubError::Capacity("process ceiling".into()),
+        HubError::NativeBridge(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
+        HubError::Forward(PortTunnelError::Ssh(SshError::Spawn(std::io::Error::from(
+            std::io::ErrorKind::WouldBlock,
+        )))),
+    ] {
+        let reply = crate::service::operations::forward_failed("vm", ForwardError::Failed(error));
+        assert_eq!(reply.status, 503);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&reply.body).unwrap()["code"],
+            "busy"
+        );
+        let response = reply.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap()
+            )
+            .unwrap()["code"],
+            "busy"
+        );
+    }
+}
+
+pub(super) struct Native {
+    pub(super) info: DaemonInfo,
+    stop: tokio::sync::oneshot::Sender<()>,
+    task: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+impl Native {
+    pub(super) async fn start(state: &TestState, path: &Path) -> Self {
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let info = discovery(state, path);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let service = state.service.clone();
+        let task = tokio::spawn(crate::native::listen(listener, service, async {
+            let _ = stopped.await;
+        }));
+        Self { info, stop, task }
+    }
+    pub(super) async fn stop(self) {
+        self.stop.send(()).unwrap();
+        self.task.await.unwrap().unwrap();
+    }
+}
+
+pub(super) fn discovery(state: &TestState, path: &Path) -> DaemonInfo {
+    DaemonInfo {
+        pid: std::process::id(),
+        format: Some(2),
+        port: None,
+        client_socket: Some(path.to_string_lossy().into()),
+        instance: Some(state.instance.clone()),
+        transport_version: Some(1),
+        socket: String::new(),
+        started_at: "1".into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        protocol: 1,
+        keeps_sessions: true,
+    }
 }

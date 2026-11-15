@@ -42,7 +42,6 @@ async fn managed_jobs_routes_enforce_transport_scope_and_payload_bounds() {
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let tcp = browser_router(&state);
     let owner = super::super::build_control_router(state.service.clone());
     let (status, grant) = call(
         &owner,
@@ -77,27 +76,6 @@ async fn managed_jobs_routes_enforce_transport_scope_and_payload_bounds() {
             "{path}"
         );
     }
-    assert_eq!(
-        call(
-            &tcp,
-            "POST",
-            "/api/agents",
-            Some(&json!({"name":"forbidden"}))
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
-    );
-    let request = Request::get("/api/jobs")
-        .header("host", ADDR)
-        .body(Body::empty())
-        .expect("anonymous");
-    assert_eq!(exchange(&tcp, request).await.0, StatusCode::UNAUTHORIZED);
-    let mut request = api("GET", "/api/jobs", None);
-    request
-        .headers_mut()
-        .insert("origin", "https://example.invalid".parse().expect("header"));
-    assert_eq!(exchange(&tcp, request).await.0, StatusCode::FORBIDDEN);
     let mut bad = launch(dir.path(), "exit 0");
     bad["owner"] = json!("forged");
     assert_eq!(
@@ -772,13 +750,10 @@ async fn disconnected_router_reads_release_quota_without_stopping_the_job() {
 
 #[tokio::test]
 async fn websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
-    run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids(false).await;
-    run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids(true).await;
+    run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids().await;
 }
 
-async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids(
-    native: bool,
-) {
+async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
     if !pty_available() {
         return;
     }
@@ -786,12 +761,11 @@ async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allo
     let host = ScriptedHost::new(dir.path());
     let served = Served::start_with(hub(&host, dir.path()), |addr| {
         let mut state = job_state(dir.path());
-        state.allowed_origins = Arc::new(allowed_origins(addr));
         state.listen_addr = addr.into();
         state
     })
     .await;
-    let mut socket = served.open_local_for(native).await;
+    let mut socket = served.open_local().await;
     let welcome = json_of(next(&mut socket).await);
     assert!(welcome["capabilities"]
         .as_array()

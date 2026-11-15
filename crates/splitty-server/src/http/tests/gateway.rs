@@ -1,57 +1,22 @@
 //! Adapter integration with real Unix sockets; no SSH host or daemon process
 //! is needed to verify per-request identity, credential isolation and epochs.
+use super::conformance::{discovery, native, Native};
 use super::*;
-use crate::http::{gateway, BrowserState};
-use axum::response::IntoResponse;
+use crate::http::{gateway, session::SessionStore, BrowserState};
+use crate::service::catalog::Operation;
+use futures::{SinkExt, StreamExt};
 use serde_json::Value;
 use splitty_core::daemon::DaemonInfo;
+use splitty_core::{
+    ids::{PaneId, ScreenId},
+    mux::Op,
+};
 use std::os::unix::fs::PermissionsExt;
+use tokio::net::TcpStream;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 static WS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-struct Native {
-    info: DaemonInfo,
-    stop: tokio::sync::oneshot::Sender<()>,
-    task: tokio::task::JoinHandle<std::io::Result<()>>,
-}
-impl Native {
-    async fn start(state: &TestState, path: &Path) -> Self {
-        std::fs::set_permissions(
-            path.parent().unwrap(),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        let listener = tokio::net::UnixListener::bind(path).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let info = discovery(state, path);
-        let (stop, stopped) = tokio::sync::oneshot::channel();
-        let service = state.service.clone();
-        let task = tokio::spawn(crate::native::listen(listener, service, async {
-            let _ = stopped.await;
-        }));
-        Self { info, stop, task }
-    }
-    async fn stop(self) {
-        self.stop.send(()).unwrap();
-        self.task.await.unwrap().unwrap();
-    }
-}
-
-fn discovery(state: &TestState, path: &Path) -> DaemonInfo {
-    DaemonInfo {
-        pid: std::process::id(),
-        format: Some(2),
-        port: None,
-        client_socket: Some(path.to_string_lossy().into()),
-        instance: Some(state.instance.clone()),
-        transport_version: Some(1),
-        socket: String::new(),
-        started_at: "1".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        protocol: 1,
-        keeps_sessions: true,
-    }
-}
 
 fn browser(address: &str) -> BrowserState {
     BrowserState {
@@ -825,132 +790,6 @@ async fn an_embedded_gateway_shares_the_supplied_service_and_releases_clients() 
 }
 
 #[tokio::test]
-async fn native_host_open_pins_the_local_hub_before_any_ssh_and_keeps_remote_authority() {
-    use crate::{
-        hub::{testing::ScriptedHost, Hub},
-        native::client::Connector,
-    };
-    use splitty_transport::wire::{self, Kind};
-    let dir = tempfile::tempdir().unwrap();
-    let mut state = state(ADDR, dir.path());
-    let host = ScriptedHost::new(dir.path()).with_keeping_daemon("0.0.1", 1);
-    Arc::make_mut(&mut state.service).hub = Arc::new(Hub::new(
-        Box::new(host.clone()),
-        dir.path().join("hub"),
-        None,
-    ));
-    let native = Native::start(&state, &dir.path().join("client.sock")).await;
-    let connector = Connector::default();
-    let mut stale = native.info.clone();
-    stale.instance = Some("0".repeat(32));
-    let denied = connector
-        .local_host(
-            &stale,
-            splitty_remote::ssh::SshTarget::parse("vm1").unwrap(),
-            false,
-        )
-        .await;
-    assert_eq!(
-        denied.err().unwrap().kind(),
-        std::io::ErrorKind::ConnectionAborted
-    );
-    assert!(
-        host.asked().is_empty(),
-        "stale discovery cannot start host preparation"
-    );
-    for embedded in [false, true] {
-        let target = if embedded { "vm2" } else { "vm1" };
-        let target = splitty_remote::ssh::SshTarget::parse(target).unwrap();
-        let expected = wire::Purpose::Host {
-            target: target.as_str().into(),
-        };
-        let mut client = if embedded {
-            connector.host(state.service.clone(), target, false).await
-        } else {
-            connector.local_host(&native.info, target, true).await
-        }
-        .unwrap();
-        assert_eq!(client.ready.purpose, expected);
-        // remote-screens, Progress on a native host stream: progress went out
-        // as transport reports; the first application message is ready.
-        let message = tokio::time::timeout(WAIT, client.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let body: Value = message.frame.decode().unwrap();
-        assert_eq!(body["type"], "remote.ready");
-        drop(message);
-        let welcome = tokio::time::timeout(WAIT, client.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            welcome.frame.decode::<Value>().unwrap()["type"],
-            "mux.welcome"
-        );
-        drop(welcome);
-        client
-            .sender()
-            .json(
-                Kind::Request,
-                &wire::Request {
-                    id: 1,
-                    operation: "host.list".into(),
-                    args: serde_json::Map::new(),
-                },
-            )
-            .unwrap();
-        assert!(
-            tokio::time::timeout(WAIT, client.recv())
-                .await
-                .unwrap()
-                .is_none(),
-            "host streams cannot gain local hub authority"
-        );
-        client.shutdown().await;
-    }
-    assert_eq!(
-        host.asked()
-            .iter()
-            .filter(|call| call.starts_with("prepare "))
-            .count(),
-        2
-    );
-    assert_eq!(
-        host.asked()
-            .iter()
-            .filter(|call| call.as_str() == "stop")
-            .count(),
-        1,
-        "only the explicitly requested keeper-safe update replaces a daemon"
-    );
-    native.stop().await;
-}
-
-#[tokio::test]
-async fn transport_worker_exhaustion_is_busy_in_both_browser_and_native_reply_shapes() {
-    use crate::hub::{ForwardError, HubError};
-    use splitty_remote::{ssh::SshError, tunnel::PortTunnelError};
-    for error in [
-        HubError::Capacity("process ceiling".into()),
-        HubError::NativeBridge(std::io::Error::from(std::io::ErrorKind::WouldBlock)),
-        HubError::Forward(PortTunnelError::Ssh(SshError::Spawn(std::io::Error::from(
-            std::io::ErrorKind::WouldBlock,
-        )))),
-    ] {
-        let reply = crate::service::operations::forward_failed("vm", ForwardError::Failed(error));
-        assert_eq!(reply.status, 503);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&reply.body).unwrap()["code"],
-            "busy"
-        );
-        let response = reply.into_response();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(value(response).await["code"], "busy");
-    }
-}
-
-#[tokio::test]
 async fn gateway_host_upgrade_reports_progress_before_ready_and_admits_early_input_once() {
     use crate::hub::{
         testing::{ForwardGate, ScriptedHost},
@@ -1630,4 +1469,1003 @@ async fn api_backend_replacement_never_replays_an_admitted_mutation() {
     backend.close();
     tokio::time::timeout(WAIT, server).await.unwrap().unwrap();
     replacement.stop().await;
+}
+
+/// access-control, Remote Screen Hub Access (Missing ticket): the checks of
+/// `/ws` come first, and nothing reaches the host before they pass.
+#[tokio::test]
+async fn the_hub_refuses_an_upgrade_before_it_reaches_a_host() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+
+    for query in [
+        "?target=vm1",
+        "?target=vm1&ticket=",
+        "?target=vm1&ticket=guess",
+    ] {
+        assert_eq!(
+            status(&router, upgrade(query, Some(ORIGIN), None)).await,
+            StatusCode::UNAUTHORIZED,
+            "{query}"
+        );
+    }
+
+    // The guards come before the ticket, which they leave unspent.
+    let ticket = state.sessions.issue_ticket();
+    let query = format!("?target=vm1&ticket={ticket}");
+    for (origin, fetch_site) in [
+        (Some("http://127.0.0.1:1"), None),
+        (Some("http://localhost:1420"), None),
+        (Some("http://127.0.0.1:1420"), None),
+        (None, None),
+        (Some(ORIGIN), Some("same-site")),
+        (Some(ORIGIN), Some("none")),
+    ] {
+        assert_eq!(
+            status(&router, upgrade(&query, origin, fetch_site)).await,
+            StatusCode::FORBIDDEN,
+            "{origin:?} {fetch_site:?}"
+        );
+    }
+    assert!(
+        state.sessions.redeem_ticket(&ticket),
+        "the ticket is unspent"
+    );
+    assert_eq!(host.asked(), Vec::<String>::new(), "no ssh");
+}
+
+/// remote-screens, Remembered Remote Screens: the authentication of the other
+/// `/api` routes, and the origin and Fetch Metadata guards before it.
+#[tokio::test]
+async fn remembered_screens_need_the_api_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let list = json!({"version": 1, "screens": [{"target": "vm1", "screenId": "s1"}]});
+
+    for method in ["GET", "PUT"] {
+        let mut request = api(method, SCREENS, Some(&list));
+        request.headers_mut().remove("authorization");
+        assert_eq!(
+            status(&router, request).await,
+            StatusCode::UNAUTHORIZED,
+            "{method}"
+        );
+        for (name, value) in [
+            ("origin", "http://127.0.0.1:1"),
+            ("sec-fetch-site", "same-site"),
+        ] {
+            let mut request = api(method, SCREENS, Some(&list));
+            request
+                .headers_mut()
+                .insert(name, value.parse().expect("value"));
+            assert_eq!(
+                status(&router, request).await,
+                StatusCode::FORBIDDEN,
+                "{method} {name}"
+            );
+        }
+    }
+    assert!(!dir.path().join("config").exists(), "nothing written");
+}
+
+/// The catalog uses the API's token/cookie authentication, origin and Fetch
+/// Metadata checks. Failed requests do not change the file or call SSH.
+#[tokio::test]
+async fn remote_catalog_requires_api_authentication_and_origin_guards() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let session = state.sessions.create_session();
+    let app = router(&state, hub(&host, dir.path()));
+    let body = json!({"target": "vm1", "screens": []});
+    for method in ["GET", "PUT"] {
+        for authorization in [None, Some("Bearer incorrect")] {
+            let mut request = api(method, CATALOG, Some(&body));
+            request.headers_mut().remove("authorization");
+            if let Some(value) = authorization {
+                request
+                    .headers_mut()
+                    .insert("authorization", value.parse().expect("header"));
+            }
+            assert_eq!(
+                status(&app, request).await,
+                StatusCode::UNAUTHORIZED,
+                "{method}"
+            );
+        }
+        for (name, value) in [
+            ("origin", "http://127.0.0.1:1"),
+            ("sec-fetch-site", "same-site"),
+            ("sec-fetch-site", "cross-site"),
+        ] {
+            for cookie in [false, true] {
+                let mut request = api(method, CATALOG, Some(&body));
+                if cookie {
+                    request.headers_mut().remove("authorization");
+                    request.headers_mut().insert(
+                        "cookie",
+                        format!("{}={session}", state.sessions.cookie_name())
+                            .parse()
+                            .expect("cookie"),
+                    );
+                }
+                request
+                    .headers_mut()
+                    .insert(name, value.parse().expect("header"));
+                assert_eq!(
+                    status(&app, request).await,
+                    StatusCode::FORBIDDEN,
+                    "{method} {name}, cookie={cookie}"
+                );
+            }
+        }
+    }
+    assert!(!dir.path().join("config/remote-catalog.json").exists());
+    // A browser's same-origin authenticated request succeeds too.
+    let mut request = api("PUT", CATALOG, Some(&body));
+    request.headers_mut().remove("authorization");
+    request.headers_mut().insert(
+        "cookie",
+        format!("{}={session}", state.sessions.cookie_name())
+            .parse()
+            .expect("cookie"),
+    );
+    request
+        .headers_mut()
+        .insert("origin", ORIGIN.parse().expect("origin"));
+    request
+        .headers_mut()
+        .insert("sec-fetch-site", "same-origin".parse().expect("header"));
+    assert_eq!(status(&app, request).await, StatusCode::OK);
+    assert!(host.asked().is_empty());
+}
+
+/// remote-screens, Port Forwards Through The Hub: the authentication of the
+/// other `/api` routes, with the origin and Fetch Metadata guards first.
+#[tokio::test]
+async fn forwards_need_the_api_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let router = router(&state(ADDR, dir.path()), hub(&host, dir.path()));
+    let body = forward("vm1", 3000);
+    for method in ["GET", "POST", "DELETE"] {
+        let mut request = api(method, FORWARDS, Some(&body));
+        request.headers_mut().remove("authorization");
+        assert_eq!(
+            status(&router, request).await,
+            StatusCode::UNAUTHORIZED,
+            "{method}"
+        );
+        for (name, value) in [
+            ("origin", "http://127.0.0.1:1"),
+            ("sec-fetch-site", "same-site"),
+        ] {
+            let mut request = api(method, FORWARDS, Some(&body));
+            request
+                .headers_mut()
+                .insert(name, value.parse().expect("value"));
+            assert_eq!(
+                status(&router, request).await,
+                StatusCode::FORBIDDEN,
+                "{method} {name}"
+            );
+        }
+    }
+    assert_eq!(host.asked(), Vec::<String>::new(), "no ssh");
+}
+
+#[tokio::test]
+async fn forward_preferences_return_json_for_malformed_json() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let router = router(&state(ADDR, dir.path()), hub(&host, dir.path()));
+    for method in ["PUT", "DELETE"] {
+        let mut request = api(method, PREFERENCES, Some(&json!({})));
+        *request.body_mut() = Body::from("{");
+        let (code, body) = exchange(&router, request).await;
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["error"].is_string());
+        assert_eq!(body["uncertain"], false);
+    }
+    assert!(host.asked().is_empty());
+    assert!(!dir.path().join("config").exists());
+}
+
+/// An invalid target is answered on the socket, and no host is asked.
+#[tokio::test]
+async fn an_invalid_target_is_refused_without_reaching_a_host() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    for target in ["-oProxyCommand=touch /tmp/pwned", "", "vm1 vm2"] {
+        let mut socket = served.open(target).await;
+        let (progress, error) = until_outcome(&mut socket).await;
+        assert!(progress.is_empty(), "{progress:?}");
+        assert_eq!(error["type"], "remote.error", "{error}");
+        assert_eq!(error["code"], "invalid_target", "{error}");
+        assert!(error["message"].is_string(), "{error}");
+        assert_eq!(close_code(&mut socket).await, 1000);
+    }
+    assert_eq!(host.asked(), Vec::<String>::new(), "no ssh");
+}
+
+/// The browser gateway `serve` builds, with the hub given: every `/api`
+/// route becomes a native request to the in-process service of `state`.
+fn router(state: &TestState, hub: Hub) -> axum::Router {
+    let mut state = state.clone();
+    Arc::make_mut(&mut state.service).hub = Arc::new(hub);
+    browser_router(&state)
+}
+
+/// The browser gateway `serve` builds over the service of `state`, with the
+/// browser credentials of `state`.
+fn browser_router(state: &TestState) -> axum::Router {
+    crate::http::gateway::router(
+        crate::http::gateway::Backend::embedded(state.service.clone()),
+        axum::extract::FromRef::from_ref(state),
+    )
+}
+
+/// A WebSocket handshake for `/ws/remote` as a browser sends it.
+fn upgrade(query: &str, origin: Option<&str>, fetch_site: Option<&str>) -> Request<Body> {
+    let mut request = Request::get(format!("/ws/remote{query}"))
+        .header("host", ADDR)
+        .header("upgrade", "websocket")
+        .header("connection", "Upgrade")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("sec-websocket-version", "13");
+    if let Some(origin) = origin {
+        request = request.header("origin", origin);
+    }
+    if let Some(fetch_site) = fetch_site {
+        request = request.header("sec-fetch-site", fetch_site);
+    }
+    request.body(Body::empty()).expect("request")
+}
+
+/// `request` as a client of the gateway on `listen_addr` sends it.
+fn at(listen_addr: &str, mut request: Request<Body>) -> Request<Body> {
+    request
+        .headers_mut()
+        .insert("host", listen_addr.parse().expect("host"));
+    request
+}
+
+/// An `/api` request as the CLI sends it: the process token, no `Origin`.
+fn api(method: &str, path: &str, body: Option<&serde_json::Value>) -> Request<Body> {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", ADDR)
+        .header("authorization", "Bearer process-token");
+    match body {
+        Some(body) => request
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string())),
+        None => request.body(Body::empty()),
+    }
+    .expect("request")
+}
+
+#[tokio::test]
+async fn a_host_write_requires_api_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let mut request = api(
+        "PUT",
+        SCREENS_HOST,
+        Some(&json!({"target": "vm2", "screens": []})),
+    );
+    request.headers_mut().remove("authorization");
+    assert_eq!(status(&router, request).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn remote_host_metadata_requires_api_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let app = router(&state, hub(&host, dir.path()));
+    let body = json!({"target":"vm1","alias":"Home"});
+    for (method, path) in [
+        ("GET", HOST_PREFERENCES),
+        ("PUT", HOST_PREFERENCES),
+        ("DELETE", "/api/remote/hosts"),
+    ] {
+        let mut request = api(method, path, Some(&body));
+        request.headers_mut().remove("authorization");
+        assert_eq!(status(&app, request).await, StatusCode::UNAUTHORIZED);
+        for (name, value) in [
+            ("origin", "http://127.0.0.1:1"),
+            ("sec-fetch-site", "cross-site"),
+        ] {
+            let mut request = api(method, path, Some(&body));
+            request
+                .headers_mut()
+                .insert(name, value.parse().expect("header"));
+            assert_eq!(status(&app, request).await, StatusCode::FORBIDDEN);
+        }
+    }
+    assert!(!dir.path().join("config").exists());
+    assert!(host.asked().is_empty());
+}
+
+#[tokio::test]
+async fn forward_preference_guards_have_no_side_effects() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let key = forward("vm1", 3000);
+    for method in ["GET", "PUT", "DELETE"] {
+        let mut request = api(method, PREFERENCES, Some(&key));
+        request.headers_mut().remove("authorization");
+        assert_eq!(status(&router, request).await, StatusCode::UNAUTHORIZED);
+        for (name, value) in [
+            ("origin", "http://127.0.0.1:3000"),
+            ("sec-fetch-site", "cross-site"),
+            ("host", "hostile.example"),
+        ] {
+            let mut request = api(method, PREFERENCES, Some(&key));
+            request.headers_mut().remove("authorization");
+            request
+                .headers_mut()
+                .insert(name, value.parse().expect("header"));
+            assert_eq!(
+                status(&router, request).await,
+                StatusCode::FORBIDDEN,
+                "guards precede authentication"
+            );
+        }
+    }
+    assert!(host.asked().is_empty());
+    assert!(!dir.path().join("config/remote-forwards.json").exists());
+}
+
+#[tokio::test]
+async fn known_hosts_require_api_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let mut request = api("GET", "/api/remote/hosts", None);
+    request.headers_mut().remove("authorization");
+    assert_eq!(status(&router, request).await, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn authentication_leaves_saved_forwards_passive() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let rule = json!({"target":"vm1","port":5173,"local":15173,"enabled":false});
+    assert_eq!(
+        exchange(&router, api("PUT", PREFERENCES, Some(&rule)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let expected = preferences(&router).await;
+    let login = json!({"token":"process-token"});
+    assert_eq!(
+        status(&router, api("POST", "/api/session", Some(&login))).await,
+        StatusCode::OK
+    );
+    assert_eq!(preferences(&router).await, expected);
+    assert!(host.asked().is_empty());
+}
+
+/// The router served on a loopback port of its own.
+struct Served {
+    port: u16,
+    state: TestState,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Served {
+    async fn start(hub: Hub, dir: &Path) -> Self {
+        Self::start_with(hub, |addr| state(addr, dir)).await
+    }
+
+    /// Serve the state `state_of` builds for the address bound.
+    async fn start_with(hub: Hub, state_of: impl FnOnce(&str) -> TestState) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        Self::start_on(hub, state_of, listener).await
+    }
+
+    async fn start_on(
+        hub: Hub,
+        state_of: impl FnOnce(&str) -> TestState,
+        listener: tokio::net::TcpListener,
+    ) -> Self {
+        let addr = listener.local_addr().expect("address");
+        let mut state = state_of(&addr.to_string());
+        let hub = Arc::new(hub);
+        Arc::make_mut(&mut state.service).hub = hub.clone();
+        let mut browser = BrowserState::new(addr, state.token.clone()).expect("browser origin");
+        browser.sessions = state.sessions.clone();
+        let app = crate::http::gateway::router(
+            crate::http::gateway::Backend::embedded(state.service.clone()),
+            browser,
+        );
+        let task = tokio::spawn(async move {
+            let _ = crate::http::server::serve(listener, app, std::future::pending()).await;
+        });
+        Self {
+            port: addr.port(),
+            state,
+            task,
+        }
+    }
+
+    /// Open `/ws/remote` for `target` as the UI does: a fresh ticket, its own
+    /// origin.
+    async fn open(&self, target: &str) -> Socket {
+        self.open_with(target, "").await
+    }
+
+    /// [`Served::open`] with more of the query, such as `&update=1`.
+    async fn open_with(&self, target: &str, query: &str) -> Socket {
+        self.connect(&format!("/ws/remote?target={}{query}", encode(target)))
+            .await
+    }
+
+    /// Open the WebSocket at `path_and_query` as the UI does: a fresh ticket,
+    /// its own origin.
+    async fn connect(&self, path_and_query: &str) -> Socket {
+        let ticket = self.state.sessions.issue_ticket();
+        let separator = if path_and_query.ends_with('?') {
+            ""
+        } else {
+            "&"
+        };
+        let mut request = format!(
+            "ws://127.0.0.1:{}{path_and_query}{separator}ticket={ticket}",
+            self.port,
+        )
+        .into_client_request()
+        .expect("request");
+        let origin = format!("http://127.0.0.1:{}", self.port)
+            .parse()
+            .expect("origin");
+        request.headers_mut().insert("origin", origin);
+        let (socket, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .expect("upgrade");
+        socket
+    }
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+#[tokio::test]
+async fn a_native_reverse_request_cannot_share_a_fresh_browser_gateway() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    let browser = browser_router(&served.state);
+    // Building another gateway must not replace the first port's exclusion.
+    let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("second gateway listener");
+    let other_address = other_listener.local_addr().expect("address");
+    let _other_gateway = browser_router(&TestState {
+        listen_addr: other_address.to_string(),
+        ..served.state.clone()
+    });
+    let body = json!({"target":"vm1","port":8080,"local":served.port});
+    for (operation, method, path) in [
+        (
+            Operation::ReverseOpen,
+            "POST",
+            "/api/remote/reverse-forwards",
+        ),
+        (
+            Operation::ReversePreferencesSave,
+            "PUT",
+            "/api/remote/reverse-forward-preferences",
+        ),
+    ] {
+        // Native first, before any browser reverse/remote handler is invoked.
+        let result = native(&served.state, operation, json!({"body":body})).await;
+        assert_eq!(result.0, StatusCode::CONFLICT, "{result:?}");
+        assert_eq!(result.1["code"], "local_port_reserved");
+        assert_eq!(
+            result,
+            exchange(
+                &browser,
+                at(&served.state.listen_addr, api(method, path, Some(&body)))
+            )
+            .await
+        );
+    }
+    assert!(
+        host.asked().is_empty(),
+        "reserved destinations must never spawn SSH"
+    );
+    let other = native(
+        &served.state,
+        Operation::ReverseOpen,
+        json!({"body":{"target":"vm1","port":8080,"local":other_address.port()}}),
+    )
+    .await;
+    assert_eq!(other.0, StatusCode::CONFLICT);
+    assert_eq!(other.1["code"], "local_port_reserved");
+    assert!(!dir
+        .path()
+        .join("config/remote-reverse-forwards.json")
+        .exists());
+}
+
+#[tokio::test]
+async fn daemon_shutdown_is_absent_from_the_gateway() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = state(ADDR, dir.path());
+    Arc::make_mut(&mut state.service).server_mode = "daemon".into();
+    let request = |instance: &str| {
+        api(
+            "POST",
+            "/api/daemon/stop",
+            Some(&json!({"instance":instance})),
+        )
+    };
+    let browser = browser_router(&state);
+    assert_eq!(
+        browser
+            .oneshot(request(&state.instance))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1), state.owner_shutdown.notified())
+            .await
+            .is_err()
+    );
+}
+
+/// control-api, Two Control Transports (Malformed request on both
+/// transports), and access-control, JSON Request Bodies: the control socket
+/// and the browser gateway answer a malformed request alike, and neither
+/// reads a body without a JSON content type.
+#[tokio::test]
+async fn malformed_requests_are_answered_alike_on_both_transports() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    state
+        .mux_store
+        .dispatch(Op::CreateScreen {
+            name: None,
+            screen_id: Some(ScreenId::from("s1")),
+            new_pane_id: Some(PaneId::from("p1")),
+            shell_profile_id: None,
+        })
+        .expect("screen");
+    let session = state
+        .mux_store
+        .session_id_for_pane(&PaneId::from("p1"))
+        .expect("session");
+    let browser = browser_router(&state);
+    let control = crate::http::build_control_router(state.service.clone());
+    let request = |method: &str, path: &str, content_type: Option<&str>, body: &str| {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", ADDR)
+            .header("authorization", "Bearer process-token");
+        if let Some(content_type) = content_type {
+            request = request.header("content-type", content_type);
+        }
+        request.body(Body::from(body.to_owned())).expect("request")
+    };
+    let workspace = || serde_json::to_value(state.mux_store.get_workspace_state()).expect("state");
+    let before = workspace();
+    let send = format!("/api/session/{session}/send");
+    let json = Some("application/json");
+    for (method, path, content_type, body, expected) in [
+        (
+            "POST",
+            "/api/mux/op",
+            json,
+            r#"{"op":{"type":"close_screen"}}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "POST",
+            "/api/mux/op",
+            json,
+            "{",
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            "GET",
+            "/api/mux/neighbor?undefined=1",
+            None,
+            "",
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "POST",
+            "/api/mux/op",
+            Some("text/plain"),
+            r#"{"screenId":"s1","op":{"type":"close_screen","screenId":"s1"}}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "POST",
+            send.as_str(),
+            None,
+            r#"{"data":"printf leaked\n"}"#,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        ),
+        (
+            "POST",
+            "/api/viewer/comments/reply",
+            Some("application/json; charset=utf-8"),
+            r#"{"screenId":"s1"}"#,
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let over_gateway = exchange(&browser, request(method, path, content_type, body)).await;
+        let over_socket = exchange(&control, request(method, path, content_type, body)).await;
+        assert_eq!(
+            over_gateway.0, expected,
+            "{method} {path}: {over_gateway:?}"
+        );
+        assert!(over_gateway.1["error"].is_string(), "{over_gateway:?}");
+        assert_eq!(over_socket, over_gateway, "{method} {path}");
+    }
+    assert_eq!(workspace(), before, "no request changed the workspace");
+}
+
+#[tokio::test]
+async fn managed_jobs_require_gateway_authentication_and_omit_grant_management() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let tcp = router;
+    assert_eq!(
+        call(
+            &tcp,
+            "POST",
+            "/api/agents",
+            Some(&json!({"name":"forbidden"}))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    let request = Request::get("/api/jobs")
+        .header("host", ADDR)
+        .body(Body::empty())
+        .expect("anonymous");
+    assert_eq!(exchange(&tcp, request).await.0, StatusCode::UNAUTHORIZED);
+    let mut request = api("GET", "/api/jobs", None);
+    request
+        .headers_mut()
+        .insert("origin", "https://example.invalid".parse().expect("header"));
+    assert_eq!(exchange(&tcp, request).await.0, StatusCode::FORBIDDEN);
+}
+
+type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+async fn next(socket: &mut Socket) -> Message {
+    tokio::time::timeout(WAIT, socket.next())
+        .await
+        .expect("a message in time")
+        .expect("the socket is open")
+        .expect("a message")
+}
+
+/// The hub's messages up to and including the first that is not progress.
+async fn until_outcome(socket: &mut Socket) -> (Vec<serde_json::Value>, serde_json::Value) {
+    let mut progress = Vec::new();
+    loop {
+        let message = json_of(next(socket).await);
+        if message["type"] != "remote.progress" {
+            return (progress, message);
+        }
+        progress.push(message);
+    }
+}
+
+/// The close code the hub ended the socket with.
+async fn close_code(socket: &mut Socket) -> u16 {
+    match next(socket).await {
+        Message::Close(Some(frame)) => u16::from(frame.code),
+        other => panic!("not a close frame: {other:?}"),
+    }
+}
+
+/// remote-screens, Remote Screen Hub Endpoint (Connect a host without
+/// Splitty, Client closes the socket): progress, `remote.ready`, then the
+/// daemon's messages verbatim both ways, and a closed socket ends the bridge.
+#[tokio::test]
+async fn gateway_a_host_is_installed_started_and_relayed_both_ways() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    let mut socket = served.open("user@vm1").await;
+
+    // Sent before `remote.ready`: relayed once the bridge is up.
+    let early = r#"{"type":"mux.resync","screenId":"s1"}"#;
+    socket.send(Message::text(early)).await.expect("send");
+
+    let (progress, ready) = until_outcome(&mut socket).await;
+    assert_eq!(
+        steps(&progress),
+        ["install", "daemon", "started", "bridge"],
+        "{progress:?}"
+    );
+    let install = progress[0]["message"].as_str().expect("message");
+    assert!(install.contains("user@vm1 (x86_64)"), "{install}");
+    assert_eq!(
+        ready,
+        json!({
+            "type": "remote.ready",
+            "target": "user@vm1",
+            "update": {"available": false, "keepsSessions": true},
+            "daemon": {"version": VERSION, "protocol": PROTOCOL_VERSION, "keepsSessions": true, "started": true},
+            "screens": [{"id": "s1", "name": "api", "panes": 3}],
+        })
+    );
+    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
+    assert_eq!(next(&mut socket).await, Message::text(early));
+
+    let input = r#"{"type":"input","sessionId":"p1","data":"bytes"}"#;
+    socket.send(Message::text(input)).await.expect("send");
+    assert_eq!(next(&mut socket).await, Message::text(input));
+    assert_eq!(next(&mut socket).await, Message::binary(vec![0, 1, 2, 255]));
+    let text = r#"{"type":"mux.op","screenId":"s1","op":{"type":"close_pane"}}"#;
+    socket.send(Message::text(text)).await.expect("send");
+    assert_eq!(next(&mut socket).await, Message::text(text));
+
+    let bridge = host.bridge_pid().expect("a bridge");
+    socket.close(None).await.expect("close");
+    assert!(gone(bridge).await, "the bridge ends with the socket");
+}
+
+/// remote-screens, Remote Screen Hub Endpoint (Host connection lost).
+#[tokio::test]
+async fn gateway_a_host_side_that_ends_closes_the_socket_with_4001() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    let mut socket = served.open("vm1").await;
+    let (_, ready) = until_outcome(&mut socket).await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
+
+    let bridge = host.bridge_pid().expect("a bridge");
+    kill(
+        Pid::from_raw(i32::try_from(bridge).expect("pid")),
+        Signal::SIGKILL,
+    )
+    .expect("kill the bridge");
+    assert_eq!(close_code(&mut socket).await, HOST_LOST);
+}
+
+/// remote-screens, Remote Screen Protocol Check (Newer host).
+#[tokio::test]
+async fn gateway_an_incompatible_daemon_is_reported_and_no_bridge_is_opened() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path())
+        .preparing(Prepare::Installed)
+        .with_protocol(PROTOCOL_VERSION + 1);
+    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    let mut socket = served.open("vm1").await;
+    let (progress, error) = until_outcome(&mut socket).await;
+    assert_eq!(steps(&progress), ["daemon", "started"], "{progress:?}");
+    assert_eq!(error["type"], "remote.error", "{error}");
+    assert_eq!(error["code"], "incompatible", "{error}");
+    assert_eq!(error["version"], VERSION, "{error}");
+    assert_eq!(error["protocol"], PROTOCOL_VERSION + 1, "{error}");
+    assert_eq!(close_code(&mut socket).await, 1000);
+    assert!(
+        !host.asked().iter().any(|asked| asked == "bridge"),
+        "{:?}",
+        host.asked()
+    );
+    assert!(
+        !dir.path().join("config/recent-hosts.json").exists(),
+        "only a ready host is recorded"
+    );
+}
+
+/// remote-screens, Remote Screen Hub Endpoint (Unknown host key).
+#[tokio::test]
+async fn gateway_a_failed_host_key_check_is_reported_with_its_hint() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host =
+        ScriptedHost::new(dir.path()).preparing(Prepare::SshFails("Host key verification failed."));
+    let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    let mut socket = served.open("vm1").await;
+    let (progress, error) = until_outcome(&mut socket).await;
+    assert!(progress.is_empty(), "{progress:?}");
+    assert_eq!(error["code"], "host_key", "{error}");
+    let hint = error["hint"].as_str().expect("a hint");
+    assert!(hint.contains("Run `ssh vm1` once"), "{hint}");
+    assert_eq!(close_code(&mut socket).await, 1000);
+    assert_eq!(host.asked(), ["prepare vm1"]);
+}
+
+const HOST_LOST: u16 = 4001;
+
+#[derive(Clone)]
+struct TestState {
+    service_state: super::TestState,
+    token: String,
+    sessions: Arc<crate::http::session::SessionStore>,
+    allowed_origins: Arc<Vec<String>>,
+    listen_addr: String,
+}
+
+impl std::ops::Deref for TestState {
+    type Target = super::TestState;
+    fn deref(&self) -> &Self::Target {
+        &self.service_state
+    }
+}
+impl std::ops::DerefMut for TestState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.service_state
+    }
+}
+
+fn state(listen_addr: &str, dir: &Path) -> TestState {
+    TestState {
+        service_state: super::state(listen_addr, dir),
+        token: "process-token".into(),
+        sessions: Arc::new(crate::http::session::SessionStore::isolated()),
+        allowed_origins: Arc::new(allowed_origins(listen_addr)),
+        listen_addr: listen_addr.into(),
+    }
+}
+impl axum::extract::FromRef<TestState> for BrowserState {
+    fn from_ref(state: &TestState) -> Self {
+        Self {
+            token: state.token.clone(),
+            sessions: state.sessions.clone(),
+            allowed_origins: state.allowed_origins.clone(),
+            listen_addr: state.listen_addr.clone(),
+        }
+    }
+}
+
+/// The origins of a gateway on `listen_addr`, as `BrowserState::new` derives
+/// them from the address bound.
+fn allowed_origins(listen_addr: &str) -> Vec<String> {
+    listen_addr
+        .parse::<std::net::SocketAddr>()
+        .map(crate::http::canonical_origins)
+        .unwrap_or_default()
+}
+
+async fn preferences(router: &axum::Router) -> serde_json::Value {
+    let (code, body) = exchange(router, api("GET", PREFERENCES, None)).await;
+    assert_eq!(code, StatusCode::OK);
+    body
+}
+
+#[tokio::test]
+async fn malformed_remembered_screens_leave_the_saved_list_unchanged() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let list = json!({"version":1,"screens":[{"target":"vm1","screenId":"s1"}]});
+    assert_eq!(
+        exchange(&router, api("PUT", SCREENS, Some(&list))).await,
+        (StatusCode::OK, list.clone())
+    );
+    let mut not_json = api("PUT", SCREENS, None);
+    *not_json.body_mut() = Body::from("{");
+    not_json
+        .headers_mut()
+        .insert("content-type", "application/json".parse().expect("value"));
+    // A body that is not JSON never reaches the service (the gateway's 422).
+    assert_eq!(
+        status(&router, not_json).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    assert_eq!(
+        exchange(&router, api("GET", SCREENS, None)).await,
+        (StatusCode::OK, list.clone()),
+        "unchanged"
+    );
+}
+
+const ORIGIN: &str = "http://127.0.0.1:45299";
+
+async fn call(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
+    exchange(router, api(method, path, body)).await
+}
+
+#[tokio::test]
+async fn editor_requests_require_gateway_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let app = browser_router(&state);
+    let request = Request::post("/api/editor/open")
+        .header("host", ADDR)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"sessionId":"s1","path":dir.path().join("file.txt")}).to_string(),
+        ))
+        .expect("request");
+    assert_eq!(status(&app, request).await.as_u16(), 401);
+}
+
+#[tokio::test]
+async fn files_requests_require_gateway_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let app = browser_router(&state);
+    let request = Request::post("/api/file/offer")
+        .header("host", ADDR)
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"sessionId":"s1","path":dir.path().join("file.txt")}).to_string(),
+        ))
+        .expect("request");
+    assert_eq!(status(&app, request).await.as_u16(), 401);
+}
+
+#[tokio::test]
+async fn settings_metadata_requires_gateway_authentication() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let browser = browser_router(&state);
+    let unauthenticated = axum::http::Request::get("/api/home/settings/metadata")
+        .header("host", ADDR)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        browser
+            .clone()
+            .oneshot(unauthenticated)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn without_a_port_scan_the_gateway_answers_ping_after_welcome() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let scan: Scan = Arc::new(|| panic!("no scan on this system"));
+    let served = Served::start_with(hub(&host, dir.path()), |addr| TestState {
+        service_state: super::state_with(addr, dir.path(), Some(PortWatch::with_scan(false, scan))),
+        ..state(addr, dir.path())
+    })
+    .await;
+    let mut socket = served.connect("/ws?").await;
+    assert_eq!(json_of(next(&mut socket).await)["type"], "mux.welcome");
+    socket
+        .send(Message::Ping(vec![7].into()))
+        .await
+        .expect("ping");
+    assert_eq!(next(&mut socket).await, Message::Pong(vec![7].into()));
 }

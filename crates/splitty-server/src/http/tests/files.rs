@@ -88,7 +88,7 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let mut socket = served.open_local_for(native).await;
+    let mut socket = served.open_local().await;
     let welcome = message_type(&mut socket, "mux.welcome").await;
     assert!(welcome["capabilities"]
         .as_array()
@@ -258,14 +258,6 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "no_client");
 
-    let url = format!("http://127.0.0.1:{}/api/file/offer", served.port);
-    let response = reqwest::Client::new()
-        .post(url)
-        .json(&input)
-        .send()
-        .await
-        .expect("HTTP");
-    assert_eq!(response.status().as_u16(), 401);
     let backend = served.state.client_state.dispatcher.backend();
     backend.close(&session).expect("close");
     backend

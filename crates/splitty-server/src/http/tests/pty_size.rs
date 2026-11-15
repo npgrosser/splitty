@@ -1,4 +1,4 @@
-//! terminal-sessions, PTY Size Policy: two real WebSocket connections share a
+//! terminal-sessions, PTY Size Policy: two native session connections share a
 //! real PTY through the router, without a child server.
 use super::*;
 
@@ -53,11 +53,10 @@ fn size_of(event: &serde_json::Value) -> (u64, u64) {
 
 #[tokio::test]
 async fn two_connections_share_the_smaller_active_size() {
-    run_two_connections_share_the_smaller_active_size(false).await;
-    run_two_connections_share_the_smaller_active_size(true).await;
+    run_two_connections_share_the_smaller_active_size().await;
 }
 
-async fn run_two_connections_share_the_smaller_active_size(native: bool) {
+async fn run_two_connections_share_the_smaller_active_size() {
     use splitty_core::pty::testing::pty_available;
     if !pty_available() {
         return;
@@ -66,7 +65,7 @@ async fn run_two_connections_share_the_smaller_active_size(native: bool) {
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
 
-    let mut a = served.open_local_for(native).await;
+    let mut a = served.open_local().await;
     let welcome = message_type(&mut a, "mux.welcome").await;
     assert!(welcome["capabilities"]
         .as_array()
