@@ -221,7 +221,7 @@ A native window SHALL keep the root records each connection reports, scoped to t
 - **WHEN** a pane holds an `idle` root record and its title starts with an icon
 - **THEN** its tab and its row in the drawer show the title's icon and no status mark
 
-### Requirement: Status Notifications in the Window
+### Requirement: Program Status Notices In The Window
 For an event marked `notify` of a pane the user is not watching, a window SHALL add a notification while `notifications.enabled` and `notifications.programStatus` are on, taken from the event's notice (see `mux-protocol`, Classified Notification Events): a warning for `blocked`, a success for `done`, an error for `error`. Its text SHALL name the screen and, on a host, the host, and SHALL show the record's `msg`, or else its `title`, as plain, shortened text. While a pane holds a root record, its OSC notifications and its shell integration's reports of a finished command SHALL add no notification of their own; a bell adds no notification.
 
 #### Scenario: Blocked in an unwatched pane
@@ -243,7 +243,3 @@ For an event marked `notify` of a pane the user is not watching, a window SHALL 
 #### Scenario: Finished command of a pane with a record
 - **WHEN** a pane holds a `working` root record and its shell integration reports that a command finished
 - **THEN** the window adds no notification for it
-
-#### Scenario: Web window
-- **WHEN** a browser window shows a screen of a server with `notification-notices-v1` and a pane the user is not watching becomes `blocked`, marked `notify`
-- **THEN** the browser window adds a warning notification as the native window does

@@ -37,7 +37,7 @@ The server SHALL return its current settings at `GET /api/home/settings` and def
 - **THEN** the server persists and returns that fractional value
 
 ### Requirement: Settings Change Propagation
-After a successful settings change, the server SHALL send `settings.changed` with the complete effective settings to every connected window, including the writer, over browser and native connections. A window SHALL apply that event, and SHALL restore its prior value after a failed update.
+After a successful settings change, the server SHALL send `settings.changed` with the complete effective settings to every connected window, including the writer, over its native connection. A window SHALL apply that event, and SHALL restore its prior value after a failed update.
 
 #### Scenario: Other window updates settings
 - **WHEN** one window changes a setting
@@ -200,7 +200,7 @@ Native settings mutations SHALL be identified with their local connection and re
 - **AND** owned pending work is cancelled and joined without changing another service
 
 ### Requirement: Independent Native Terminal Palette
-The native workspace SHALL choose the terminal palette by the rule of Terminal Palette Choice, with the mode of the UI theme it shows, and SHALL look the chosen name up in its own catalog; for the UI theme's own palette it SHALL take the palette with the UI theme's identifier, ignoring `-`, otherwise the default palette of that mode. The service SHALL store `terminal.themeDark` and `terminal.themeLight` with the default `default`. A named palette SHALL be used while the selected UI theme stays in use for chrome. Palette-only changes SHALL update existing and future terminals without recreating sessions, losing terminal history, or changing native terminal font metrics.
+The native workspace SHALL choose the terminal palette by Terminal Palette Rule, with the mode of the UI theme it shows, and SHALL look the chosen name up in its own catalog; for the UI theme's own palette it SHALL take the palette with the UI theme's identifier, ignoring `-`, otherwise the default palette of that mode. The service SHALL store `terminal.themeDark` and `terminal.themeLight` with the default `default`. A named palette SHALL be used while the selected UI theme stays in use for chrome. Palette-only changes SHALL update existing and future terminals without recreating sessions, losing terminal history, or changing native terminal font metrics.
 
 #### Scenario: Separate terminal choice
 - **WHEN** the user chooses an available terminal palette different from the UI theme
@@ -228,7 +228,7 @@ The native workspace SHALL choose the terminal palette by the rule of Terminal P
 - **THEN** both count as `default` and the editor does not offer to change them
 
 ### Requirement: Native Theme Catalog
-The native workspace SHALL resolve UI themes and terminal palettes in a catalog of its own, made of the themes bundled with the application and the files of the themes directory (`themes/` in the configuration directory of the computer the application runs on). A UI theme SHALL be a theme of a theme set in the component toolkit's JSON format (`*.json`: a `themes` list whose entries have `name`, `mode` and `colors`). A terminal palette SHALL be a file in Ghostty's theme format: `palette = N=#rrggbb` for the ANSI colors 0 to 15, `background`, `foreground`, `cursor-color`, `selection-background` and `selection-foreground`; other keys SHALL be ignored, and a file without `background` and `foreground` is not a palette. In the themes directory, `*.toml` files SHALL be left to the web client, and every other file that is not a theme set SHALL be read as a terminal palette named by its file name.
+The native workspace SHALL resolve UI themes and terminal palettes in a catalog of its own, made of the themes bundled with the application and the files of the themes directory (`themes/` in the configuration directory of the computer the application runs on). A UI theme SHALL be a theme of a theme set in the component toolkit's JSON format (`*.json`: a `themes` list whose entries have `name`, `mode` and `colors`). A terminal palette SHALL be a file in Ghostty's theme format: `palette = N=#rrggbb` for the ANSI colors 0 to 15, `background`, `foreground`, `cursor-color`, `selection-background` and `selection-foreground`; other keys SHALL be ignored, and a file without `background` and `foreground` is not a palette. In the themes directory, `*.toml` files SHALL be ignored, and every other file that is not a theme set SHALL be read as a terminal palette named by its file name.
 
 Settings SHALL store a theme by its identifier: the display name in lowercase with every run of characters other than ASCII letters and digits replaced by `-`, or the `id` of the theme's `splitty` object. A bundled theme SHALL keep its identifier against a file with the same one. The identifiers of the themes shipped before this catalog (`splitty-dark`, `splitty-light` and the others) SHALL keep selecting the same looks, as a UI theme and as a terminal palette of the same identifier.
 
@@ -264,25 +264,6 @@ A server's settings SHALL hold `notifications.programStatus`, a boolean that def
 - **WHEN** a user turns off `notifications.programStatus` and a pane the user is not watching becomes `blocked`
 - **THEN** the window adds no notification and the pane's tab shows that it is blocked
 
-### Requirement: Terminal Palette Choice
-Every window SHALL choose the name of its terminal palette by one rule, the server's: the palette `terminal.theme` names; while that is `default`, the palette `terminal.themeDark` or `terminal.themeLight` names for the mode of the shown UI theme; while that is `default` too, the UI theme's own palette. An empty name SHALL count as `default`. `theme.get` and `GET /api/home/theme` SHALL apply this rule to the server's stored terminal settings for the UI theme they answer with, by that theme's mode: the answer's `terminal` colors SHALL be those of the server's theme with the chosen name, and its `terminalPalette` SHALL name the theme they come from; where the rule chooses the UI theme's own palette, or the server has no theme of the chosen name, they SHALL be the answered theme's own colors and `terminalPalette` its identifier. The web window SHALL show the `terminal` colors of that answer and SHALL ask for it again when `terminal.theme`, `terminal.themeDark` or `terminal.themeLight` changes. Each client SHALL look the chosen name up in its own themes, so a name only the other client has SHALL show the UI theme's palette; stored settings SHALL NOT change for it.
-
-#### Scenario: Named palette in the web window
-- **WHEN** `terminal.theme` is `splitty-light` and the web window shows the UI theme `splitty-dark`
-- **THEN** the theme answer for `splitty-dark` carries the chrome colors of `splitty-dark`, the terminal colors of `splitty-light` and `terminalPalette` `splitty-light`, and the web window's terminals show them
-
-#### Scenario: Palette by the UI theme's mode
-- **WHEN** `terminal.theme` is `default`, `terminal.themeDark` is `splitty-retro` and `terminal.themeLight` is `splitty-light`, and the answered UI theme is dark
-- **THEN** the answer carries the terminal colors of `splitty-retro`, and for a light UI theme those of `splitty-light`
-
-#### Scenario: Palette the server does not have
-- **WHEN** `terminal.theme` names a palette that only the native catalog has
-- **THEN** the theme answer carries the UI theme's own terminal colors and its identifier as `terminalPalette`, and the setting keeps its value
-
-#### Scenario: Palette change reaches open terminals
-- **WHEN** another window changes `terminal.theme`
-- **THEN** the web window asks for the theme again and its open terminals take the new colors without recreating sessions
-
 ### Requirement: Native Appearance Before The Local Service Answers
 The native app SHALL keep the appearance selection it last applied from its local service (UI theme mode and names, interface font, zoom, terminal palettes) in `last-appearance.json` in the configuration directory of the computer it runs on. A new window SHALL show that selection, resolved in its catalog for the current OS preference, until the local service's appearance replaces it. The file SHALL NOT be a source of settings; a missing or unreadable file SHALL leave the built-in appearance.
 
@@ -306,3 +287,14 @@ The native app SHALL keep the appearance selection it last applied from its loca
 #### Scenario: Isolated starts
 - **WHEN** the app runs its workspace smoke check or is started with an explicit WSL target
 - **THEN** it neither reads nor writes the file
+
+### Requirement: Terminal Palette Rule
+Every window SHALL choose the name of its terminal palette by one rule, the server's: the palette `terminal.theme` names; while that is `default`, the palette `terminal.themeDark` or `terminal.themeLight` names for the mode of the shown UI theme; while that is `default` too, the UI theme's own palette. An empty name SHALL count as `default`. `theme.get` and `GET /api/home/theme` SHALL apply this rule to the server's stored terminal settings for the UI theme they answer with, by that theme's mode: the answer's `terminal` colors SHALL be those of the server's theme with the chosen name, and its `terminalPalette` SHALL name the theme they come from; where the rule chooses the UI theme's own palette, or the server has no theme of the chosen name, they SHALL be the answered theme's own colors and `terminalPalette` its identifier. The native workspace SHALL look the chosen name up in its own catalog (see Native Theme Catalog), so a name only the server has SHALL show the UI theme's palette there; stored settings SHALL NOT change for it.
+
+#### Scenario: Palette by the UI theme's mode
+- **WHEN** `terminal.theme` is `default`, `terminal.themeDark` is `splitty-retro` and `terminal.themeLight` is `splitty-light`, and the answered UI theme is dark
+- **THEN** the answer carries the terminal colors of `splitty-retro`, and for a light UI theme those of `splitty-light`
+
+#### Scenario: Palette the server does not have
+- **WHEN** `terminal.theme` names a palette that only the native catalog has
+- **THEN** the theme answer carries the UI theme's own terminal colors and its identifier as `terminalPalette`, and the setting keeps its value

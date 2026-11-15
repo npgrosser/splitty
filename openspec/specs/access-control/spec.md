@@ -1,223 +1,23 @@
 # access-control Specification
 
 ## Purpose
-Defines who may talk to a Splitty server and how that is enforced: the loopback-only listener, the Host, Origin and Fetch Metadata guards, the credentials (process token, bootstrap code, browser session, WebSocket ticket), the local control socket, and the protection of credential files. These are security invariants; other capabilities build on them and must not weaken them.
+Defines who may talk to a Splitty service and how that is enforced: the private native client endpoint, the owner-only control socket and its route set, the restricted sockets of agent grants, the keeper sockets, SSH as the only way to and from remote hosts, the admission of port forwards and reverse shares, and the protection of private files. The terminal service has no TCP listener and hands out no credential. These are security invariants; other capabilities build on them and must not weaken them.
 
 ## Requirements
 
-### Requirement: Loopback-Only Listener
-Only an explicitly started browser gateway SHALL create a terminal-service TCP listener. `splitty serve` (including `--daemon`) MUST resolve its requested `--addr` (default `127.0.0.1:9800`, overridable via `SPLITTY_ADDR`) and refuse to start with status 2 before serving anything if any resolved address is not loopback. Supported browser binds SHALL be canonical `127.0.0.1` or `::1`; other loopback addresses SHALL fail with guidance to those addresses. `splitty connect` SHALL bind its browser gateway explicitly to `127.0.0.1`. Native desktop backends, daemons and SSH bridges SHALL create no terminal-service TCP listener, including on failure. The removed `--remote` flag MUST be refused the same way, with a message pointing to `splitty connect` or an explicit browser gateway.
-
-#### Scenario: Routable bind address is refused
-- **WHEN** the user runs `splitty serve --addr 0.0.0.0:8080`
-- **THEN** the process exits with status 2 without accepting any connection
-- **AND** the error explains that Splitty listens on loopback only
-
-#### Scenario: Name resolving to a routable address is refused
-- **WHEN** the requested address is a hostname that resolves to a loopback and a non-loopback address
-- **THEN** the server refuses to start rather than binding only the loopback part
-
-#### Scenario: Direct remote mode is refused
-- **WHEN** the user passes `--remote` to `splitty serve` or `splitty daemon start`
-- **THEN** the process exits with status 2 and suggests `splitty connect <user@host>`
-
-#### Scenario: Unsupported loopback alias
-- **WHEN** a browser gateway is asked to bind `127.0.0.2`
-- **THEN** it fails before serving with guidance to a supported canonical loopback address
-
-### Requirement: Host Header Guard
-The server SHALL reject with 403 every HTTP request on its TCP listener whose `Host` header, with any port removed, is not exactly `localhost`, `127.0.0.1` or `::1`; a missing or empty `Host` MUST be rejected as well. This guard defends against DNS rebinding and applies to every path, including `/health`; it does not replace the loopback-only listener.
-
-#### Scenario: Foreign host name
-- **WHEN** a request arrives with `Host: evil.example:9800`
-- **THEN** the server responds 403 without evaluating any credential
-
-#### Scenario: Loopback host with port
-- **WHEN** a request arrives with `Host: 127.0.0.1:9800` or `Host: [::1]:9800`
-- **THEN** the Host guard lets the request through to the next check
-
-### Requirement: Origin Allowlist
-A browser gateway SHALL accept an `Origin` only if it exactly names its canonical bound address (`http://127.0.0.1:<port>` or `http://[::1]:<port>`) or `http://localhost:<port>`, where `<port>` is the actual bound port, including for port 0. A hostname used to choose a bind SHALL not add another allowed origin. A release build MUST NOT accept any other origin and MUST NOT offer a runtime option to widen the list; development builds additionally accept the dev-server origins on port 1420. For every path except `/health`, a request carrying a non-allowed `Origin` MUST be rejected with 403. A `/ws` request without any `Origin` MUST be rejected with 403; an `/api` request without `Origin` is not rejected by this rule, because same-origin GETs and the CLI send none.
-
-#### Scenario: Foreign origin with a valid credential
-- **WHEN** a request to an `/api` path carries a valid credential and `Origin: https://evil.example`
-- **THEN** the server responds 403
-
-#### Scenario: Other loopback port is a foreign origin
-- **WHEN** a request carries `Origin: http://127.0.0.1:<other port>`
-- **THEN** the server responds 403, even though the page is same-site with Splitty
-
-#### Scenario: WebSocket without Origin
-- **WHEN** a `/ws` upgrade request carries no `Origin` header
-- **THEN** the server responds 403
-
-#### Scenario: CLI request without Origin
-- **WHEN** the CLI calls an `/api` path with a valid bearer token and no `Origin` header
-- **THEN** the Origin rule does not reject the request
-
-#### Scenario: IPv6 gateway origin
-- **WHEN** a browser gateway binds `[::1]:0`
-- **THEN** its launch URL, allowed HTTP origins and corresponding WebSocket CSP origins use the actual port and bracketed IPv6 address
-- **AND** another address or port does not become allowed by supplying a valid credential
-
-### Requirement: Fetch Metadata Same-Origin Rule
-For `/api` paths and `/ws`, the server SHALL reject with 403 any request whose `Sec-Fetch-Site` header is present and not `same-origin`. This MUST hold for `same-site`, `cross-site` and `none` (an address-bar navigation). A request without `Sec-Fetch-Site` is not rejected by this rule; the Origin rules still apply to it.
-
-#### Scenario: Same-site request with the session cookie
-- **WHEN** a page on another loopback port causes a GET to `/api/mux/status` carrying the session cookie and `Sec-Fetch-Site: same-site`
-- **THEN** the server responds 403
-
-#### Scenario: Address-bar navigation to the API
-- **WHEN** a request to an `/api` path carries `Sec-Fetch-Site: none`
-- **THEN** the server responds 403
-
-#### Scenario: Same-origin request from the UI
-- **WHEN** the UI calls an `/api` path with `Sec-Fetch-Site: same-origin`, its own `Origin` and a valid session cookie
-- **THEN** the request is processed
-
-### Requirement: Guards Precede Authentication
-The server MUST apply the Host guard first, then the Origin and Fetch Metadata rules, and only then evaluate credentials. A request rejected by a guard SHALL receive 403 regardless of whether it carried a valid credential, so a foreign origin cannot learn whether a guessed credential is valid.
-
-#### Scenario: Foreign origin probing a ticket
-- **WHEN** a `/ws` request from a foreign origin carries a guessed ticket
-- **THEN** the server responds 403 and the ticket is neither checked nor consumed
-
-### Requirement: Accepted HTTP Credentials
-Every request to a path under `/api` or `/proxy/` SHALL require a credential, except `/api/session` (which establishes one) and `/ws` (which uses a ticket). Exactly two credentials MUST be accepted: a valid `splitty-session-<instance>` cookie, or `Authorization: Bearer <process token>`. A missing or invalid credential MUST yield 401. A token in the `?token=` query parameter and the former `splitty-token` cookie MUST NOT authenticate. Empty values MUST never authenticate, and the token comparison SHALL be constant-time.
-
-#### Scenario: No credential
-- **WHEN** a request to `/api/mux/state` carries no cookie and no `Authorization` header
-- **THEN** the server responds 401
-
-#### Scenario: Token in the query string
-- **WHEN** a request to an `/api` path carries the correct process token only as `?token=<token>`
-- **THEN** the server responds 401
-
-#### Scenario: Legacy token cookie
-- **WHEN** a request carries the correct process token only in a `splitty-token` cookie
-- **THEN** the server responds 401
-
-#### Scenario: Bearer token from the CLI
-- **WHEN** a request carries `Authorization: Bearer <process token>` and passes the guards
-- **THEN** the request is processed
-
-### Requirement: Unauthenticated Surface
-The server SHALL serve without any credential only: `/health` (also exempt from the Origin and Fetch Metadata rules), `POST /api/session`, the `/ws` handshake (which is ticket-gated instead), and the application shell with its static assets. Paths under `/api/` and `/proxy/` and the `/ws` prefix that have no handler MUST NOT be answered with the application shell; an authenticated caller MUST receive 404 for them. The removed web-content routes (`/proxy/{port}`, `/api/favicon`, `/api/frame-check`, `/api/webapps`) MUST answer 404 even with a valid credential.
-
-#### Scenario: Health check
-- **WHEN** a client sends `GET /health` with a loopback `Host` and no credential
-- **THEN** the server responds 200 with `ok`
-
-#### Scenario: Removed route with a valid credential
-- **WHEN** an authenticated caller requests `/proxy/8080/` or `/api/favicon`
-- **THEN** the server responds 404, not 200 with the application shell
-
-#### Scenario: Client-side app route
-- **WHEN** a browser requests an application route outside the server prefixes
-- **THEN** the server responds 200 with the application shell
-
-### Requirement: Process Token
-Native services and clients SHALL neither read nor create a process token for their native transport; the following token rules apply only to browser gateways.
-
-Each explicitly started browser gateway SHALL authenticate non-browser callers with a process token of 128 random bits encoded as 32 hex characters. For `serve`, unless overridden, the token MUST be read from `auth-token` in the Splitty config directory (`~/.config/splitty/auth-token` on Linux) and created there if missing, so it is stable across restarts. A non-empty `--token` flag of the browser gateway MUST take precedence over the file; the `SPLITTY_TOKEN` environment variable MUST NOT be consulted. `splitty serve --oneshot-token` and the gateway of `splitty connect` MUST use a fresh random token that is not persisted; if the token file cannot be read or created, `serve` MUST fall back to a random, non-persisted token. The process token MUST NOT be sent to the browser. Rotation of a persisted token SHALL be done by deleting the token file and restarting the gateway.
-
-#### Scenario: First start creates the token file
-- **WHEN** `splitty serve` starts without a token override and no `auth-token` file exists
-- **THEN** a 32-hex-character token is written to it with mode 0600
-- **AND** the next server start reuses the same token
-
-#### Scenario: Inherited SPLITTY_TOKEN is ignored
-- **WHEN** `splitty serve` is started with `SPLITTY_TOKEN` set in its environment and no token override
-- **THEN** it uses the token from its own token file, not the environment value
-
-#### Scenario: One-shot token
-- **WHEN** the user runs `splitty serve --oneshot-token`
-- **THEN** the server authenticates bearer requests with a random token that is not written to disk
-
-### Requirement: Browser Session Establishment
-`POST /api/session` SHALL exchange either a `bootstrap` code or the process `token` (JSON body) for a browser session; a non-empty `bootstrap` field MUST take precedence. On success the gateway MUST respond 200 with `Set-Cookie: splitty-session-<instance>=<id>; Path=/; HttpOnly; SameSite=Strict`, where the session id is 128 random bits. On failure it MUST respond 401 and set no cookie. The endpoint is subject to the Host, Origin and Fetch Metadata guards. Sessions MUST NOT be persisted: they stay valid for the gateway's lifetime and are invalidated by its restart, independently of target daemon restarts.
-
-#### Scenario: Valid bootstrap code
-- **WHEN** the UI posts `{"bootstrap": "<code>"}` with a valid, unexpired, unused code from its own origin
-- **THEN** the server responds 200 with an `HttpOnly`, `SameSite=Strict` `splitty-session-<instance>` cookie
-
-#### Scenario: Manually entered process token
-- **WHEN** the UI posts `{"token": "<process token>"}`
-- **THEN** the server responds 200 with a session cookie
-
-#### Scenario: Invalid credential
-- **WHEN** the body carries an unknown code, a wrong token, or neither
-- **THEN** the server responds 401 and sets no cookie
-
-#### Scenario: Session after restart
-- **WHEN** a browser presents a `splitty-session-<instance>` cookie issued before its gateway restarted
-- **THEN** `/api` requests with only that cookie receive 401
-
-### Requirement: Single-Use Bootstrap Codes
-A browser gateway's bootstrap code SHALL be 128 random bits as 32 hex characters, valid for one redemption and at most 120 seconds. Any redemption attempt SHALL consume it, including after expiry. Codes SHALL not persist or equal the process token. Only the explicit gateway's startup and its authenticated TCP `POST /api/bootstrap` endpoint, including `issue-bootstrap`, SHALL issue them. Native startup, SSH bridges and all local sockets SHALL issue none.
-
-#### Scenario: Replay
-- **WHEN** a redeemed bootstrap code is posted again
-- **THEN** the gateway returns 401
-
-#### Scenario: Expired code
-- **WHEN** a code is redeemed more than 120 seconds after issue
-- **THEN** the gateway returns 401 and removes it
-
-#### Scenario: Native launcher
-- **WHEN** a desktop backend or SSH bridge starts
-- **THEN** it negotiates a native connection and emits no bootstrap code
-
-#### Scenario: Launcher requests a fresh code
-- **WHEN** a launcher sends the former text `bootstrap` command to a native child connection
-- **THEN** it is rejected as invalid transport input and issues no credential
-
-### Requirement: WebSocket Ticket Authentication
-The `/ws` upgrade SHALL be authorized only by a ticket passed as `?ticket=<ticket>`; the session cookie alone MUST NOT authorize it. Tickets SHALL be issued by `POST /api/ws-ticket`, which requires an authenticated caller and passes the guards. A ticket MUST be single-use and expire 10 seconds after issue. A missing, unknown, expired or reused ticket MUST yield 401. Independently of the request pipeline, the upgrade MUST itself require an allowed `Origin` and an acceptable `Sec-Fetch-Site`.
-
-#### Scenario: Ticket without a session
-- **WHEN** a caller with no credential posts to `/api/ws-ticket`
-- **THEN** the server responds 401
-
-#### Scenario: Ticket replay
-- **WHEN** a ticket that already opened a WebSocket is used for a second handshake from the app's own origin
-- **THEN** the server responds 401
-
-#### Scenario: Valid handshake
-- **WHEN** the UI opens `/ws?ticket=<fresh ticket>` from its own origin
-- **THEN** the server upgrades the connection
-
-### Requirement: No CORS Allowance
-The server SHALL NOT emit `Access-Control-Allow-Origin` or other CORS allowance headers on any response, including preflights. The UI is served from the same origin as the API and needs none.
-
-#### Scenario: Preflight from a foreign origin
-- **WHEN** a foreign origin sends a CORS preflight to an `/api` path
-- **THEN** the response carries no `Access-Control-Allow-Origin` header
-
-### Requirement: Frontend Security Headers
-Every browser-gateway response serving the application shell or a static asset SHALL carry: a `Content-Security-Policy` of `default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self' <gateway WebSocket origins>; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`, where the WebSocket origins correspond exactly to the bound-port HTTP origins in Origin Allowlist; `X-Content-Type-Options: nosniff`; `Referrer-Policy: no-referrer`; `Permissions-Policy: camera=(), microphone=(), geolocation=(), clipboard-read=()`; `Cross-Origin-Opener-Policy: same-origin`; and `Cross-Origin-Resource-Policy: same-origin`.
-
-#### Scenario: App document
-- **WHEN** a browser loads the application shell
-- **THEN** the response carries the deny-by-default CSP with `frame-src 'none'` and `frame-ancestors 'none'` and all listed headers
-
-#### Scenario: Static asset
-- **WHEN** a browser loads a bundled script or stylesheet
-- **THEN** the response carries the same security headers as the application shell
-
 ### Requirement: No Reusable Credential In Output
-The server SHALL NOT print the process token, a session id or a ticket on stdout, stderr or in log lines. The only credential allowed in the machine-readable startup lines (see `cli`) is a single-use bootstrap code, and log lines MUST NOT contain the bootstrap code. `splitty daemon start` MUST print no credential at all.
+The server and the CLI SHALL print no credential on stdout, stderr or in log lines; machine-readable startup lines (see `cli`) and the output of grant administration name sockets, never a secret. `splitty daemon start` MUST print no credential at all.
 
 #### Scenario: Serve startup
-- **WHEN** `splitty serve` starts
-- **THEN** its output contains a bootstrap code that differs from the process token and does not contain the process token
+- **WHEN** a user runs `splitty serve`
+- **THEN** its output names the remaining ways and contains no credential, and no token or code is created
 
 #### Scenario: Daemon startup
 - **WHEN** `splitty daemon start` starts a daemon
 - **THEN** its output describes the private client endpoint and contains no credential
 
 ### Requirement: Credential Files Are Owner-Only
-On Unix, the Splitty config directory SHALL have mode 0700, and every writer MUST create it with that mode or repair an existing directory to it. The `auth-token` and `daemon.json` files MUST have mode 0600, be written atomically so they are never observable partially written or with a looser mode, and an existing `auth-token` with a looser mode MUST be repaired to 0600 when it is read. `daemon.json` MUST NOT contain any credential (its contents are defined in `server-modes`), and a `token` key left by an older version MUST be ignored.
+On Unix, the Splitty config directory SHALL have mode 0700, and every writer MUST create it with that mode or repair an existing directory to it. The `daemon.json` file MUST have mode 0600 and be written atomically so it is never observable partially written or with a looser mode. An `auth-token` file left by an older version SHALL be neither read, repaired, rewritten nor removed, and no endpoint SHALL accept its value (provisional, tbd). `daemon.json` MUST NOT contain any credential (its contents are defined in `server-modes`), and a `token` key left by an older version MUST be ignored.
 
 Authorized daemon start, restart and remote-handshake ensure SHALL prepare the config directory before discovery. They MAY tighten an owned final directory that has no group/world write bits through its verified descriptor. Symlinks, foreign-owned final directories and group/world-writable final directories SHALL be refused without chmod or daemon startup; shared ancestor permissions SHALL remain unchanged. Read-only discovery SHALL NOT repair directory modes.
 
@@ -226,8 +26,8 @@ Authorized daemon start, restart and remote-handshake ensure SHALL prepare the c
 - **THEN** the directory ends up with mode 0700
 
 #### Scenario: Token file with loose permissions
-- **WHEN** an existing `auth-token` has mode 0644
-- **THEN** the server keeps its value and changes its mode to 0600
+- **WHEN** the config directory holds an `auth-token` with mode 0644 and a daemon starts
+- **THEN** the file keeps its content and mode, and no request carrying its value is accepted anywhere
 
 #### Scenario: Daemon info contents
 - **WHEN** a daemon writes `daemon.json`
@@ -246,7 +46,7 @@ Authorized daemon start, restart and remote-handshake ensure SHALL prepare the c
 - **THEN** it refuses before discovery/start and leaves that directory and its ancestors unchanged
 
 ### Requirement: Owner-Only Control Socket
-Each server process SHALL offer a local control channel as a Unix socket. A daemon's socket SHALL be `daemon.sock` in its run directory: `$SPLITTY_CONFIG_DIR/run/` when `SPLITTY_CONFIG_DIR` names a configuration directory (see `server-modes`), otherwise `<user data dir>/splitty/run/`. Any other server's socket SHALL be `<pid>.sock` in `$SPLITTY_CONFIG_DIR/run/` when `SPLITTY_CONFIG_DIR` names a configuration directory, otherwise in `$XDG_RUNTIME_DIR/splitty/` (or `<user data dir>/splitty/run/` when `XDG_RUNTIME_DIR` is unset or relative). The socket's directory MUST have mode 0700 and the socket mode 0600. On Linux and macOS, the server MUST drop any connection whose peer user id differs from its own effective user id, and MUST also drop it when the peer credentials cannot be read. The channel requires no credential and applies no Host or Origin check: filesystem permissions and the peer check are its authorization. The server MUST refuse to place the socket under `/mnt/` or `/media/`; failing to create the socket MUST NOT stop the server and MUST NOT cause any credential to be handed to panes instead. `splitty serve` and the daemon SHALL remove their socket file on graceful shutdown.
+Each server process SHALL offer a local control channel as a Unix socket. A daemon's socket SHALL be `daemon.sock` in its run directory: `$SPLITTY_CONFIG_DIR/run/` when `SPLITTY_CONFIG_DIR` names a configuration directory (see `server-modes`), otherwise `<user data dir>/splitty/run/`. Any other server's socket SHALL be `<pid>.sock` in `$SPLITTY_CONFIG_DIR/run/` when `SPLITTY_CONFIG_DIR` names a configuration directory, otherwise in `$XDG_RUNTIME_DIR/splitty/` (or `<user data dir>/splitty/run/` when `XDG_RUNTIME_DIR` is unset or relative). The socket's directory MUST have mode 0700 and the socket mode 0600. On Linux and macOS, the server MUST drop any connection whose peer user id differs from its own effective user id, and MUST also drop it when the peer credentials cannot be read. The channel requires no credential: filesystem permissions and the peer check are its authorization. The server MUST refuse to place the socket under `/mnt/` or `/media/`; failing to create the socket MUST NOT stop the server and MUST NOT cause any credential to be handed to panes instead. Embedded services and the daemon SHALL remove their socket file on graceful shutdown.
 
 #### Scenario: Socket permissions
 - **WHEN** a server has started its control channel
@@ -261,7 +61,7 @@ Each server process SHALL offer a local control channel as a Unix socket. A daem
 - **THEN** the server runs without a control socket and logs a warning
 
 #### Scenario: Socket below a named configuration directory
-- **WHEN** `splitty serve` runs with `SPLITTY_CONFIG_DIR=/Users/me/.config/splitty`
+- **WHEN** an embedded service runs with `SPLITTY_CONFIG_DIR=/Users/me/.config/splitty`
 - **THEN** its control socket is `/Users/me/.config/splitty/run/<pid>.sock`
 - **AND** a daemon with the same variable uses `/Users/me/.config/splitty/run/daemon.sock`
 
@@ -270,7 +70,7 @@ Each server process SHALL offer a local control channel as a Unix socket. A daem
 - **THEN** the new daemon's control socket has the path the shell's `SPLITTY_SOCK` names, and `splitty list-screens` run in that shell reaches the new daemon
 
 ### Requirement: Control Socket Route Set
-The owner control socket SHALL route only these multiplexer endpoints: `GET /api/mux/state`, `GET /api/mux/screens`, `GET /api/mux/screen/{id}`, `POST /api/mux/op`, `GET /api/mux/neighbor`, `GET /api/mux/status` and `POST /api/session/{id}/send`, plus `POST /api/editor/open` for confirmed client editor requests, `POST /api/file/offer` for file offers the user saves in a window, `GET /api/viewer/comments` and `POST /api/viewer/comments/reply` for what the user handed over on viewer panes and agents' replies to it, `POST /api/viewer/review/wait` for waits for the user's review, and the job and local agent-administration endpoints specified in `control-api`. Every other path MUST answer 404 there, in particular configuration, shell profiles, themes, templates, stats, and the credential-minting endpoints `/api/session`, `/api/bootstrap` and `/api/ws-ticket`. The separate restricted agent sockets SHALL expose only their fixed subset below. No local socket SHALL mint browser or network credentials.
+The owner control socket SHALL route only these multiplexer endpoints: `GET /api/mux/state`, `GET /api/mux/screens`, `GET /api/mux/screen/{id}`, `POST /api/mux/op`, `GET /api/mux/neighbor`, `GET /api/mux/status` and `POST /api/session/{id}/send`, plus `POST /api/editor/open` for confirmed client editor requests, `POST /api/file/offer` for file offers the user saves in a window, `GET /api/viewer/comments` and `POST /api/viewer/comments/reply` for what the user handed over on viewer panes and agents' replies to it, `POST /api/viewer/review/wait` for waits for the user's review, and the job and local agent-administration endpoints specified in `control-api`. Every other path MUST answer 404 there, in particular configuration, shell profiles, themes, templates, stats, the hub's `/api/remote/*` operations, and the former credential-minting paths `/api/session`, `/api/bootstrap` and `/api/ws-ticket`. The separate restricted agent sockets SHALL expose only their fixed subset below. No local socket SHALL mint a credential.
 
 #### Scenario: Multiplexer status over the socket
 - **WHEN** a pane process sends `GET /api/mux/status` over the owner control socket without any credential
@@ -282,7 +82,7 @@ The owner control socket SHALL route only these multiplexer endpoints: `GET /api
 
 #### Scenario: Job administration over the owner socket
 - **WHEN** the owning user creates an agent grant through the owner control socket
-- **THEN** a local restricted socket is created and no bearer token or browser credential is issued
+- **THEN** a local restricted socket is created and no credential is issued
 
 #### Scenario: Editor request on the owner socket
 - **WHEN** the owner socket receives `POST /api/editor/open`
@@ -300,7 +100,7 @@ The owner control socket SHALL route only these multiplexer endpoints: `GET /api
 - **AND** the same routes and `POST /api/viewer/review/wait` on a restricted grant socket answer 404
 
 ### Requirement: Pane Environment Carries No Credential
-When the server spawns a terminal session, it SHALL pass the owner control socket path as `SPLITTY_SOCK` for ordinary sessions, or the restricted grant socket as `SPLITTY_AGENT_SOCK` for an agent-owned managed job. An agent-owned job MUST NOT receive `SPLITTY_SOCK`, including an inherited value. The server MUST NOT set the process token, a session id used as an authentication credential, a bootstrap code, a ticket or the server's HTTP address in the session's environment (in particular it sets neither `SPLITTY_TOKEN` nor `SPLITTY_SERVER`). Other variables given to sessions are defined in `terminal-sessions`.
+When the server spawns a terminal session, it SHALL pass the owner control socket path as `SPLITTY_SOCK` for ordinary sessions, or the restricted grant socket as `SPLITTY_AGENT_SOCK` for an agent-owned managed job. An agent-owned job MUST NOT receive `SPLITTY_SOCK`, including an inherited value. The server MUST NOT set a credential or a network address of a server in the session's environment (in particular it sets neither `SPLITTY_TOKEN` nor `SPLITTY_SERVER`). Other variables given to sessions are defined in `terminal-sessions`.
 
 #### Scenario: Spawned pane
 - **WHEN** an ordinary pane's shell is spawned
@@ -311,42 +111,31 @@ When the server spawns a terminal session, it SHALL pass the owner control socke
 - **WHEN** an agent-owned job starts while the server inherited owner or agent socket variables
 - **THEN** the job receives only its own grant's `SPLITTY_AGENT_SOCK` and pane/screen/session identifiers, and neither the owner socket nor another grant's socket from that inheritance
 
-### Requirement: Browser UI Holds No Credential
-The browser UI SHALL NOT store any credential in `localStorage`, in script-readable cookies or in request URLs; its only credential is the `HttpOnly` session cookie. After exchanging a `bootstrap` URL parameter, the UI MUST remove that parameter from the address bar. It MUST fetch a fresh WebSocket ticket for every connection attempt, including reconnects. Without a bootstrap code or a valid session, it SHALL ask for the process token and exchange it once through `POST /api/session`.
-
-#### Scenario: Launch URL with a bootstrap code
-- **WHEN** the UI loads with `?bootstrap=<code>`
-- **THEN** it exchanges the code for a session cookie and replaces the URL with one that no longer contains `bootstrap`
-
-#### Scenario: Reconnect
-- **WHEN** the WebSocket drops and the UI reconnects
-- **THEN** it requests a new ticket from `/api/ws-ticket` before the handshake
-
 ### Requirement: Remote Access Through SSH Tunnel
-A remote service SHALL be reached through SSH with the system client and validated target, using an exec stream to its private client endpoint. A target MUST match `[user@]host[:port]` (bracketed IPv6 allowed); option-like targets, Unicode dash lookalikes, whitespace and controls MUST be rejected before SSH starts, by `connect` with status 2. No terminal-server TCP port or credential SHALL be required on the host. An explicit browser connection SHALL terminate browser authentication at its local gateway. Command/stream connections SHALL disable configured local/remote/dynamic forwards, agent/X11 forwarding and PTYs. Deliberate forwarding connections SHALL retain their configured-forward checks and owned-process lifetime.
+A remote service SHALL be reached through SSH with the system client and validated target, using an exec stream to its private client endpoint. A target MUST match `[user@]host[:port]` (bracketed IPv6 allowed); option-like targets, Unicode dash lookalikes, whitespace and controls MUST be rejected before SSH starts, by the hub with `remote.error` code `invalid_target`. No terminal-server TCP port or credential SHALL be required on the host. Command/stream connections SHALL disable configured local/remote/dynamic forwards, agent/X11 forwarding and PTYs. Deliberate forwarding connections SHALL retain their configured-forward checks and owned-process lifetime.
 
 #### Scenario: Option-like target
-- **WHEN** the user runs `splitty connect -oProxyCommand=x`
-- **THEN** it exits with status 2 without running SSH
+- **WHEN** a client opens a host stream for `-oProxyCommand=x`
+- **THEN** the hub answers `remote.error` with code `invalid_target` without running SSH
 
 #### Scenario: Matching origin through the tunnel
 - **WHEN** a remote daemon has only a private client endpoint
-- **THEN** an explicit browser gateway uses its own local origin and requires no matching remote port or widened origin allowlist
+- **THEN** the hub reaches it through the SSH exec bridge, with no matching remote port and no origin or address to allow
 
 #### Scenario: GatewayPorts in the SSH configuration
 - **WHEN** SSH configuration sets `GatewayPorts yes`
-- **THEN** desktop service traffic creates no TCP forward and a browser gateway still listens on `127.0.0.1` only
+- **THEN** desktop service traffic creates no TCP forward
 
 #### Scenario: Port held while the tunnel is rebuilt
-- **WHEN** the gateway's SSH connection drops
-- **THEN** the gateway keeps its listening socket bound and authenticates no operation to a different backend
+- **WHEN** the `ssh` of a hub port forward exits
+- **THEN** the hub keeps the forward's local port reserved while it rebuilds the forward to the same validated target, and connects that port to no other destination
 
 #### Scenario: SSH configuration adds network features
 - **WHEN** user SSH configuration enables local, remote or dynamic forwarding, agent/X11 forwarding or a PTY
 - **THEN** native command/bridge connections create none of those features, while explicitly requested forwarding retains its existing validation
 
 ### Requirement: Remote Installation Integrity
-A server installed on a remote host by `splitty connect` SHALL come only from the client, over the SSH connection; the host MUST NOT download anything for it. Its SHA-256 checksum, computed by the client over the bytes it sends, MUST be verified on the host before the payload is unpacked or run, and the server MUST NOT be moved into place when the check fails. The install directories below `~/.local/share/splitty/remote/` MUST be created owner-only (mode 0700).
+A server installed on a remote host by the hub SHALL come only from the client, over the SSH connection; the host MUST NOT download anything for it. Its SHA-256 checksum, computed by the client over the bytes it sends, MUST be verified on the host before the payload is unpacked or run, and the server MUST NOT be moved into place when the check fails. The install directories below `~/.local/share/splitty/remote/` MUST be created owner-only (mode 0700).
 
 Commands sent to the host SHALL be constant scripts; every dynamic value SHALL be passed as an argument quoted for a POSIX shell, and versions and checksums MUST match an allowlist pattern before they are sent. A path the host reports, such as its home directory, MUST be absolute and free of control characters before the client uses it, and MUST be quoted wherever it is sent back.
 
@@ -359,36 +148,25 @@ Commands sent to the host SHALL be constant scripts; every dynamic value SHALL b
 - **THEN** the host-side check fails before the payload is unpacked, and nothing is installed
 
 ### Requirement: Remote Bridge Carries No Credential
-`splitty remote-bridge --transport native-v1` SHALL resolve the daemon on the host and reach its private client endpoint using filesystem and peer-user checks. It SHALL neither read a token file nor obtain browser credentials. Its stdin/stdout SHALL carry only the negotiated client transport, without token, bootstrap code, browser cookie or WebSocket ticket. The SSH channel establishes the remote user; no terminal-service TCP connection is made.
+`splitty remote-bridge --transport native-v1` SHALL resolve the daemon on the host and reach its private client endpoint using filesystem and peer-user checks. It SHALL read no credential file and obtain no credential. Its stdin/stdout SHALL carry only the negotiated client transport, without any credential. The SSH channel establishes the remote user; no terminal-service TCP connection is made.
 
 #### Scenario: Nothing secret on the wire
 - **WHEN** a client relays a session through the remote bridge
-- **THEN** bridge traffic contains only transport control, permitted API messages and session/mux data, and no browser credential
-
-### Requirement: Forwarded Ports Bound To Loopback
-Every port forward of `splitty connect --forward` MUST be bound to `127.0.0.1` on the PC explicitly, whatever the user's SSH configuration says, and MUST be held reserved while the tunnel is rebuilt, like the daemon's port. The CLI MUST announce a forward only as `http://localhost:<port>`, never as `http://127.0.0.1:<port>`, so that the browser does not send it the session cookie of Splitty servers, which belongs to the host `127.0.0.1`.
-
-#### Scenario: GatewayPorts in the SSH configuration
-- **WHEN** the user's SSH configuration sets `GatewayPorts yes` and the user runs `splitty connect vm1 --forward 3000`
-- **THEN** the forward of port 3000 listens on `127.0.0.1` only
-
-#### Scenario: No session cookie for the dev server
-- **WHEN** the user opens a forward's announced URL in the browser that also holds a Splitty session for `127.0.0.1`
-- **THEN** the forwarded server receives no Splitty session cookie
+- **THEN** bridge traffic contains only transport control, permitted API messages and session/mux data, and no credential
 
 ### Requirement: Remote Screen Hub Access
-On a browser gateway, `/ws/remote` SHALL require the same origin check, same-origin fetch rule and single-use WebSocket ticket as `/ws`; native host connections SHALL require an authorized main-service connection with host-management authority, and `/ws/remote` and `/api/remote/*` SHALL NOT be served on the control socket. The hub SHALL run `ssh` only to a target that passed the target validation of Remote Access Through SSH Tunnel, non-interactively, without agent forwarding, and without remote forwards except the single remote forward of a reverse forward the user requested (see Hub Reverse Forwards). The hub SHALL send nothing to the host but the client's relayed messages and the commands of the install, the handshake and the bridge, `remote-relay prepare` and `remote-relay serve` for a reverse forward, and, for a browser socket opened with `update=1` or the corresponding explicit native update intent (see `remote-screens`, Host Update), instance-bound `daemon stop` or conditional `remote-migrate --expected <proof>` of its installed server. The host alone SHALL resolve and verify legacy owner sockets and process identity; renderer data SHALL NOT select the proof, PID, executable or configuration. The legacy migration command SHALL require the guards of Confirmed Legacy Daemon Migration and SHALL NOT be replayed after ambiguous completion. In particular, it SHALL NOT forward the local session cookie, a ticket or the process token.
+Host connections SHALL require an authorized native main-service connection with host-management authority; no `/ws/remote` endpoint SHALL exist, and neither host streams nor `/api/remote/*` operations SHALL be served on the control socket. The hub SHALL run `ssh` only to a target that passed the target validation of Remote Access Through SSH Tunnel, non-interactively, without agent forwarding, and without remote forwards except the single remote forward of a reverse forward the user requested (see Hub Reverse Forwards). The hub SHALL send nothing to the host but the client's relayed messages and the commands of the install, the handshake and the bridge, `remote-relay prepare` and `remote-relay serve` for a reverse forward, and, for a host stream opened with the explicit update intent (see `remote-screens`, Host Update), instance-bound `daemon stop` or conditional `remote-migrate --expected <proof>` of its installed server. The host alone SHALL resolve and verify legacy owner sockets and process identity; renderer data SHALL NOT select the proof, PID, executable or configuration. The legacy migration command SHALL require the guards of Confirmed Legacy Daemon Migration and SHALL NOT be replayed after ambiguous completion. It SHALL forward no credential of the local service to the host.
 
 #### Scenario: Missing ticket
-- **WHEN** a client opens `/ws/remote?target=vm1` without a valid ticket
-- **THEN** the upgrade is refused and no `ssh` process is started
+- **WHEN** a process asks any Splitty socket or port for `/ws/remote?target=vm1`, with or without a ticket
+- **THEN** the request is not served and no `ssh` process is started
 
 #### Scenario: Control socket
-- **WHEN** a process requests `/ws/remote` or `/api/remote/hosts` over the control socket
+- **WHEN** a process requests `/ws/remote?target=vm1` or `GET /api/remote/hosts` over the control socket
 - **THEN** the request is not served
 
 #### Scenario: Update stops only the daemon
-- **WHEN** a client opens `/ws/remote` with `update=1` for a host whose daemon runs another version
+- **WHEN** a client opens a host stream with the update intent for a host whose daemon runs another version
 - **THEN** the only mutating maintenance command beyond installation and daemon startup is its installed server's instance-bound stop or explicitly confirmed conditional legacy migration; no shell-selected signal, session-ending flag or TCP fallback is used
 
 #### Scenario: Remote forwards only for reverse forwards
@@ -411,11 +189,11 @@ A client showing screens of several servers SHALL resolve every screen, pane and
 - **THEN** the client does not read the clipboard and sends nothing to the host
 
 ### Requirement: Hub Port Forwards
-A forward opened by the hub MUST be bound to `127.0.0.1` explicitly, whatever the user's SSH configuration says. It MUST be announced only as `http://localhost:<port>`, never as `http://127.0.0.1:<port>`, so that the browser does not send it Splitty's session cookie. Its `ssh` MUST run non-interactively, with no agent forwarding, no remote forwards and no terminal, to a target that passed the target validation of Remote Access Through SSH Tunnel, and remote and explicit local ports MUST be integers from 1 to 65535.
+A forward opened by the hub MUST be bound to `127.0.0.1` explicitly, whatever the user's SSH configuration says. It MUST be announced only as `http://localhost:<port>`, never as `http://127.0.0.1:<port>`, so that a browser does not send it cookies it holds for `127.0.0.1`. Its `ssh` MUST run non-interactively, with no agent forwarding, no remote forwards and no terminal, to a target that passed the target validation of Remote Access Through SSH Tunnel, and remote and explicit local ports MUST be integers from 1 to 65535.
 
-A forward MUST NOT be opened without the user's forward action or remote loopback-link click, unless the user turned on `remote.autoForwardPorts`, or previously opted to remember an enabled mapping and now connects that host successfully. Saving preferences, starting the local server, authenticating, reading state and observing ports MUST NOT by themselves authorize saved restoration. A disabled saved rule MUST override automatic forwarding. `/api/remote/forwards` and `/api/remote/forward-preferences` MUST NOT be served on the control socket.
+A forward MUST NOT be opened without the user's forward action or remote loopback-link click, unless the user turned on `remote.autoForwardPorts`, or previously opted to remember an enabled mapping and now connects that host successfully. Saving preferences, starting the local server, connecting a client, reading state and observing ports MUST NOT by themselves authorize saved restoration. A disabled saved rule MUST override automatic forwarding. `/api/remote/forwards` and `/api/remote/forward-preferences` MUST NOT be served on the control socket.
 
-A selected local port MUST be checked for availability on both `127.0.0.1` and `::1`, including explicit and saved ports and automatically chosen candidates. A busy address or an unexplained failure to establish availability MUST NOT be treated as free; an unavailable IPv6 stack alone MUST NOT disable IPv4 forwarding. Rebuilds MUST retain the selected port. Forward URLs MUST contain no Splitty token, bootstrap code, ticket or session credential. Labels MUST NOT affect SSH arguments, destinations or URLs.
+A selected local port MUST be checked for availability on both `127.0.0.1` and `::1`, including explicit and saved ports and automatically chosen candidates. A busy address or an unexplained failure to establish availability MUST NOT be treated as free; an unavailable IPv6 stack alone MUST NOT disable IPv4 forwarding. Rebuilds MUST retain the selected port. Forward URLs MUST contain no Splitty credential. Labels MUST NOT affect SSH arguments, destinations or URLs.
 
 #### Scenario: GatewayPorts in the SSH configuration
 - **WHEN** the user's SSH configuration sets `GatewayPorts yes` and the hub forwards port 3000 of a host
@@ -430,7 +208,7 @@ A selected local port MUST be checked for availability on both `127.0.0.1` and `
 - **THEN** the request is not served
 
 #### Scenario: Remembered authorization is limited
-- **WHEN** the local server starts, a client signs in or reads or edits saved preferences without connecting a host or requesting a forward
+- **WHEN** the local server starts, a client connects, or a client reads or edits saved preferences without connecting a host or requesting a forward
 - **THEN** no saved forward is opened, and connecting one host later authorizes only that host's enabled rules
 
 #### Scenario: Strict loopback availability
@@ -440,7 +218,7 @@ A selected local port MUST be checked for availability on both `127.0.0.1` and `
 
 #### Scenario: Development URL carries no Splitty credential
 - **WHEN** the client opens or rewrites a saved forward's URL in the browser
-- **THEN** the hostname is localhost, no Splitty credential is added, and the development service receives no Splitty cookie belonging to 127.0.0.1
+- **THEN** the hostname is localhost, no Splitty credential is added, and the development service receives no cookie the browser holds for 127.0.0.1
 - **AND** SSH carries the service's TCP bytes without injecting HTTP authentication or changing TLS or WebSocket traffic
 
 ### Requirement: Explicit Remote Editor Dispatch
@@ -533,7 +311,7 @@ Revocation and ownership transfer SHALL be ordered with job actions. Before ackn
 - **THEN** the waiting read ends without new output, the input is refused, and existing jobs keep running
 
 ### Requirement: Agent Socket Authority Is Local
-Grant administration SHALL be available only on the owner control socket. Grant sockets and IDs SHALL survive agent-client exits but expire when their server process ends; stale sockets SHALL never be rebound to another grant. Documentation SHALL identify the unrestricted same-user owner socket, token files and daemon-executed jobs as outside this scoped API boundary, and SHALL not claim OS or sudo isolation.
+Grant administration SHALL be available only on the owner control socket. Grant sockets and IDs SHALL survive agent-client exits but expire when their server process ends; stale sockets SHALL never be rebound to another grant. Documentation SHALL identify the unrestricted same-user owner socket and daemon-executed jobs as outside this scoped API boundary, and SHALL not claim OS or sudo isolation.
 
 #### Scenario: Grant path used after server restart
 - **WHEN** a client reconnects through a former grant socket after the server restarted
@@ -555,12 +333,11 @@ Each session keeper SHALL serve one Unix socket in the `keepers` directory below
 - **THEN** no variable of the shell's environment names a keeper socket or the keepers directory
 
 ### Requirement: Saved Forward Preference Guards
-Every `/api/remote/forward-preferences` method SHALL require ordinary API authentication after the Host, Origin and Fetch Metadata guards. Targets and ports SHALL be validated before any write or SSH invocation. Invalid requests SHALL leave saved and live state unchanged. The new endpoint SHALL grant no access to local control-socket callers or to remote-window native commands.
+Every forward-preference operation (`forwardPreferences.get`, `forwardPreferences.save`, `forwardPreferences.forget`, HTTP form `/api/remote/forward-preferences`) SHALL be available only as native operations of a local main connection (see `client-connections`, Enumerated Native Requests). Targets and ports SHALL be validated before any write or SSH invocation. Invalid requests SHALL leave saved and live state unchanged. They SHALL grant no access to control-socket or grant-socket callers, remote-window connections or host relays.
 
 #### Scenario: Unauthenticated or cross-origin preference access
-- **WHEN** GET, PUT or DELETE lacks valid authentication or fails the Host, Origin or Fetch Metadata guard
-- **THEN** it returns the existing 401 or 403 response as appropriate, before any metadata or forwarding side effect
-- **AND** an otherwise authenticated page on another local development port has no exception to those guards
+- **WHEN** a pane process sends `GET /api/remote/forward-preferences` over the owner control socket, or a remote-window connection or host relay requests `forwardPreferences.save`
+- **THEN** the socket answers 404 and the connection's request is refused, before any metadata or forwarding side effect
 
 #### Scenario: Invalid saved mapping
 - **WHEN** a preference write has an invalid SSH target, invalid port, wrong field type, unknown field or label longer than 200 Unicode characters
@@ -595,11 +372,11 @@ A client SHALL send `save_image` and `upload` only for the user's own drop or pa
 - **THEN** the window uploads it to the server of that pane's connection under its temporary directory and inserts the returned path only in that pane
 
 ### Requirement: Hub Reverse Forwards
-A reverse forward SHALL make `localhost:<local>` of this machine reachable on the host, and SHALL NOT make any other local address reachable: the API takes only a local port, and the forward's `ssh` SHALL name `localhost:<local>` as its destination. The local server's own HTTP port SHALL be refused with 409 `local_port_reserved`.
+A reverse forward SHALL make `localhost:<local>` of this machine reachable on the host, and SHALL NOT make any other local address reachable: the API takes only a local port, and the forward's `ssh` SHALL name `localhost:<local>` as its destination. A port that an internal endpoint holds (see Internal Endpoints Cannot Be Shared) SHALL be refused with 409 `local_port_reserved`.
 
 The remote end of the forward MUST be a Unix socket in an owner-only directory of the host's server, and the host side MUST listen for programs only through `splitty remote-relay serve` (see `remote-hosts`, Remote Relay), bound to `127.0.0.1` and, where available, `::1`. The relay MUST admit a TCP connection only when the connecting socket belongs to the user the relay runs as, and MUST close every other connection without passing it on, including one whose owner it cannot determine. A host where the owner cannot be determined (no `/proc/net/tcp`, such as macOS) SHALL be refused with code `unsupported_host` before anything listens there.
 
-A reverse forward MUST NOT be opened without the user's explicit request, unless the user previously remembered it as an enabled rule and now connects its host successfully. Detected ports, link clicks in panes, `remote.autoForwardPorts`, messages from a host and remote windows SHALL NOT open one. The forward's `ssh` MUST run non-interactively, with no agent forwarding and no terminal, to a validated target; a host whose SSH configuration adds forwards SHALL be refused as for forwards. Ports MUST be integers from 1 to 65535. `/api/remote/reverse-forwards` and `/api/remote/reverse-forward-preferences` MUST NOT be served on the control socket and SHALL have the authentication and guards of the other `/api` routes; reverse-forward preferences SHALL be stored owner-only like forward preferences.
+A reverse forward MUST NOT be opened without the user's explicit request, unless the user previously remembered it as an enabled rule and now connects its host successfully. Detected ports, link clicks in panes, `remote.autoForwardPorts`, messages from a host and remote windows SHALL NOT open one. The forward's `ssh` MUST run non-interactively, with no agent forwarding and no terminal, to a validated target; a host whose SSH configuration adds forwards SHALL be refused as for forwards. Ports MUST be integers from 1 to 65535. `/api/remote/reverse-forwards` and `/api/remote/reverse-forward-preferences` MUST NOT be served on the control socket and SHALL be available only as native operations of a local main connection (see `client-connections`, Enumerated Native Requests); reverse-forward preferences SHALL be stored owner-only like forward preferences.
 
 #### Scenario: Another user on the host
 - **WHEN** the user shares local port 11434 with `vm1` as port 11434, and another user of `vm1` connects to `127.0.0.1:11434` there
@@ -614,7 +391,7 @@ A reverse forward MUST NOT be opened without the user's explicit request, unless
 - **THEN** nothing listens for the shared port on an address of the host other than loopback
 
 #### Scenario: Own port refused
-- **WHEN** a request asks to share the port of the local server itself
+- **WHEN** a request asks to share a port that a browser gateway of an older Splitty version of this user holds
 - **THEN** it is refused with 409 `local_port_reserved` and no `ssh` is started
 
 #### Scenario: No automatic reverse forward
@@ -653,52 +430,41 @@ The daemon's client endpoint SHALL be distinct from control, grant and keeper so
 - **THEN** startup neither unlinks its socket nor starts a second workspace
 
 ### Requirement: No Authority Expansion Through Native Transport
-The native client endpoint SHALL expose only its enumerated UI/session operations. Control and grant sockets SHALL retain their existing route sets, and grant administration SHALL remain owner-control-only. No native entry point SHALL mint browser credentials. A failed scoped command SHALL never rediscover an owner, client or keeper endpoint.
+The native client endpoint SHALL expose only its enumerated UI/session operations. Control and grant sockets SHALL retain their existing route sets, and grant administration SHALL remain owner-control-only. No native entry point SHALL mint a credential. A failed scoped command SHALL never rediscover an owner, client or keeper endpoint.
 
 #### Scenario: Cross-surface escalation
-- **WHEN** a grant or control socket receives a UI-stream request, or a native UI connection requests grant administration or browser credentials
+- **WHEN** a grant or control socket receives a UI-stream request, or a native UI connection requests grant administration or a credential
 - **THEN** it is refused without granting authority
 
 #### Scenario: Scoped discovery failure
 - **WHEN** a grant socket is revoked or unreachable while a native daemon is available
 - **THEN** the command fails without contacting that daemon's owner or client endpoint
 
-### Requirement: Browser Gateway Credential Isolation
-Each gateway SHALL keep its own bootstrap, ticket and in-memory session store, with the cookie name `splitty-session-<instance>`, HttpOnly, host-only and SameSite=Strict. Process Token governs bearer tokens, including intentional reuse of the same configured owner token by `serve` gateways. The backend SHALL be fixed by the native invocation. Browser credentials SHALL not cross into the native service or SSH channel, and browser input SHALL not replace the gateway's assigned backend.
-
-#### Scenario: Two gateways
-- **WHEN** a browser uses two gateways on different local ports
-- **THEN** their cookies do not replace one another and each gateway rejects the other's session, bootstrap and ticket
-
-#### Scenario: Target substitution
-- **WHEN** a browser request, query or backend response names a different URL, socket or host
-- **THEN** the gateway cannot be redirected to that endpoint
-
 ### Requirement: Internal Endpoints Cannot Be Shared
-Splitty SHALL reject reverse forwarding of any of its active browser-gateway ports with `local_port_reserved`, including gateways for remote targets and other configurations of the same user. Listener reservation and sharing admission SHALL be coordinated, following Forwarding Reservation Lifetime, so neither a race, coordinator crash nor saved restoration can share a newly bound internal listener. Private client, control and keeper sockets SHALL not be accepted as forwarding destinations.
+This version binds no browser-gateway port. Splitty SHALL still reject reverse forwarding, with `local_port_reserved`, of any port that an active browser gateway of an older Splitty version of the same user holds, as the shared exposure registry records it, including gateways for remote targets and other configurations (provisional, tbd). Listener reservation and sharing admission SHALL be coordinated, following Forwarding Reservation Lifetime, so neither a race, coordinator crash nor saved restoration can share a newly bound internal listener. Private client, control and keeper sockets SHALL not be accepted as forwarding destinations.
 
 #### Scenario: Gateway races sharing
-- **WHEN** a browser gateway and a reverse-forward request concurrently select the same local port
+- **WHEN** an older version's browser gateway and a reverse-forward request concurrently select the same local port
 - **THEN** at most one is admitted and the gateway is never exposed through that forward
 
 #### Scenario: Saved share now names a gateway
-- **WHEN** a saved reverse-forward rule targets a port now owned by any active Splitty browser gateway
+- **WHEN** a saved reverse-forward rule targets a port now owned by an active browser gateway of an older Splitty version
 - **THEN** restoration reports `local_port_reserved` without connecting that listener to the host
 
 #### Scenario: Shared loopback across runtimes
-- **WHEN** a Windows/WSL configuration exposes one runtime's gateway to another runtime's sharing destination
+- **WHEN** a Windows/WSL configuration exposes one runtime's older-version gateway to another runtime's sharing destination
 - **THEN** gateway reservations protect that destination too, or sharing fails as unsupported before the forward starts
 
 ### Requirement: Forwarding Reservation Lifetime
-A reverse-share reservation SHALL be durable before exposure and cover actual local forwarding workers by process generation/network context. Release SHALL require locally verified termination; coordinator death, remote cleanup/heartbeat and a PID alone SHALL not suffice. A different immutable process birth identity MAY prove termination of the saved generation only within the same verified machine, boot and PID namespace; an effective-UID change alone SHALL NOT suffice. Ambiguous spawn/publication or cleanup SHALL keep the port reserved. Recovery SHALL not kill an unrelated process by PID alone; a conflicting gateway SHALL fail or choose a different ephemeral port.
+A reverse-share reservation SHALL be durable before exposure and cover actual local forwarding workers by process generation/network context. Release SHALL require locally verified termination; coordinator death, remote cleanup/heartbeat and a PID alone SHALL not suffice. A different immutable process birth identity MAY prove termination of the saved generation only within the same verified machine, boot and PID namespace; an effective-UID change alone SHALL NOT suffice. Ambiguous spawn/publication or cleanup SHALL keep the port reserved. Recovery SHALL not kill an unrelated process by PID alone.
 
 #### Scenario: Coordinator dies while forwarding lives
 - **WHEN** a coordinator is killed and a hostile SSH peer keeps the local forwarding worker alive
-- **THEN** a gateway cannot bind the reserved destination until local forwarding termination is verified, regardless of remote EOF or heartbeat reports
+- **THEN** no other share of this user is admitted on the reserved destination until local forwarding termination is verified, regardless of remote EOF or heartbeat reports
 
 #### Scenario: Crash during worker publication
 - **WHEN** startup crashes after reserving a port and before a spawned worker's identity is fully recorded
-- **THEN** recovery treats the reservation as uncertain and does not expose a new gateway on that port
+- **THEN** recovery treats the reservation as uncertain and admits no other share on that port
 
 #### Scenario: Unverified process identity or failed cleanup
 - **WHEN** recovery cannot verify the saved worker generation or that cleanup ended forwarding
@@ -729,14 +495,14 @@ A client SHALL read a viewer pane's document only over the connection whose scre
 - **THEN** it answers 404 and no pane appears
 
 ### Requirement: Rendered Documents Are Inert
-A client SHALL render a Markdown or HTML document without executing any script, event handler attribute or `javascript:` URL in it, without frames, objects, embedded documents or forms, and without loading anything over the network or from Splitty's own origin: images SHALL show only from `data:` URLs. The rendered document SHALL stay inside its pane: its styles SHALL apply only within the rendered document, and nothing it positions SHALL cover anything outside the pane. A link SHALL open an `http:` or `https:` URL through the external opener, a relative link the named file in a viewer pane, and a link to an anchor the position within the document; any other link SHALL do nothing. Rendering SHALL need no change to Frontend Security Headers: `frame-src 'none'` stays.
+A client SHALL render a Markdown or HTML document without executing any script, event handler attribute or `javascript:` URL in it, without frames, objects, embedded documents or forms, and without loading anything over the network or from Splitty's own service: images SHALL show only from `data:` URLs. The rendered document SHALL stay inside its pane: its styles SHALL apply only within the rendered document, and nothing it positions SHALL cover anything outside the pane. A link SHALL open an `http:` or `https:` URL through the external opener, a relative link the named file in a viewer pane, and a link to an anchor the position within the document; any other link SHALL do nothing.
 
 #### Scenario: A script in an HTML report
 - **WHEN** a viewer pane renders an HTML file holding `<script>`, an `onerror` attribute and a `javascript:` link
 - **THEN** no script runs and the link does nothing when clicked
 
 #### Scenario: An image from the server's origin
-- **WHEN** a Markdown document holds `![x](/api/mux/state)`
+- **WHEN** a Markdown document holds `![x](/api/mux/state)` or `![x](http://127.0.0.1:9800/api/mux/state)`
 - **THEN** the window sends no request for it and shows the image's alt text
 
 #### Scenario: A load hidden in a style
@@ -759,10 +525,10 @@ Template application SHALL be accepted only through authenticated window session
 - **THEN** application is denied and extraction is unavailable on those sockets
 
 ### Requirement: JSON Request Bodies
-An API endpoint that takes a JSON body SHALL accept the request only when its `Content-Type` is `application/json` or an `application/*+json` type, with or without parameters, on the HTTP listener and on the control socket. Otherwise the server SHALL answer 415 before reading the body and without changing any state. On the HTTP listener the Host, Origin and Fetch Metadata guards and the credential check still come first. A body endpoint therefore cannot be reached by a request a browser sends across origins without a preflight (a form post or a `text/plain` body), even if a guard were missing.
+An API endpoint that takes a JSON body SHALL accept the request only when its `Content-Type` is `application/json` or an `application/*+json` type, with or without parameters, on the control socket. Otherwise the server SHALL answer 415 before reading the body and without changing any state.
 
 #### Scenario: Text body with valid credentials
-- **WHEN** an authorized same-origin request posts a well-formed operation to `/api/mux/op` with `Content-Type: text/plain`
+- **WHEN** a pane process posts a well-formed operation to `/api/mux/op` over the control socket with `Content-Type: text/plain`
 - **THEN** the server responds 415 and the workspace state is unchanged
 
 #### Scenario: Missing content type on the control socket
@@ -772,3 +538,18 @@ An API endpoint that takes a JSON body SHALL accept the request only when its `C
 #### Scenario: JSON with a charset
 - **WHEN** a client sends a body endpoint its JSON with `Content-Type: application/json; charset=utf-8`
 - **THEN** the request is processed
+
+### Requirement: No Terminal-Service TCP Listener
+No server, daemon, embedded service, desktop backend, SSH bridge or keeper SHALL create a TCP listener for terminal, control, API or file traffic, including on failure. The only TCP listeners Splitty opens SHALL be the forwards and reverse-share relays the user requested (see Hub Port Forwards and Hub Reverse Forwards), bound to loopback. The removed `--remote` flag of `splitty daemon start` and the removed `--addr` and `--token` options SHALL be refused with status 2 before anything starts.
+
+#### Scenario: Daemon and embedded service
+- **WHEN** a daemon runs and the desktop app runs its embedded service, each with open screens
+- **THEN** neither process holds a listening TCP socket other than a forward the user requested
+
+#### Scenario: Direct remote mode is refused
+- **WHEN** the user passes `--remote` to `splitty daemon start`
+- **THEN** the process exits with status 2 without starting a daemon
+
+#### Scenario: Former listener address
+- **WHEN** the user runs `splitty daemon start --addr 0.0.0.0:8080`
+- **THEN** the process exits with status 2 without opening a socket

@@ -383,7 +383,7 @@ The server streams a session at most once per connection, so a client SHALL keep
 
 #### Scenario: Status probe in a replay from an older server
 - **WHEN** the replay of an older server, which forwards status probes, holds `ESC ] 7501 ; ? BEL`
-- **THEN** neither the web client nor `splitty attach` passes the probe on to a terminal that could answer it
+- **THEN** `splitty attach` does not pass the probe on to a terminal that could answer it
 
 ### Requirement: Image Upload
 The server SHALL accept `{"type":"save_image","requestId":"<r>","data":"<base64>"}`, with `data` an image of at most 10 MiB encoded as standard base64. It SHALL store the image as a new file in `splitty/paste/` of the user's cache directory (`$XDG_CACHE_HOME`, else `~/.cache`), the directory with mode 0700 and the file with mode 0600, and answer `{"type":"image_saved","requestId":"<r>","path":"<absolute path>"}`. The server SHALL choose the file's name, `paste-<UTC date and time>-<random hex>` with the extension `.png`, `.jpg`, `.gif` or `.webp` from the image's leading bytes. Data that is not valid base64, is larger than 10 MiB or is not a PNG, JPEG, GIF or WebP image SHALL be answered with `{"type":"image_failed","requestId":"<r>","error":"<message>"}` and stored nowhere. Before it stores an image, the server SHALL remove the `paste-` files of that directory that are older than 24 hours, and then all but the newest 100.
@@ -583,7 +583,7 @@ The server SHALL send `size` with the `sessionId`, `cols`, `rows` and the `polic
 - **THEN** it receives the `size` event before the first binary frame of the replay
 
 ### Requirement: Client Size Reports
-With a server that announces `pty-size-v1`, a client SHALL report as `resize` the size of a shown pane (its panel visible on the active screen), report it again when the pane becomes shown, and send `hide` when it stops being shown. It SHALL report no other pane, except that it MAY report the other terminal tabs of a shown pane's tab group at that pane's measured size, follow that size, and send `hide` for them once the group stops being shown; the native app does, the web client does not. Its first report after an attach SHALL carry `redraw: true` instead of resizing the PTY by one row and back. With other servers it SHALL resize the PTY as before, send none of these messages and resize no background tab.
+With a server that announces `pty-size-v1`, a client SHALL report as `resize` the size of a shown pane (its panel visible on the active screen), report it again when the pane becomes shown, and send `hide` when it stops being shown. It SHALL report no other pane, except that it MAY report the other terminal tabs of a shown pane's tab group at that pane's measured size, follow that size, and send `hide` for them once the group stops being shown; the native app does. Its first report after an attach SHALL carry `redraw: true` instead of resizing the PTY by one row and back. With other servers it SHALL resize the PTY as before, send none of these messages and resize no background tab.
 
 #### Scenario: Background screen
 - **WHEN** the user switches from a host's screen to another screen of the same host

@@ -98,7 +98,7 @@ Each annotation's passage SHALL be found in the document by the annotation's quo
 - **THEN** the annotation is anchored at the rewrapped words, without a mark of a change
 
 #### Scenario: The same result in every window
-- **WHEN** the web window and the native window show the same file with an annotation on a passage that an agent reworded
+- **WHEN** two clients of one service show the same file with an annotation on a passage that an agent reworded
 - **THEN** both mark the passage as changed at the same lines, and a review from either names the same lines and note
 
 #### Scenario: A script without spaces

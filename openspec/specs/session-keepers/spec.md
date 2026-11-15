@@ -13,7 +13,7 @@ In daemon mode, every terminal session SHALL run under a keeper process of its o
 - **THEN** the shell keeps running with the same PID
 
 #### Scenario: Embedded server
-- **WHEN** `splitty serve` hosts a session
+- **WHEN** the desktop app's embedded service hosts a session
 - **THEN** no keeper process exists for it, and the session ends with the server
 
 #### Scenario: Keeper cannot start

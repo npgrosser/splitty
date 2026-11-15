@@ -5,17 +5,6 @@ Defines how the Splitty server runs and what outlives what: the embedded and dae
 
 ## Requirements
 
-### Requirement: Two Server Modes
-The server SHALL run in exactly one of two modes for its whole lifetime: `daemon`, started by `splitty daemon start`, or `embedded`, used by plain `splitty serve` and by the backends the desktop app starts; a `serve --daemon` or remote browser gateway is only a client of its target service's mode. Persistence SHALL be a property of the mode, not of individual screens: a daemon persists and restores its workspace, and an embedded server persists nothing.
-
-#### Scenario: Serve runs embedded
-- **WHEN** a user runs `splitty serve`
-- **THEN** the server runs in `embedded` mode
-
-#### Scenario: Daemon start runs as daemon
-- **WHEN** a user runs `splitty daemon start`
-- **THEN** the server runs in `daemon` mode
-
 ### Requirement: Server Mode Reporting
 The server SHALL report its mode to clients as `serverMode` with the value `"daemon"` or `"embedded"` in every `mux.welcome` message (see `mux-protocol`) and in the response of `GET /api/mux/status` (see `control-api`).
 
@@ -24,37 +13,11 @@ The server SHALL report its mode to clients as `serverMode` with the value `"dae
 - **THEN** the `mux.welcome` it receives carries `serverMode: "daemon"`
 
 #### Scenario: Status from an embedded server
-- **WHEN** a caller requests `GET /api/mux/status` from a server started with `splitty serve`
+- **WHEN** a pane process of the desktop app's embedded service requests `GET /api/mux/status` through `SPLITTY_SOCK`
 - **THEN** the response contains `"serverMode": "embedded"`
 
-### Requirement: Ephemeral Port And Bind Before Detach
-An explicit browser gateway using port 0 SHALL report the actual OS-assigned loopback port everywhere, including its origin and startup output. The daemon launcher SHALL acquire the instance lock before starting its detached child and SHALL wait for that child to bind the mandatory private client endpoint and complete native readiness before reporting success. Failure SHALL be reported in the foreground with no orphan daemon. Native daemon discovery SHALL not invent or require a TCP port.
-
-#### Scenario: OS-assigned port reported
-- **WHEN** `splitty serve --addr 127.0.0.1:0` starts
-- **THEN** its startup output and origin use the same actual non-zero bound port
-
-#### Scenario: Endpoint unavailable
-- **WHEN** a daemon cannot securely bind its private client endpoint
-- **THEN** startup fails in the foreground without detaching or opening a TCP listener
-
-#### Scenario: Port already in use
-- **WHEN** an explicit browser gateway is asked to bind a port already used by another process
-- **THEN** it fails in the foreground without leaving a gateway or owned embedded service running
-
-### Requirement: Embedded Mode Lifetime
-An embedded server SHALL keep its workspace and sessions only in memory, for the lifetime of its process. It SHALL NOT read a persisted workspace at startup, SHALL NOT write one, and SHALL NOT register itself in `daemon.json`. When `splitty serve` receives an interrupt (Ctrl+C), or a native child backend reaches end-of-file on its inherited input, it SHALL close all sessions and stop.
-
-#### Scenario: Serve starts empty
-- **WHEN** `splitty serve` starts while a `state.json` from a daemon exists in the configuration directory
-- **THEN** the embedded server starts with an empty workspace and leaves `state.json` untouched
-
-#### Scenario: Interrupt ends sessions
-- **WHEN** `splitty serve` receives Ctrl+C
-- **THEN** every terminal session it hosts is closed before the process exits
-
 ### Requirement: Desktop App Hosting On macOS And Linux
-On macOS and Linux the desktop app SHALL always start an owned embedded local service without a UI TCP listener. Its local workspace and jobs SHALL end when the app exits. The app SHALL NOT automatically connect to, start, restart or stop an independent local daemon, adopt its keepers or modify its discovery/workspace files. Existing, incompatible, unreachable, stale or corrupt daemon discovery SHALL not change desktop startup. Persistent local access remains explicit through the CLI or `serve --daemon`.
+On macOS and Linux the desktop app SHALL always start an owned embedded local service without a UI TCP listener. Its local workspace and jobs SHALL end when the app exits. The app SHALL NOT automatically connect to, start, restart or stop an independent local daemon, adopt its keepers or modify its discovery/workspace files. Existing, incompatible, unreachable, stale or corrupt daemon discovery SHALL not change desktop startup. Persistent local access remains explicit through `splitty daemon start`.
 
 #### Scenario: Daemon available
 - **WHEN** a compatible local daemon is already running
@@ -69,8 +32,8 @@ On macOS and Linux the desktop app SHALL always start an owned embedded local se
 - **THEN** normal embedded desktop startup still works without connecting to or updating that daemon
 
 #### Scenario: Daemon does not issue a code
-- **WHEN** an independent local daemon has no usable bootstrap endpoint
-- **THEN** the desktop app still starts its own embedded service in-process without reading a browser token or requesting a code from the daemon
+- **WHEN** an independent local daemon runs
+- **THEN** the desktop app starts its own embedded service in-process without requesting anything from the daemon or reading a credential file
 
 #### Scenario: Stale daemon file
 - **WHEN** local daemon discovery is stale or corrupt
@@ -276,26 +239,15 @@ Workspace state without managed-job fields SHALL load with no managed jobs and r
 - **THEN** its ordinary screens and shells restore as before and no managed job is inferred
 
 ### Requirement: Configuration Directory Override
-When the environment variable `SPLITTY_CONFIG_DIR` holds an absolute path, a Splitty server, daemon or CLI SHALL use that directory instead of the platform's Splitty configuration directory for every file kept there, among them `config.toml`, `auth-token`, `daemon.json`, `daemon.log`, `state.json`, templates and the known hosts. A relative or empty value SHALL be ignored. The directory SHALL be created owner-only like the default one.
+When the environment variable `SPLITTY_CONFIG_DIR` holds an absolute path, a Splitty server, daemon or CLI SHALL use that directory instead of the platform's Splitty configuration directory for every file kept there, among them `config.toml`, `daemon.json`, `daemon.log`, `state.json`, templates and the known hosts. A relative or empty value SHALL be ignored. The directory SHALL be created owner-only like the default one.
 
 #### Scenario: Daemon with its own directory
 - **WHEN** a daemon is started with `SPLITTY_CONFIG_DIR=/home/me/.config/splitty-b`
-- **THEN** it writes `daemon.json` and reads `auth-token` in `/home/me/.config/splitty-b`, and `splitty daemon status` with the same variable finds it while one without it does not
+- **THEN** it writes `daemon.json` and `daemon.log` in `/home/me/.config/splitty-b`, and `splitty daemon status` with the same variable finds it while one without it does not
 
 #### Scenario: Relative value
 - **WHEN** `SPLITTY_CONFIG_DIR` is `relative/dir`
 - **THEN** the platform's configuration directory is used
-
-### Requirement: Browser Adapter Lifetime
-A browser gateway SHALL own its listener and browser credentials independently of the target service. Stopping a gateway attached to a daemon SHALL only detach; stopping plain `serve` SHALL also stop its owned embedded service. A dropped target connection SHALL not release the browser listener or select another backend.
-
-#### Scenario: Daemon browser closed
-- **WHEN** `splitty serve --daemon` ends
-- **THEN** its listener closes and the daemon and its sessions keep running
-
-#### Scenario: Target temporarily unavailable
-- **WHEN** a gateway loses its daemon or SSH connection
-- **THEN** its listener stays bound and target operations fail or wait only within their documented deadlines until reconnect
 
 ### Requirement: Windows Startup Progress
 The native Windows app started without a WSL target SHALL open its window while it prepares its WSL backend, not after it. Until its workspace is shown, the window SHALL name the current phase as plain text: choosing a distribution, starting it, installing the backend, starting the backend, connecting. A failure before the workspace is shown SHALL stay in the window with its reason and the phase it ended; the app SHALL NOT exit on its own because of it.
@@ -342,3 +294,36 @@ A child started with `desktop-backend --transport native-v1 --backend embedded` 
 #### Scenario: Owner carrier across reloads
 - **WHEN** the launcher of `desktop-backend --transport native-v1 --backend embedded --owner` closes one substream and opens another
 - **THEN** both reach the same embedded workspace and its jobs, and closing the launcher's pipes ends those sessions and jobs
+
+### Requirement: Daemon And Embedded Modes
+The server SHALL run in exactly one of two modes for its whole lifetime: `daemon`, started by `splitty daemon start`, or `embedded`, used by the local service the desktop app starts. Persistence SHALL be a property of the mode, not of individual screens: a daemon persists and restores its workspace, and an embedded server persists nothing.
+
+#### Scenario: Desktop backend runs embedded
+- **WHEN** the desktop app starts its local service with `desktop-backend --transport native-v1 --backend embedded`
+- **THEN** the server runs in `embedded` mode
+
+#### Scenario: Daemon start runs as daemon
+- **WHEN** a user runs `splitty daemon start`
+- **THEN** the server runs in `daemon` mode
+
+### Requirement: Embedded Service Lifetime
+An embedded server SHALL keep its workspace and sessions only in memory, for the lifetime of its process. It SHALL NOT read a persisted workspace at startup, SHALL NOT write one, and SHALL NOT register itself in `daemon.json`. When its native child backend reaches end-of-file on its inherited input, or the desktop app that owns it in-process exits, it SHALL close all sessions and stop.
+
+#### Scenario: Embedded service starts empty
+- **WHEN** the desktop app's embedded service starts while a `state.json` from a daemon exists in the configuration directory
+- **THEN** the embedded server starts with an empty workspace and leaves `state.json` untouched
+
+#### Scenario: Closed input ends sessions
+- **WHEN** the launcher of `desktop-backend --transport native-v1 --backend embedded` closes the child's input
+- **THEN** every terminal session it hosts is closed before the process exits
+
+### Requirement: Daemon Binds Before Detach
+The daemon launcher SHALL acquire the instance lock before starting its detached child and SHALL wait for that child to bind the mandatory private client endpoint and complete native readiness before reporting success. Failure SHALL be reported in the foreground with no orphan daemon. Native daemon discovery SHALL not invent or require a TCP port.
+
+#### Scenario: Endpoint unavailable
+- **WHEN** a daemon cannot securely bind its private client endpoint
+- **THEN** startup fails in the foreground without detaching or opening a TCP listener
+
+#### Scenario: Ready before success
+- **WHEN** `splitty daemon start` reports `SPLITTY_CLIENT_SOCKET=<path>`
+- **THEN** a native client can negotiate with the daemon at that path at once

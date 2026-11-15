@@ -9,15 +9,15 @@ Defines what a remote host needs for Splitty and how a client installs its own s
 A remote host SHALL be reachable with the system `ssh` client and SHALL run Linux or macOS (`uname -s` `Linux` or `Darwin`) with a POSIX `sh`, `uname`, `mkdir`, `mktemp`, `cat`, `tar`, `gzip`, `ls`, `rm`, and `sha256sum` or `shasum`; a macOS host, which has no `/proc`, also `ps`. Any user SHALL be allowed, including root. A host with another kernel MUST be reported with a message naming the kernel it runs, before anything is uploaded. The supported architectures are `x86_64` (`uname -m` also `amd64`) and `aarch64` (also `arm64`). The client SHALL install only a server it holds for the host's kernel and architecture (see Payload Sources), and the check that the unpacked server runs guards against a mismatch.
 
 #### Scenario: Unsupported kernel
-- **WHEN** `splitty connect` probes a host whose `uname -s` is neither `Linux` nor `Darwin`
-- **THEN** it reports that only Linux and macOS hosts are supported, names the kernel it found, and exits with status 1 without uploading anything
+- **WHEN** the hub probes a host whose `uname -s` is neither `Linux` nor `Darwin`
+- **THEN** it reports `remote.error` with code `unsupported_host`, saying that only Linux and macOS hosts are supported and naming the kernel it found, without uploading anything
 
 #### Scenario: Root on the host
 - **WHEN** the SSH user on the host is root
 - **THEN** the install and the connect proceed as for any other user
 
 #### Scenario: aarch64 host
-- **WHEN** a released static `splitty` for x86_64 connects to a Linux host whose `uname -m` is `aarch64` or `arm64` and that has no Splitty
+- **WHEN** the hub of a released static `splitty` for x86_64 opens a Linux host whose `uname -m` is `aarch64` or `arm64` and that has no Splitty
 - **THEN** it installs the aarch64 server it carries
 
 #### Scenario: macOS host
@@ -25,11 +25,11 @@ A remote host SHALL be reachable with the system `ssh` client and SHALL run Linu
 - **THEN** it installs the macOS arm64 server it carries and connects as to a Linux host
 
 ### Requirement: Server Installation
-Before it asks the host for its daemon, `splitty connect` SHALL probe the host in one SSH call for its kernel, architecture, home directory, and whether the client's own version is installed in `~/.local/share/splitty/remote/<version>/` with a checksum marker that matches the client's payload.
+Before it asks the host for its daemon, the hub SHALL probe the host in one SSH call for its kernel, architecture, home directory, and whether the client's own version is installed in `~/.local/share/splitty/remote/<version>/` with a checksum marker that matches the client's payload.
 - When the version is installed and matches, the client SHALL use it without uploading anything.
 - Otherwise it SHALL upload the payload over the SSH connection's standard input into a new directory of mode 0700 below `~/.local/share/splitty/remote/`, verify the payload's SHA-256 checksum on the host, unpack it, check that the unpacked server runs on the host (`splitty --version`), record the checksum as the marker, and only then move it to `~/.local/share/splitty/remote/<version>/`, replacing a broken install of the same version.
 - A host with neither `sha256sum` nor `shasum` SHALL get nothing installed, and the client SHALL say that the host lacks a SHA-256 tool, not that the upload was corrupted.
-- It SHALL print that it installs, naming the version, the host and the architecture.
+- It SHALL report the `install` step, naming the version, the host and the architecture.
 - After an install, and whenever the probe found the version installed, the client SHALL run the installed server by its absolute path for every later command on the host.
 
 A `splitty` that the user installed on the host elsewhere SHALL NOT be changed or removed.
@@ -44,7 +44,7 @@ A `splitty` that the user installed on the host elsewhere SHALL NOT be changed o
 
 #### Scenario: Corrupted upload
 - **WHEN** the bytes that arrive on the host do not match the payload's checksum
-- **THEN** nothing is moved to `~/.local/share/splitty/remote/<version>/`, the temporary directory is removed, and the client reports the checksum failure and exits with status 1
+- **THEN** nothing is moved to `~/.local/share/splitty/remote/<version>/`, the temporary directory is removed, and the hub reports the checksum failure as `remote.error` with code `install`
 
 #### Scenario: Host without sha256sum
 - **WHEN** the host has `shasum` but no `sha256sum`
@@ -64,11 +64,11 @@ The checksum the host verifies SHALL be computed by the client over the exact by
 
 #### Scenario: Development payload
 - **WHEN** `SPLITTY_REMOTE_PAYLOAD` names an archive built by `packaging/windows/build-wsl-payload.sh` and the host has no Splitty
-- **THEN** `splitty connect` installs the server from that archive
+- **THEN** the hub of a client started with that variable installs the server from that archive
 
 #### Scenario: No payload and no splitty on the host
 - **WHEN** the client has no payload for the host and the host has no `splitty` in its `PATH`
-- **THEN** the client reports that `splitty` is not installed on the host and that a client with a server for the host's architecture would install it, and exits with status 1
+- **THEN** the client reports that `splitty` is not installed on the host and that a client with a server for the host's architecture would install it, and installs nothing
 
 #### Scenario: Desktop app on an aarch64 host
 - **WHEN** a released Linux or macOS desktop app opens a host on aarch64 without Splitty
@@ -186,7 +186,7 @@ Forgetting a host SHALL remove its recent entry, alias and cached screen directo
 - **THEN** it remains discoverable by its target and display alias until forgotten or its alias is cleared
 
 ### Requirement: Host Server Apart From The Desktop App
-On a macOS host, the client SHALL run every command of the server it installed (the handshake, `daemon stop`, `remote-bridge` and `issue-bootstrap`) with the environment variable `SPLITTY_CONFIG_DIR` set to `<home>/.config/splitty`, `<home>` being the home directory the probe reported. That server's daemon, configuration, token, saved state, templates, known hosts and control sockets thereby live apart from those of a Splitty desktop app or CLI of the same user, which keep `~/Library/Application Support/splitty`. The variable SHALL reach the daemon and its panes, so that the `splitty` installed next to the server reaches the same daemon from a pane. On a Linux host the client SHALL NOT set it.
+On a macOS host, the client SHALL run every command of the server it installed (the handshake, `daemon stop` and `remote-bridge`) with the environment variable `SPLITTY_CONFIG_DIR` set to `<home>/.config/splitty`, `<home>` being the home directory the probe reported. That server's daemon, configuration, saved state, templates, known hosts and control sockets thereby live apart from those of a Splitty desktop app or CLI of the same user, which keep `~/Library/Application Support/splitty`. The variable SHALL reach the daemon and its panes, so that the `splitty` installed next to the server reaches the same daemon from a pane. On a Linux host the client SHALL NOT set it.
 
 #### Scenario: Mac with the desktop app
 - **WHEN** a hub connects to a Mac whose user runs the Splitty desktop app, and starts a daemon there
@@ -260,7 +260,7 @@ The host SHALL revalidate the conditional proof immediately before signaling onl
 - **THEN** migration is not replayed automatically; an ordinary later connection may discover the result without another migration request
 
 ### Requirement: Bounded Host Preparation
-Preparing a host terminal connection SHALL have a fixed ten-minute ceiling shared by native, browser and desktop client paths. An install payload upload MAY exceed the ordinary two-minute command deadline while writes progress; it SHALL stop after at most eight minutes or sixty seconds without a successful stdin write. After stdin completes, command output/process completion SHALL have at most two minutes. No-input setup commands SHALL retain that two-minute bound. Preparation messages and unrelated stdout/stderr activity SHALL NOT extend upload or overall preparation deadlines. Framing and service negotiation SHALL retain their five-second limits.
+Preparing a host terminal connection SHALL have a fixed ten-minute ceiling shared by every client path through the hub. An install payload upload MAY exceed the ordinary two-minute command deadline while writes progress; it SHALL stop after at most eight minutes or sixty seconds without a successful stdin write. After stdin completes, command output/process completion SHALL have at most two minutes. No-input setup commands SHALL retain that two-minute bound. Preparation messages and unrelated stdout/stderr activity SHALL NOT extend upload or overall preparation deadlines. Framing and service negotiation SHALL retain their five-second limits.
 
 Cancellation or a deadline SHALL terminate only the attempt's owned workers and retain admission until their exit is observed. It SHALL NOT repeat admitted mutations or weaken checksum verification before installation publication.
 
@@ -281,7 +281,7 @@ Cancellation or a deadline SHALL terminate only the attempt's owned workers and 
 - **THEN** setup fails rather than consuming the remaining host-preparation allowance indefinitely
 
 #### Scenario: Preparation cancelled during upload
-- **WHEN** the owning connection or document is cancelled while stdin is blocked
+- **WHEN** the owning connection is cancelled while stdin is blocked
 - **THEN** setup is cancelled immediately and worker capacity remains reserved until exit is observed
 
 ### Requirement: SSH Questions Of The Local Service
@@ -289,7 +289,7 @@ A local service that runs `ssh` for its hub SHALL hand the questions OpenSSH ask
 
 A service that announces `ssh-prompts-v1` in `mux.welcome` SHALL send `{"type":"ssh.prompts.changed"}` on its local main connections when a question appears or goes, and once after the greeting while questions are pending. The notification SHALL carry neither question text nor answer, MAY coalesce, and SHALL not be sent on remote-window connections or into host relays.
 
-The native client SHALL show the questions of its local service, whether that service is embedded or the WSL backend, read with `ssh.prompts.get` after each notification, and answer through the service; it SHALL not poll a service that announces the capability, and it SHALL not hand the service an askpass program of its own (provisional, tbd). Without the capability it SHALL poll `ssh.prompts.get` at most once a second and stop at the first refused read (provisional, tbd). A question the user dismisses SHALL be answered with a cancel. The web client MAY keep polling (provisional, tbd).
+The native client SHALL show the questions of its local service, whether that service is embedded or the WSL backend, read with `ssh.prompts.get` after each notification, and answer through the service; it SHALL not poll a service that announces the capability, and it SHALL not hand the service an askpass program of its own (provisional, tbd). Without the capability it SHALL poll `ssh.prompts.get` at most once a second and stop at the first refused read (provisional, tbd). A question the user dismisses SHALL be answered with a cancel.
 
 #### Scenario: A password question reaches the native window
 - **WHEN** `ssh` asks for a password while the local service connects a host for a native window
