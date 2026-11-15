@@ -1,7 +1,7 @@
 # server-modes Specification
 
 ## Purpose
-Defines how the Splitty server runs and what outlives what: the embedded and daemon server modes, how desktop launchers bind the server's lifetime to theirs, how a running daemon advertises itself, and which workspace state survives a daemon restart.
+Defines how the Splitty server runs and what outlives what: the embedded and daemon server modes, how the desktop app binds a backend's lifetime to its own, how a running daemon advertises itself, and which workspace state survives a daemon restart.
 
 ## Requirements
 
@@ -42,29 +42,6 @@ An explicit browser gateway using port 0 SHALL report the actual OS-assigned loo
 - **WHEN** an explicit browser gateway is asked to bind a port already used by another process
 - **THEN** it fails in the foreground without leaving a gateway or owned embedded service running
 
-### Requirement: Desktop Stdio Lifetime Binding
-A child started with `desktop-backend --transport native-v1` SHALL select `--backend embedded|ssh`: an owned embedded service or the shared SSH flow with a validated `--target`. It SHALL use inherited stdin/stdout only for its negotiated connection, with bounded diagnostics on stderr. EOF SHALL stop owned embedded sessions or only detach from an SSH host. Protocol bytes SHALL not be decoded as text. The former `serve --desktop-stdio` SHALL be refused with migration guidance.
-
-#### Scenario: Launcher exits
-- **WHEN** the launcher closes the child's input pipe
-- **THEN** the child stops accepting work and shuts down its embedded sessions
-
-#### Scenario: Binary roundtrip
-- **WHEN** terminal output includes NULs, non-UTF-8 bytes or split frame headers
-- **THEN** those bytes are delivered unchanged and no log or bootstrap line contaminates stdout
-
-#### Scenario: Legacy launcher
-- **WHEN** a caller requests `serve --desktop-stdio`
-- **THEN** it gets a usage error pointing to the native child entry point, without opening a listener
-
-#### Scenario: Launcher requests a fresh code
-- **WHEN** a launcher writes the old `bootstrap` line to the native child's input
-- **THEN** negotiation fails as invalid input without printing a bootstrap line or opening HTTP
-
-#### Scenario: Helper attached to an independent SSH daemon
-- **WHEN** a native helper connected to an SSH daemon loses its launcher
-- **THEN** it closes its connection and owned SSH process without stopping the daemon or its sessions
-
 ### Requirement: Embedded Mode Lifetime
 An embedded server SHALL keep its workspace and sessions only in memory, for the lifetime of its process. It SHALL NOT read a persisted workspace at startup, SHALL NOT write one, and SHALL NOT register itself in `daemon.json`. When `splitty serve` receives an interrupt (Ctrl+C), or a native child backend reaches end-of-file on its inherited input, it SHALL close all sessions and stop.
 
@@ -77,7 +54,7 @@ An embedded server SHALL keep its workspace and sessions only in memory, for the
 - **THEN** every terminal session it hosts is closed before the process exits
 
 ### Requirement: Desktop App Hosting On macOS And Linux
-On macOS and Linux the desktop app SHALL always start an owned embedded local service without a UI TCP listener. Its local workspace and jobs SHALL end when the app exits. The app SHALL NOT automatically connect to, start, restart or stop an independent local daemon, adopt its keepers or modify its discovery/workspace files. Existing, incompatible, unreachable, stale or corrupt daemon discovery SHALL not change desktop startup. Persistent local access remains explicit through the CLI or `serve --daemon`. Popouts SHALL share the owning app's service lifetime.
+On macOS and Linux the desktop app SHALL always start an owned embedded local service without a UI TCP listener. Its local workspace and jobs SHALL end when the app exits. The app SHALL NOT automatically connect to, start, restart or stop an independent local daemon, adopt its keepers or modify its discovery/workspace files. Existing, incompatible, unreachable, stale or corrupt daemon discovery SHALL not change desktop startup. Persistent local access remains explicit through the CLI or `serve --daemon`.
 
 #### Scenario: Daemon available
 - **WHEN** a compatible local daemon is already running
@@ -93,7 +70,7 @@ On macOS and Linux the desktop app SHALL always start an owned embedded local se
 
 #### Scenario: Daemon does not issue a code
 - **WHEN** an independent local daemon has no usable bootstrap endpoint
-- **THEN** the desktop app still starts its own embedded service over IPC without reading a browser token or requesting a code from the daemon
+- **THEN** the desktop app still starts its own embedded service in-process without reading a browser token or requesting a code from the daemon
 
 #### Scenario: Stale daemon file
 - **WHEN** local daemon discovery is stale or corrupt
@@ -107,28 +84,8 @@ On macOS and Linux the desktop app SHALL always start an owned embedded local se
 - **WHEN** the desktop app exits while an independent local daemon and a remote daemon have sessions
 - **THEN** its embedded local sessions and jobs end, while the independent daemon and remote sessions keep running
 
-### Requirement: Desktop App Command Search Path
-On macOS and Linux, a desktop app whose standard input is not a terminal SHALL, before it starts its backend or a remote window, ask the user's login shell for its `PATH`: the shell named by `SHELL`, started as an interactive login shell (csh and tcsh as interactive shells), without input. The app SHALL then use the login shell's `PATH` entries, followed by the inherited `PATH` entries the login shell lacks, for every program it starts, among them `ssh` and with it the `ProxyCommand` of the user's SSH configuration. When `SHELL` is unset or not an absolute path, when the shell fails, or when it reports no `PATH` within 5 seconds, the app SHALL keep its inherited `PATH`; a program the shell's startup leaves running SHALL NOT delay the app beyond the shell's answer. The app SHALL take no variable of the shell's environment other than `PATH`. A desktop app whose standard input is a terminal SHALL keep the `PATH` it inherited.
-
-#### Scenario: Started from the Dock
-- **WHEN** macOS starts the app with the `PATH` `/usr/bin:/bin:/usr/sbin:/sbin`, and the user's zsh startup adds `/opt/homebrew/bin`
-- **THEN** the app's `PATH` starts with the login shell's entries, `/opt/homebrew/bin` among them, and still contains `/usr/sbin` and `/sbin`
-- **AND** a remote window to a host whose `ProxyCommand` runs `gcloud` from `/opt/homebrew/bin` reaches the host
-
-#### Scenario: Shell startup does not answer
-- **WHEN** the login shell has not reported a `PATH` after 5 seconds, or `SHELL` is not an absolute path
-- **THEN** the app starts with its inherited `PATH`
-
-#### Scenario: Background program of the startup files
-- **WHEN** the shell's startup files leave a program running in the background that holds the shell's output open
-- **THEN** the app uses the `PATH` the shell reported, without waiting for that program
-
-#### Scenario: Started from a terminal
-- **WHEN** the app is started from a terminal
-- **THEN** it keeps the terminal's `PATH` and does not start a login shell
-
 ### Requirement: Desktop App Hosting On Windows
-The native Windows app SHALL run its local embedded backend in the selected supported WSL 2 distribution through inherited pipes using `desktop-backend --transport native-v1`. It SHALL need no localhost forwarding, discover no local daemon, and reuse its live backend for that distribution. Switching distributions SHALL revoke old client handles and stop the previous backend. On exit it SHALL close input, wait up to 3 seconds, then terminate only its owned bridge if needed, never the distribution. Remote-only windows SHALL work without WSL.
+The native Windows app SHALL run its local embedded backend in the selected supported WSL 2 distribution through inherited pipes using `desktop-backend --transport native-v1 --backend embedded --owner`. It SHALL need no localhost forwarding and discover no local daemon. On exit it SHALL close input, wait up to 3 seconds, then terminate only its owned bridge if needed, never the distribution. Without a usable WSL distribution it SHALL report that it needs one and start no backend.
 
 #### Scenario: App exit stops the backend
 - **WHEN** the Windows app quits
@@ -139,12 +96,12 @@ The native Windows app SHALL run its local embedded backend in the selected supp
 - **THEN** the app terminates its bridge only and leaves unrelated WSL work running
 
 #### Scenario: Repeated start for the same distribution
-- **WHEN** the app requests the already live selected distribution
-- **THEN** no second backend or listener is started
+- **WHEN** the app is started a second time while an instance runs with the same distribution
+- **THEN** the second instance starts a backend of its own and leaves the first instance's backend and sessions running
 
 #### Scenario: Remote only
-- **WHEN** Windows has no WSL and the user opens a host
-- **THEN** the packaged remote window uses native SSH without starting a local backend
+- **WHEN** the Windows app starts on a machine without WSL
+- **THEN** it reports that it needs a WSL distribution and starts neither a backend nor a host connection
 
 #### Scenario: WSL localhost forwarding unavailable
 - **WHEN** WSL localhost forwarding is disabled or unavailable
@@ -358,3 +315,30 @@ The native Windows app started without a WSL target SHALL open its window while 
 #### Scenario: Window closed during the preparation
 - **WHEN** the window is closed while a `wsl.exe` call of the preparation runs
 - **THEN** the app ends that call and exits without starting the backend
+
+### Requirement: Desktop Backend Child Lifetime
+A child started with `desktop-backend --transport native-v1 --backend embedded` SHALL own an embedded service; with `--owner` it SHALL keep that service across independent substreams. Inherited stdin/stdout SHALL carry only its negotiated connection, with bounded stderr diagnostics. EOF SHALL stop its embedded sessions and jobs. Protocol bytes SHALL pass unchanged. Other `--backend` values, the former SSH options and the former `serve --desktop-stdio` SHALL be refused before a backend starts.
+
+#### Scenario: Launcher exits
+- **WHEN** the launcher closes the child's input pipe
+- **THEN** the child stops accepting work and shuts down its embedded sessions
+
+#### Scenario: Binary roundtrip
+- **WHEN** terminal output includes NULs, non-UTF-8 bytes or split frame headers
+- **THEN** those bytes are delivered unchanged and no log or bootstrap line contaminates stdout
+
+#### Scenario: Legacy launcher
+- **WHEN** a caller requests `serve --desktop-stdio`
+- **THEN** it gets a usage error pointing to the native child entry point, without opening a listener
+
+#### Scenario: Launcher requests a fresh code
+- **WHEN** a launcher writes the old `bootstrap` line to the native child's input
+- **THEN** negotiation fails as invalid input without printing a bootstrap line or opening HTTP
+
+#### Scenario: SSH backend form refused
+- **WHEN** a caller starts `desktop-backend --transport native-v1 --backend ssh --target vm1`, or adds `--remember-target` or `--update` to the embedded form
+- **THEN** it exits with status 2 and writes nothing to stdout, without starting a backend or running `ssh`
+
+#### Scenario: Owner carrier across reloads
+- **WHEN** the launcher of `desktop-backend --transport native-v1 --backend embedded --owner` closes one substream and opens another
+- **THEN** both reach the same embedded workspace and its jobs, and closing the launcher's pipes ends those sessions and jobs

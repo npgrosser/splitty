@@ -77,9 +77,9 @@ Native requests SHALL name supported operations with validated arguments. Unknow
 - **THEN** the broker rejects it before connecting, reading a file or starting a process
 
 ### Requirement: Bounded Delivery
-Native frames SHALL be at most 16 MiB. API bodies SHALL be at most 1 MiB or their existing smaller endpoint limit. Each connection SHALL admit at most 64 pending API requests and 32 MiB of application-owned queued/in-flight transport data; all connections together SHALL reserve at most 128 MiB of such transport data per process. Application-owned reassembly, IPC queues and retained IPC output, including encoding copies through completion or disposal of platform delivery, SHALL count against these limits. Incomplete negotiation SHALL hold no application state.
+Native frames SHALL be at most 16 MiB. API bodies SHALL be at most 1 MiB or their existing smaller endpoint limit. Each connection SHALL admit at most 64 pending API requests and 32 MiB of application-owned queued/in-flight transport data; all connections together SHALL reserve at most 128 MiB of such transport data per process. Application-owned reassembly and queues SHALL count against these limits. Incomplete negotiation SHALL hold no application state.
 
-These numeric allowances do not bound framework-owned inbound invoke bodies allocated before application validation, generic framework command replies, engine storage outside the accounted transport buffers, or total process/renderer memory. These exclusions SHALL NOT relax application frame/body limits, transport-buffer accounting, request limits, connection/worker admission, or native role checks. A compromised packaged renderer can exhaust unaccounted framework storage; isolation of its authority does not guarantee availability of other windows sharing the process.
+These numeric allowances do not bound memory a framework allocates before the application handler validates a request, storage outside the accounted transport buffers, or total process memory. These exclusions SHALL NOT relax application frame/body limits, transport-buffer accounting, request limits, connection/worker admission, or role checks.
 
 #### Scenario: Oversized frame
 - **WHEN** a native transport peer announces a frame longer than the limit or exceeds its allowed reassembly budget
@@ -103,7 +103,7 @@ Admission SHALL precede application-owned per-client state allocation, backend d
 - 32 live streams and 4 pending opens per native window/shared trust domain or authenticated browser session;
 - 32 owned SSH/transport-helper workers per process, including setup and deliberate forwarding workers.
 
-Anonymous work SHALL consume process quotas; parent-owned popouts SHALL share their parent's quota. Excess authenticated work SHALL receive a busy/503 result; anonymous excess SHALL close before upstream work. Slots SHALL release exactly once after cleanup; worker slots only after observed exit. Cancellation and liveness of admitted clients SHALL remain usable. Handshakes SHALL time out in 5 seconds, incomplete native frames in 60 seconds, and unauthenticated HTTP header/idle reads in 15 seconds.
+Anonymous work SHALL consume process quotas. Excess authenticated work SHALL receive a busy/503 result; anonymous excess SHALL close before upstream work. Slots SHALL release exactly once after cleanup; worker slots only after observed exit. Cancellation and liveness of admitted clients SHALL remain usable. Handshakes SHALL time out in 5 seconds, incomplete native frames in 60 seconds, and unauthenticated HTTP header/idle reads in 15 seconds.
 
 #### Scenario: Idle stream flood
 - **WHEN** a client opens many idle streams that remain below the queued-byte budget
@@ -139,23 +139,11 @@ A reconnect SHALL discard unsent terminal input, uploads, editor actions and non
 - **WHEN** a daemon restarts and adopts kept sessions
 - **THEN** a reconnecting client obtains fresh connection identity and displays those sessions without spawning replacements
 
-### Requirement: Native Document Lifetime
-A native connection handle SHALL be bound to its actual window, top-level document generation, role and backend. Reload, navigation, destruction or backend replacement SHALL revoke the handle, subscriptions and pending requests, including parent-owned popout views. A new document SHALL obtain its own authorized connection. Direct native grants SHALL not be transferable; same-origin Dockview popouts share their parent's script trust domain rather than forming an isolation boundary.
-
-#### Scenario: Handle copied to another window
-- **WHEN** another window or child frame directly invokes the native broker with a copied connection handle
-- **THEN** the broker rejects the call before any backend request
-- **AND** calls executed through a same-origin popout's parent belong to the shared parent trust domain, not a claimed isolated popout principal
-
-#### Scenario: Distribution switch
-- **WHEN** the Windows app replaces its WSL backend
-- **THEN** outstanding handles and replies from the old distribution cannot address the new one
-
 ### Requirement: Feature Parity Without Hidden Listeners
-Released native clients SHALL support the existing settings, themes, shell profiles, templates, notifications, files, editor confirmations, popouts, zoom and host-management features allowed by their role. Using those features SHALL NOT start a fallback HTTP listener or grant arbitrary native privileges. Explicitly experimental development executables MAY implement a documented subset; they SHALL retain the same transport admission, backend identity and authority boundaries and SHALL NOT replace released clients.
+Released native clients SHALL support the existing settings, themes, shell profiles, templates, notifications, files, editor confirmations, zoom and host-management features allowed by their role. Using those features SHALL NOT start a fallback HTTP listener or grant arbitrary native privileges. Explicitly experimental development executables MAY implement a documented subset; they SHALL retain the same transport admission, backend identity and authority boundaries and SHALL NOT replace released clients.
 
 #### Scenario: Native desktop workflow
-- **WHEN** a desktop user saves settings, changes a theme, transfers a file, confirms an editor request and moves a terminal into a popout
+- **WHEN** a desktop user saves settings, changes a theme, transfers a file, confirms an editor request and changes the zoom
 - **THEN** the operations retain their existing validation and lifetime behavior without starting a terminal-server TCP listener
 
 #### Scenario: Experimental executable

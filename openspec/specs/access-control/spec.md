@@ -376,54 +376,6 @@ Every port forward of `splitty connect --forward` MUST be bound to `127.0.0.1` o
 - **WHEN** the user opens a forward's announced URL in the browser that also holds a Splitty session for `127.0.0.1`
 - **THEN** the forwarded server receives no Splitty session cookie
 
-### Requirement: Remote Window Isolation
-A separate remote window SHALL load packaged application code and hold only a native connection bound to its assigned host. It SHALL have no local service, other-host, local editor, file-reveal, reverse-forward or native administration authority. Its storage SHALL be private, ephemeral and unshared. It SHALL have no opener, shared-JavaScript or named-window reference path into main/setup/popout or other remote contexts. Navigation SHALL remain within its assigned packaged document; external HTTP(S) links go to the system browser, other targets and new windows are blocked. Host-provided executable UI content SHALL never be loaded. Browser permissions SHALL be limited to notifications and clipboard writes for its assigned document.
-
-#### Scenario: Remote window calls a local command
-- **WHEN** a remote window invokes a local editor, host-management or general shell command
-- **THEN** the shell rejects it before any local effect
-
-#### Scenario: Host UI calls a native command
-- **WHEN** a host-provided page attempts a shell command or native transport call
-- **THEN** it receives no native authority even if its URL or arguments impersonate the packaged remote document
-
-#### Scenario: Separate storage
-- **WHEN** two remote windows use different hosts
-- **THEN** neither window receives the other's connection handles, storage or credentials
-
-#### Scenario: Separate session cookies
-- **WHEN** a remote window's ephemeral cookie store contains a cookie
-- **THEN** no other window or browser profile sends it, and the remote window receives none of their cookies
-- **AND** native transport does not use that cookie as a credential
-
-#### Scenario: Navigation away
-- **WHEN** a remote window attempts to navigate to an external URL or the bundled setup page
-- **THEN** it stays on its assigned document, only HTTP(S) links can open externally, and existing transport handles cannot survive a document replacement
-
-#### Scenario: Host supplies application code
-- **WHEN** a host response contains an HTML document, script URL or another backend target
-- **THEN** it is treated as untrusted data and grants no code execution or connection authority
-
-#### Scenario: Parent bridge through a window reference
-- **WHEN** a remote window tries opener access, named-window reuse or a shared reference to reach the main window's bridge
-- **THEN** no such reference or native authority is available, independently of cookie/storage isolation
-
-### Requirement: Desktop Shell Command Scope
-Native commands SHALL be admitted only for an authorized packaged caller, document lifetime and assigned role; payloads, queries and bundled origin alone SHALL not grant main authority. Main, setup and remote contexts SHALL have distinct allowlists. Popouts and child frames SHALL receive no independent direct native grant. Parent-owned same-origin Dockview popouts SHALL be documented as sharing main script authority, not as containing compromised popout code.
-
-#### Scenario: Another loopback port
-- **WHEN** a page on `http://127.0.0.1:<port>` attempts a native command
-- **THEN** the shell rejects it even if the page is in the main window
-
-#### Scenario: Forged main role
-- **WHEN** setup, a remote window, a popout or a child frame supplies a main-window label or copied handle in a direct native invocation
-- **THEN** it cannot obtain a direct main-window grant
-
-#### Scenario: Shared-trust popout
-- **WHEN** a Dockview popout retains same-origin references to its trusted parent
-- **THEN** native calls executed by the parent are authorized as parent calls, and documentation/tests make no claim to isolate a compromised popout from that parent
-- **AND** the popout opens no independent service connection or native grant
-
 ### Requirement: Remote Screen Hub Access
 On a browser gateway, `/ws/remote` SHALL require the same origin check, same-origin fetch rule and single-use WebSocket ticket as `/ws`; native host connections SHALL require an authorized main-service connection with host-management authority, and `/ws/remote` and `/api/remote/*` SHALL NOT be served on the control socket. The hub SHALL run `ssh` only to a target that passed the target validation of Remote Access Through SSH Tunnel, non-interactively, without agent forwarding, and without remote forwards except the single remote forward of a reverse forward the user requested (see Hub Reverse Forwards). The hub SHALL send nothing to the host but the client's relayed messages and the commands of the install, the handshake and the bridge, `remote-relay prepare` and `remote-relay serve` for a reverse forward, and, for a browser socket opened with `update=1` or the corresponding explicit native update intent (see `remote-screens`, Host Update), instance-bound `daemon stop` or conditional `remote-migrate --expected <proof>` of its installed server. The host alone SHALL resolve and verify legacy owner sockets and process identity; renderer data SHALL NOT select the proof, PID, executable or configuration. The legacy migration command SHALL require the guards of Confirmed Legacy Daemon Migration and SHALL NOT be replayed after ambiguous completion. In particular, it SHALL NOT forward the local session cookie, a ticket or the process token.
 
@@ -492,18 +444,18 @@ A selected local port MUST be checked for availability on both `127.0.0.1` and `
 - **AND** SSH carries the service's TCP bytes without injecting HTTP authentication or changing TLS or WebSocket traffic
 
 ### Requirement: Explicit Remote Editor Dispatch
-Only a deliberate editor action in the trusted hub UI SHALL dispatch a local VS Code or Zed folder handoff for the selected local or SSH terminal, or an SFTP client handoff for the selected SSH terminal. Native editor dispatch SHALL be granted solely to the main packaged UI on the shell's assigned application origin, not bundled setup pages, remote windows or direct popout invocations; parent-owned popouts share main script authority as specified by Desktop Shell Command Scope. The native grant SHALL be scoped by window, actual caller, exact packaged origin and document generation; the no-frame content policy remains. It SHALL validate the fixed editor enum (`vscode`, `zed`, or `sftp` for remote folders only), an absolute directory, an optional restricted SSH target for remote folders, and an optional validated WSL distribution for local VS Code folders and generate the fixed editor URI itself; no arbitrary URI, executable, command string or shell interpolation SHALL be accepted. Terminal links, remote output, server commands and URL query parameters SHALL NOT invoke this dedicated path. Existing generic URL openers SHALL continue to admit only HTTP(S); remote windows SHALL retain their isolation.
+Only a deliberate editor action in the trusted hub UI SHALL dispatch a local VS Code or Zed folder handoff for the selected local or SSH terminal, or an SFTP client handoff for the selected SSH terminal. The desktop app SHALL validate the fixed editor enum (`vscode`, `zed`, or `sftp` for remote folders only), an absolute directory, an optional restricted SSH target for remote folders, and an optional validated WSL distribution for local VS Code folders, and generate the fixed editor URI itself before it hands that URI to the operating system's handler; no arbitrary URI, executable, command string or shell interpolation SHALL be accepted. Terminal links, remote output, server commands and URL query parameters SHALL NOT invoke this dedicated path. Existing generic URL openers SHALL continue to admit only HTTP(S).
 
 #### Scenario: Dedicated native command scope
-- **WHEN** a remote window, a web origin or popout directly invokes native editor dispatch
-- **THEN** the request is rejected before any native handoff
+- **WHEN** a server or host message, or terminal output, names an editor, a folder or an editor URI
+- **THEN** no handoff occurs unless the user chooses the editor action in the window
 
 #### Scenario: Hostile dispatch inputs
-- **WHEN** a caller supplies an executable/URI as target, an option-like target, a relative directory, control characters, unsupported SSH syntax, or `sftp` for a local folder
-- **THEN** native dispatch rejects the request before opening anything
+- **WHEN** the action receives an executable/URI as target, an option-like target, a relative directory, control characters, unsupported SSH syntax, or `sftp` for a local folder
+- **THEN** dispatch rejects the request before opening anything
 
 #### Scenario: Terminal link uses editor scheme
-- **WHEN** a hub remote terminal link, Splitty's generic URL helper or a native navigation guard receives a `vscode:`, `zed:` or `sftp:` URI
+- **WHEN** a hub remote terminal link or Splitty's generic URL helper receives a `vscode:`, `zed:` or `sftp:` URI
 - **THEN** the generic opener refuses it and no editor dispatch is invoked
 
 ### Requirement: Image Uploads Stay With Their Pane
@@ -642,17 +594,6 @@ A client SHALL send `save_image` and `upload` only for the user's own drop or pa
 - **WHEN** the user sends a review to a terminal pane as a file
 - **THEN** the window uploads it to the server of that pane's connection under its temporary directory and inserts the returned path only in that pane
 
-### Requirement: Showing A Saved Download
-A desktop shell SHALL show a file in the system file manager only for a download of its main window that it saved itself and that finished, named by the page with that download's `blob:` URL (`reveal_download` in the Tauri app, under Desktop Shell Command Scope). It SHALL NOT take a path or a file name from the page, SHALL NOT tell the page where it saved the file, and SHALL refuse every other URL, an unfinished, failed or cancelled download, and a download beyond the most recent 32.
-
-#### Scenario: A finished download
-- **WHEN** the main window saved a download from its `blob:` URL and asks the shell to show that URL
-- **THEN** the shell opens the file manager on the saved file and answers the page without its path
-
-#### Scenario: A URL the shell did not save
-- **WHEN** the page asks the shell to show a URL that is not one of its finished downloads
-- **THEN** the shell refuses and shows nothing
-
 ### Requirement: Hub Reverse Forwards
 A reverse forward SHALL make `localhost:<local>` of this machine reachable on the host, and SHALL NOT make any other local address reachable: the API takes only a local port, and the forward's `ssh` SHALL name `localhost:<local>` as its destination. The local server's own HTTP port SHALL be refused with 409 `local_port_reserved`.
 
@@ -732,17 +673,6 @@ Each gateway SHALL keep its own bootstrap, ticket and in-memory session store, w
 #### Scenario: Target substitution
 - **WHEN** a browser request, query or backend response names a different URL, socket or host
 - **THEN** the gateway cannot be redirected to that endpoint
-
-### Requirement: Packaged Desktop Content Policy
-Desktop assets SHALL be limited to an exact packaged-asset/entry-document allowlist. Resource handling SHALL reject wrong authorities, malformed/encoded traversal and unknown paths before resolution, with no filesystem, network or directory-listing fallback. Production policy SHALL allow only required packaged/IPC resources, with no wildcard loopback or network scripts. Native data SHALL not grant executable content, navigation or generic OS access.
-
-#### Scenario: Remote script and wildcard connection
-- **WHEN** a desktop document attempts to load script from a host or connect directly to an arbitrary loopback service
-- **THEN** the operation is blocked while its assigned native connection remains usable
-
-#### Scenario: Asset path escape
-- **WHEN** a packaged resource request uses traversal, encoded separators, a wrong authority or an unknown path
-- **THEN** it returns no file or directory information outside the declared asset allowlist and performs no network fetch
 
 ### Requirement: Internal Endpoints Cannot Be Shared
 Splitty SHALL reject reverse forwarding of any of its active browser-gateway ports with `local_port_reserved`, including gateways for remote targets and other configurations of the same user. Listener reservation and sharing admission SHALL be coordinated, following Forwarding Reservation Lifetime, so neither a race, coordinator crash nor saved restoration can share a newly bound internal listener. Private client, control and keeper sockets SHALL not be accepted as forwarding destinations.
