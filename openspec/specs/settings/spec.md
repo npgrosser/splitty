@@ -282,3 +282,27 @@ Every window SHALL choose the name of its terminal palette by one rule, the serv
 #### Scenario: Palette change reaches open terminals
 - **WHEN** another window changes `terminal.theme`
 - **THEN** the web window asks for the theme again and its open terminals take the new colors without recreating sessions
+
+### Requirement: Native Appearance Before The Local Service Answers
+The native app SHALL keep the appearance selection it last applied from its local service (UI theme mode and names, interface font, zoom, terminal palettes) in `last-appearance.json` in the configuration directory of the computer it runs on. A new window SHALL show that selection, resolved in its catalog for the current OS preference, until the local service's appearance replaces it. The file SHALL NOT be a source of settings; a missing or unreadable file SHALL leave the built-in appearance.
+
+#### Scenario: Start while the local service is not ready
+- **WHEN** the app starts on Windows, its WSL backend is still being started, and the last window had applied a light UI theme with a larger zoom
+- **THEN** the window shows the startup phases in that theme, font and zoom
+
+#### Scenario: Settings changed since the last window
+- **WHEN** the local service's appearance differs from the remembered selection
+- **THEN** the window shows the service's appearance once it arrives, and the file holds that selection afterwards
+- **AND** no settings mutation is submitted
+
+#### Scenario: Automatic mode after the OS preference changed
+- **WHEN** the remembered selection is in automatic mode and the OS preference changed since it was stored
+- **THEN** the window starts with the remembered UI theme of the current preference
+
+#### Scenario: No usable file
+- **WHEN** the file is missing, oversized or not a remembered selection
+- **THEN** the window starts with the built-in appearance and reports nothing
+
+#### Scenario: Isolated starts
+- **WHEN** the app runs its workspace smoke check or is started with an explicit WSL target
+- **THEN** it neither reads nor writes the file
