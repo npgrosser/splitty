@@ -179,7 +179,7 @@ mod tests {
         let home = tempfile::tempdir().expect("fixture");
         let directory = home.path().join("CLI with spaces ö");
         std::fs::create_dir(&directory).expect("directory");
-        let gui = directory.join("splitty-gui");
+        let gui = directory.join("splitty-gpui");
         executable(&gui);
         assert!(cli_dir_for(&gui).is_none());
         assert!(cli_dir_for(Path::new("splitty")).is_none());

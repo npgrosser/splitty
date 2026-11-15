@@ -1,10 +1,9 @@
 # Native app: state and open work
 
 The native client (`crates/splitty-gpui`) is the desktop app that CI builds
-and releases publish for Windows, macOS (Apple silicon and Intel) and Linux. The
-Tauri shell around the web client remains in the repository as a legacy app: it
-keeps its CI jobs and is not released. The Electron shell was removed; the web
-client itself stays, served by `splitty serve` and shown in the Tauri shell. Builds and packages are described in
+and releases publish for Windows, macOS (Apple silicon and Intel) and Linux; it
+is the only desktop app. The web client stays as a browser client, served by
+`splitty serve`. Builds and packages are described in
 [development](development.md#the-native-app); the acceptance records of the
 individual features are in the [GPUI runbook](gpui-spike.md).
 
@@ -338,8 +337,7 @@ connection failed as incompatible are not shown outside the update offer.
 - CI lints and tests the app with the workspace on Linux, builds it on macOS
   and Windows, packs the Linux packages on Ubuntu 22.04 (installing the deb)
   and packs the macOS disk image. The release workflow publishes the native
-  packages only; the legacy web apps are no longer released and keep building
-  in CI. The table is in [development](development.md#releases).
+  packages. The table is in [development](development.md#releases).
 - The Windows preview folders with a launcher that named a distribution, a
   backend path and a configuration directory are superseded by the installer.
   The explicit `--wsl-*` arguments remain for isolated previews and tests
@@ -361,12 +359,12 @@ connection failed as incompatible are not shown outside the update offer.
   window `app_id`, so Linux desktops cannot yet match its windows to
   `splitty.desktop` (no `StartupWMClass`). CI compiles the app's tests on
   Windows and macOS but runs them on Linux only. There is no native AppImage,
-  no native package for Intel Macs or aarch64 Linux, and the macOS app's
+  no native package for aarch64 Linux, and the macOS app's
   minimum system version is whatever the build's linker targets; it is tested
   on the release runner's macOS only. The provisional packaging decisions are
   NDD-1 to NDD-6 in `openspec/open-decisions.md`.
-- Windows: the app needs a WSL distribution; hosts without WSL remain with
-  the legacy web app built from source (draft `native-windows-without-wsl`). Each start is an
+- Windows: the app needs a WSL distribution; Windows without WSL has no
+  desktop app (draft `native-windows-without-wsl`). Each start is an
   independent instance with its own backend that shares only the settings
   files with the others (draft `native-windows-one-backend`). The dialog on a
   first start with several distributions and the WSL settings section have
@@ -378,7 +376,7 @@ connection failed as incompatible are not shown outside the update offer.
   still need their own acceptance. Local profiles/templates/transfers are not
   implicitly remote features. Native host-group reorder UI and remembered
   reference persistence remain unfinished.
-- The web client stays usable as the legacy app; there is no approved
+- The web client stays usable in a browser; there is no approved
   requirement to remove web bridges or adopt full WASM.
 
 Start the next feature only with a fresh scope decision; avoid treating old

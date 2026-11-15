@@ -162,8 +162,8 @@ ln -s ../Resources/shell-integration "$app/Contents/MacOS/shell-integration"
 install -m 0644 "$repo_root/icon-macos.icns" "$app/Contents/Resources/icon.icns"
 install -m 0644 "$repo_root/LICENSE" "$app/Contents/Resources/LICENSE"
 
-# Its own identifier: the web app (com.splitty.app) stays a separate app to
-# the system.
+# Preserve the native app's bundle identifier across upgrades; earlier web
+# releases used com.splitty.app.
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

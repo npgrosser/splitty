@@ -32,7 +32,7 @@
 - [x] Update architecture component descriptions and touched protocol documentation alongside the implementing slice.
 - [x] Build the optimized native app and check the remote flow in an isolated real GUI/SSH fixture. This smoke check verifies platform focus, drawing and actual SSH behavior that the in-process tests cannot establish.
 - [x] Run targeted checks for touched crates and OpenSpec artifacts.
-- [ ] Before merge run the full gate once: cargo fmt --all --check; cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings; cargo test --workspace --exclude splitty-gui; openspec validate --specs. If frontend code is touched, also pnpm check, pnpm test and pnpm build there.
+- [ ] Before merge run the full gate once: cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings; cargo test --workspace; openspec validate --specs. If frontend code is touched, also pnpm check, pnpm test and pnpm build there.
 
 ## Verification record
 

@@ -104,20 +104,13 @@ generate_ico() {
 
 echo "Generating icons from $SRC ..."
 
-# ── Tauri icons ──
-TAURI_ICONS="$ROOT/crates/splitty-tauri/icons"
-resize 32  "$TAURI_ICONS/32x32.png"
-resize 128 "$TAURI_ICONS/128x128.png"
-resize 256 "$TAURI_ICONS/128x128@2x.png"
-resize 512 "$TAURI_ICONS/icon.png"
-generate_icns "$TAURI_ICONS/icon.icns"
-generate_ico  "$TAURI_ICONS/icon.ico"
+# ── Native app icons ──
+NATIVE_ICONS="$ROOT/crates/splitty-gpui/icons"
+resize 512 "$NATIVE_ICONS/icon.png"
+generate_ico "$NATIVE_ICONS/icon.ico"
 
 # ── macOS icon (project root) ──
 generate_icns "$ROOT/icon-macos.icns"
-
-# ── Linux desktop entry icon (1024px) ──
-resize 1024 "$ROOT/packaging/linux/splitty.png"
 
 # ── Frontend (React) — favicon + PWA icons ──
 resize 48  "$ROOT/frontend/public/favicon.png"

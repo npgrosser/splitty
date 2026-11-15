@@ -112,8 +112,7 @@ Implementation and regressions: `crates/splitty-server/src/host/migration.rs`,
 ## Credentials
 
 These credentials belong to the explicit browser gateway. The app uses none of
-them; the Tauri shell's packaged pages use native-assigned document proofs and
-backend handles instead. Remote hosts supply data, never executable UI.
+them. Remote hosts supply data, never executable UI.
 
 | Credential | Held by | Lifetime | Readable by page script |
 |---|---|---|---|
@@ -170,49 +169,12 @@ script, and nothing a host or a program in a pane sends is run as UI code.
 - **Editor and folder hand-offs** that a process in a pane requests open only
   after **Open** in the window's notice; preferences choose an editor but never
   allow a launch (`crates/splitty-client-core/src/native_workspace/editors.rs`).
-
-### Tauri shell (from source)
-
-The Tauri shell around the web frontend, which is not released, never renders
-foreign web content. It decides every navigation and every new-window request
-natively, whatever code in the page asked for it: exact packaged entries and
-parent-owned popouts stay in Splitty, other `http(s)` URLs open in the system
-browser, and every other scheme (`file:`, `javascript:`, OS protocol handlers)
-is dropped.
-
-- **Tauri** (`crates/splitty-tauri/src/navigation.rs`, with unit tests). Custom
-  commands are declared in an app manifest and granted to packaged main and
-  remote windows through separate runtime capabilities. Application commands
-  additionally require a private proof of the actual current document; only
-  native setup policy may provision WSL. Remote windows load the same packaged
-  UI with a fixed host assignment and transport-only rights. They have private
-  ephemeral storage, no popouts, and no editor/reveal or local-backend access.
-  Parent-owned popouts share their parent's trust and quota; denying their
-  direct IPC is not isolation from their parent's JavaScript. DevTools exist
-  only in builds with `--features devtools`.
-- **WSL** (`crates/splitty-tauri/src/windows_wsl.rs`). A root default user is
-  refused (`root_default_user_is_rejected`). Provisioning output is separately
-  bounded; protocol traffic uses raw native pipes with no port/bootstrap text
-  parsing. Shutdown cancels and reaps only owned commands and the app's helper,
-  never the distribution or unrelated WSL work.
-
-In the Tauri shell, native byte and admission limits include retained
-application buffers and encoded IPC output. Tauri output owns its source chunk and encoding reservations
-until evaluation completion or callback destruction; renderer consumption is a
-separate credit. A document check prevents stale output entering a replacement
-page. Closed renderer connections retain their slots until pending invokes settle.
-The numeric contract covers application-owned transport buffers and retained IPC
-output. Framework-owned inbound invoke bodies allocated by Wry before validation,
-generic framework replies, unrelated engine storage and total process/renderer
-RSS are outside it. A compromised packaged renderer may exhaust that framework
-storage before validation. Native role checks still restrict its authority, but
-separate remote windows do not guarantee availability of other windows sharing
-the desktop process. This does not relax frame/body limits, transport accounting
-or connection/worker admission. Actual platform isolation and resource checks
-of the shell on Linux, macOS and Windows/WSL are tracked separately from unit
-coverage; one platform's result does not establish another's behavior. The
-[verification record](openspec/changes/native-client-transports/verification.md)
-lists which runs passed.
+- **WSL** on Windows (`crates/splitty-gpui/src/startup/wsl.rs`). A distribution
+  whose default user is root is refused
+  (`root_other_architectures_and_other_distributions_are_refused`). The backend's
+  traffic uses the owned `wsl.exe` pipes with no port or bootstrap text parsing;
+  on exit the app ends only its own bridge, never the distribution or unrelated
+  WSL work.
 
 ## Terminal output
 
@@ -224,8 +186,7 @@ lists which runs passed.
   in the browser UI: `frontend/src/lib/terminal/clipboard_policy.test.ts`.
 - **Links** are scheme-checked: in the app by
   `crates/splitty-client-core/src/external_links.rs`; in the browser UI by
-  `openExternalTarget`, and again by the Tauri shell, because a renderer
-  library can bypass the UI.
+  `openExternalTarget`.
 - **Templates** that carry commands show them and need confirmation before
   anything runs: in the app **Run displayed commands**
   (`crates/splitty-gpui/src/workspace/templates.rs`), in the browser UI

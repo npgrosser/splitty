@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Splitty has one version for everything it ships: the workspace version in
-# Cargo.toml, which the Tauri app and Cargo.lock repeat.
+# Cargo.toml, which Cargo.lock repeats.
 # Hosts and the Windows WSL backend install a server per version, so every
 # release needs a version of its own, or clients keep an older server of the
 # same version.
@@ -17,7 +17,6 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO_TOML="$REPO_ROOT/Cargo.toml"
 CARGO_LOCK="$REPO_ROOT/Cargo.lock"
-TAURI_CONF="$REPO_ROOT/crates/splitty-tauri/tauri.conf.json"
 
 usage() {
     echo "Usage: $0 <version>"
@@ -32,11 +31,6 @@ is_version() {
 
 cargo_version() {
     sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"$/\1/p' "$CARGO_TOML"
-}
-
-# The top-level "version" of a JSON file indented with two spaces.
-json_version() {
-    sed -n 's/^  "version": "\(.*\)",$/\1/p' "$1" | head -n 1
 }
 
 # The versions Cargo.lock records for the workspace's crates, one per line.
@@ -54,10 +48,9 @@ check() {
 
     local failed=0
     local name actual
-    for name in Cargo.toml tauri.conf.json Cargo.lock; do
+    for name in Cargo.toml Cargo.lock; do
         case "$name" in
             Cargo.toml) actual=$(cargo_version) ;;
-            tauri.conf.json) actual=$(json_version "$TAURI_CONF") ;;
             Cargo.lock) actual=$(lock_versions | paste -sd ' ' -) ;;
         esac
         if [ "$actual" != "$version" ]; then
@@ -102,14 +95,12 @@ bump() {
     local updated
     updated=$(sed "/^\[workspace\.package\]/,/^\[/ s/^version = \".*\"$/version = \"$version\"/" "$CARGO_TOML")
     printf '%s\n' "$updated" > "$CARGO_TOML"
-    updated=$(sed "s/^  \"version\": \".*\",$/  \"version\": \"$version\",/" "$TAURI_CONF")
-    printf '%s\n' "$updated" > "$TAURI_CONF"
     # Records the new version of the workspace's crates, nothing else.
     cargo update --workspace --offline --quiet
 
     check "$tag"
 
-    git add -- "$CARGO_TOML" "$CARGO_LOCK" "$TAURI_CONF"
+    git add -- "$CARGO_TOML" "$CARGO_LOCK"
     git commit --quiet -m "chore(release): $tag"
     git tag -a "$tag" -m "Splitty $tag"
 

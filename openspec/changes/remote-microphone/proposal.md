@@ -47,3 +47,4 @@ To be decided when the change is next. Likely candidates:
 ## Carried-over design notes
 
 - 2026-11-13, `remove-electron-shell`: the Electron shell (`frontend-electron/`) is removed. What this change says about Electron, its main process, preload or packaged assets no longer applies; the desktop shell around the web frontend is Tauri, and the native app (`crates/splitty-gpui`) is the default desktop app.
+- 2026-11-15, `remove-tauri-shell`: the Tauri shell (`crates/splitty-tauri`) is removed; the native app (`crates/splitty-gpui`) is the only desktop app, and the web frontend runs only in a browser. What this change says about Tauri, WebView2, WKWebView, WebKitGTK, `tauri.conf.json`, `navigation.rs` or remote windows no longer applies.

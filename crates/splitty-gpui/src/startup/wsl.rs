@@ -5,9 +5,8 @@
 //! shell input. WSL itself is never installed, changed or shut down.
 //!
 //! The backend lives at `~/.local/share/splitty/desktop/<version>/splitty` with
-//! its archive checksum beside it, the layout the web app uses, so both apps of
-//! one version share an installation. The remembered distribution is read from
-//! the web app's state file for the same reason.
+//! its archive checksum beside it. The installation layout and distribution
+//! state file are preserved across upgrades from earlier releases.
 
 #[cfg(target_os = "windows")]
 const ARCHIVE_NAME: &str = "splitty-wsl-x86_64.tar.gz";
@@ -108,8 +107,8 @@ fn selected_state(existing: &str, distro: &str) -> String {
     serde_json::Value::Object(state).to_string()
 }
 
-/// The distribution the web app remembered, a pending switch before the
-/// selected one.
+/// The remembered distribution, preferring a pending switch over the selected
+/// one, including state saved by earlier releases.
 fn remembered(state: &str) -> Option<String> {
     let state: serde_json::Value = serde_json::from_str(state).ok()?;
     ["pendingDistro", "selectedDistro"]
@@ -622,6 +621,7 @@ mod tests {
             b"  NAME                STATE     VERSION\n* docker-desktop      Stopped   2\n  Ubuntu              Running   2\n  rancher-desktop-data Stopped  2\n",
         );
         assert_eq!(candidates(&listed), ["Ubuntu"]);
+        assert!(candidates(&parse_list(b"")).is_empty());
     }
 
     #[test]

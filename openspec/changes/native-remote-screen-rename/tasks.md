@@ -17,7 +17,7 @@
 
 - [x] 3.1 Extend the existing owned remote-screen window smoke fixture with an actual remote rename and canonical observation, including another source selected and normal cleanup; verify exact host naming and preserved selection/sessions. This existing real-process/window check covers platform input/focus and end-to-end catalog observation that in-process fixtures cannot establish.
 - [x] 3.2 Run targeted client-core and GPUI tests, strict Clippy for touched crates, formatting, architecture tests and strict OpenSpec change validation; verify all pass and record exact source/evidence in docs/gpui-spike.md.
-- [ ] 3.3 At the deferred pre-merge checkpoint, run the one full check from CLAUDE.md: cargo fmt --all --check; cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings; cargo test --workspace --exclude splitty-gui; openspec validate --specs. Verify the architecture dependencies are installed before the architecture check. Full workspace CI remains deferred during native MVP iteration.
+- [ ] 3.3 At the deferred pre-merge checkpoint, run the one full check from CLAUDE.md: cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings; cargo test --workspace; openspec validate --specs. Verify the architecture dependencies are installed before the architecture check. Full workspace CI remains deferred during native MVP iteration.
 
 ## Integration evidence
 

@@ -1461,11 +1461,22 @@ sys.exit(p.wait())
     assert!(!sandbox.config_dir().join("auth-token").exists());
 }
 
+/// Smoke: only the binary proves parsing refuses before creating a backend
+/// or starting SSH, with no protocol or bootstrap bytes written to stdout.
 #[test]
 fn native_child_arguments_and_legacy_bootstrap_input_fail_before_backend_creation() {
     use std::io::Write;
     let sandbox = Sandbox::new();
     for args in [
+        vec![
+            "desktop-backend",
+            "--transport",
+            "native-v1",
+            "--backend",
+            "embedded",
+            "--target",
+            "vm1",
+        ],
         vec![
             "desktop-backend",
             "--transport",
@@ -1490,10 +1501,8 @@ fn native_child_arguments_and_legacy_bootstrap_input_fail_before_backend_creatio
             "native-v1",
             "--backend",
             "ssh",
-            "--update",
             "--target",
             "vm1",
-            "--owner",
         ],
         vec![
             "desktop-backend",
@@ -2594,219 +2603,6 @@ fn an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_c
 }
 
 #[test]
-#[cfg(target_os = "linux")]
-fn owned_ssh_helper_detaches_its_real_exec_pipes_and_leaves_both_daemons_untouched() {
-    if !splitty_core::pty::testing::pty_available() {
-        return;
-    }
-    let local = Sandbox::new();
-    local.start_daemon();
-    let remote = Sandbox::new();
-    remote.start_daemon();
-    let (screen, pane, _) = remote.shell();
-    remote.type_line(
-        &screen,
-        &pane,
-        &format!(
-            "echo $$ > '{}'",
-            remote.home.path().join("host-shell").display()
-        ),
-    );
-    let shell = remote.wait_for("host-shell");
-    let local_record = fs::read(local.info_path()).unwrap();
-    let remote_record = fs::read(remote.info_path()).unwrap();
-    let info: splitty_core::daemon::DaemonInfo = serde_json::from_slice(&remote_record).unwrap();
-    let bin = local.fake_ssh_to(&remote);
-    let quote = splitty_remote::ssh::quote;
-    let helper_command = || {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
-        local
-            .isolate(&mut command)
-            .args([
-                "desktop-backend",
-                "--transport",
-                "native-v1",
-                "--backend",
-                "ssh",
-                "--target",
-                "test-host",
-            ])
-            .env(
-                "PATH",
-                std::env::join_paths(
-                    std::iter::once(bin.clone())
-                        .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
-                )
-                .unwrap(),
-            );
-        tokio::process::Command::from(command)
-    };
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        use splitty_transport::{
-            admission, negotiation,
-            wire::{self, Kind},
-        };
-        let mut helper = splitty_remote::bridge::NativeBridge::spawn(
-            helper_command(),
-            admission::Assignment::new(admission::Backend::new(), admission::Domain::new()),
-            negotiation::Expected {
-                instance: info.instance.as_deref(),
-                purpose: &wire::Purpose::Host {
-                    target: "test-host".into(),
-                },
-                mux_protocol: 1,
-                preparation: READ_TIMEOUT,
-            },
-            |_| {},
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            helper
-                .recv()
-                .await
-                .unwrap()
-                .frame
-                .decode::<serde_json::Value>()
-                .unwrap()["type"],
-            "mux.welcome"
-        );
-        assert_no_tcp_listener(helper.id().unwrap());
-        assert_no_tcp_listener(info.pid);
-        helper
-            .sender()
-            .json(
-                Kind::Request,
-                &wire::Request {
-                    id: 1,
-                    operation: "mux.status".into(),
-                    args: serde_json::Map::new(),
-                },
-            )
-            .unwrap();
-        let reply = tokio::time::timeout(READ_TIMEOUT, async {
-            loop {
-                let message = helper.recv().await.unwrap();
-                if message.frame.kind == Kind::Reply {
-                    break message.frame.decode::<wire::Reply>().unwrap();
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(reply.status, 200);
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&reply.body).unwrap()["instance"],
-            info.instance.as_ref().unwrap().as_str()
-        );
-        let started = Instant::now();
-        let (transport, ended) = helper.finish().await;
-        transport.unwrap();
-        assert!(ended.status.unwrap().success(), "{}", ended.stderr);
-        assert!(started.elapsed() < Duration::from_secs(3));
-        // Exercise EOF during real setup exec, before there is any Ready or
-        // live host bridge. The helper must reap that command before exiting.
-        let pending_pid = local.home.path().join("pending-ssh-pid");
-        fs::write(
-            bin.join("ssh"),
-            format!(
-                "#!/bin/sh\necho $$ > {}\nexec sleep 30\n",
-                quote(pending_pid.to_str().unwrap())
-            ),
-        )
-        .unwrap();
-        let mut child = helper_command()
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        let mut output = child.stdout.take().unwrap();
-        negotiation::client(&mut output, &mut input, &Default::default())
-            .await
-            .unwrap();
-        let pid = tokio::time::timeout(READ_TIMEOUT, async {
-            loop {
-                if let Ok(text) = tokio::fs::read_to_string(&pending_pid).await {
-                    if let Ok(pid) = text.trim().parse::<i32>() {
-                        break pid;
-                    }
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_no_tcp_listener(child.id().unwrap());
-        drop((input, output));
-        assert!(tokio::time::timeout(Duration::from_secs(3), child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success());
-        assert!(
-            kill(Pid::from_raw(pid), None).is_err(),
-            "helper exit precedes pending SSH cleanup"
-        );
-        for (message, kind) in [
-            (
-                "Permission denied (publickey).",
-                std::io::ErrorKind::PermissionDenied,
-            ),
-            (
-                "Host key verification failed.",
-                std::io::ErrorKind::PermissionDenied,
-            ),
-            ("Connection refused", std::io::ErrorKind::ConnectionAborted),
-        ] {
-            fs::write(
-                bin.join("ssh"),
-                format!(
-                    "#!/bin/sh\nprintf '%s\\n' {} >&2\nexit 255\n",
-                    quote(message)
-                ),
-            )
-            .unwrap();
-            let error = match splitty_remote::bridge::NativeBridge::spawn(
-                helper_command(),
-                admission::Assignment::new(admission::Backend::new(), admission::Domain::new()),
-                negotiation::Expected {
-                    instance: info.instance.as_deref(),
-                    purpose: &wire::Purpose::Host {
-                        target: "test-host".into(),
-                    },
-                    mux_protocol: 1,
-                    preparation: READ_TIMEOUT,
-                },
-                |_| {},
-            )
-            .await
-            {
-                Ok(_) => panic!("SSH failure admitted a backend"),
-                Err(error) => error,
-            };
-            assert_eq!(error.kind(), kind, "{message}: {error}");
-            assert!(error.to_string().contains(message), "{error}");
-        }
-    });
-    assert_eq!(fs::read(local.info_path()).unwrap(), local_record);
-    assert_eq!(fs::read(remote.info_path()).unwrap(), remote_record);
-    let shell: i32 = shell.trim().parse().unwrap();
-    assert!(
-        kill(Pid::from_raw(shell), None).is_ok(),
-        "SSH helper EOF must not end the kept host shell"
-    );
-    assert!(!local.config_dir().join("auth-token").exists());
-    assert!(!remote.config_dir().join("auth-token").exists());
-}
-
-#[test]
 fn remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions() {
     if !splitty_core::pty::testing::pty_available() {
         return;
@@ -3749,6 +3545,92 @@ fn rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs() {
         assert_eq!(owner.stream_count(), 0);
         assert!(owner.is_closed());
         assert_eq!(fs::read(discovery).unwrap(), b"independent corrupt discovery");
+    });
+}
+
+/// Smoke: two real children in the same configuration directory prove that
+/// each owner has its own runtime and pipe EOF ends only that owner's session.
+#[test]
+fn two_embedded_owners_keep_their_sessions_independent() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
+        sandbox.isolate(&mut command).args([
+            "desktop-backend",
+            "--transport",
+            "native-v1",
+            "--backend",
+            "embedded",
+            "--owner",
+        ]);
+        tokio::process::Command::from(command)
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use splitty_remote::owner::{Connection, Owner};
+        use splitty_transport::queue;
+
+        async fn request(connection: &mut Connection, operation: &str, args: serde_json::Value) -> serde_json::Value {
+            let reply = connection.request(operation.into(), args.as_object().unwrap().clone(), Some(READ_TIMEOUT)).await.unwrap();
+            assert!((200..300).contains(&reply.status), "{}", reply.body);
+            serde_json::from_str(&reply.body).unwrap()
+        }
+
+        let first = Owner::spawn(command(), 1).await.unwrap();
+        let second = Owner::spawn(command(), 1).await.unwrap();
+        let first_pid = i32::try_from(first.id().unwrap()).unwrap();
+        let second_pid = i32::try_from(second.id().unwrap()).unwrap();
+        assert_no_tcp_listener(first.id().unwrap());
+        assert_no_tcp_listener(second.id().unwrap());
+        let mut first_client = first.open_context(None, false, queue::Context::default(), |_| {}).await.unwrap();
+        let mut second_client = second.open_context(None, false, queue::Context::default(), |_| {}).await.unwrap();
+        assert_ne!(first_client.ready().instance, second_client.ready().instance);
+        let mut sessions = Vec::new();
+        for (name, client) in [("first", &mut first_client), ("second", &mut second_client)] {
+            assert_eq!(request(client, "job.list", serde_json::json!({})).await["jobs"], serde_json::json!([]));
+            let pid_path = sandbox.home.path().join(format!("{name}-session-pid"));
+            let job = request(client, "job.launch", serde_json::json!({"body":{
+                "requestId":"d0267ff6-1234-4dfc-a01b-448f78f00223",
+                "argv":["/bin/sh", "-c", format!("echo $$ > {}; exec sleep 60", splitty_remote::ssh::quote(pid_path.to_str().unwrap()))],
+                "cwd":sandbox.home.path(), "placement":{"kind":"screen"}, "background":true
+            }})).await;
+            assert_eq!(job["state"], "running");
+            let pid = tokio::time::timeout(READ_TIMEOUT, async {
+                loop {
+                    if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
+                        if let Ok(pid) = text.trim().parse::<i32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            assert!(kill(Pid::from_raw(pid), None).is_ok());
+            sessions.push((job["jobId"].as_str().unwrap().to_owned(), pid));
+        }
+        assert_eq!(request(&mut first_client, "job.list", serde_json::json!({})).await["jobs"].as_array().unwrap().len(), 1);
+        assert_eq!(request(&mut second_client, "job.list", serde_json::json!({})).await["jobs"].as_array().unwrap().len(), 1);
+        assert_ne!(sessions[0].1, sessions[1].1);
+        tokio::time::timeout(Duration::from_secs(3), first.close_result()).await.unwrap().unwrap();
+        first_client.finish().await.unwrap();
+        assert!(kill(Pid::from_raw(first_pid), None).is_err());
+        assert!(kill(Pid::from_raw(sessions[0].1), None).is_err(), "first owner reaps its session");
+        assert!(kill(Pid::from_raw(second_pid), None).is_ok());
+        assert!(kill(Pid::from_raw(sessions[1].1), None).is_ok(), "second owner's session remains alive");
+        let job = request(&mut second_client, "job.inspect", serde_json::json!({"id":sessions[1].0})).await;
+        assert_eq!(job["state"], "running");
+        tokio::time::timeout(Duration::from_secs(3), second.close_result()).await.unwrap().unwrap();
+        second_client.finish().await.unwrap();
+        assert!(kill(Pid::from_raw(second_pid), None).is_err());
+        assert!(kill(Pid::from_raw(sessions[1].1), None).is_err());
+        assert!(!sandbox.info_path().exists());
+        assert!(!sandbox.config_dir().join("auth-token").exists());
     });
 }
 

@@ -25,3 +25,7 @@ The native Windows app starts its backend in a WSL distribution and reaches ever
 ## Architecture impact
 
 `architecture/client-core.c4` and `landscape.c4`: `splitty-client-core` uses `splitty-remote`'s tunnel and installer directly on Windows.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-tauri-shell`: the Tauri shell, the legacy web app, is removed, so Windows without WSL has no desktop app at all until this change is implemented, also not from source (RTS-1 in `openspec/open-decisions.md`). What this proposal says about the web app opening hosts over `ssh.exe` describes the removed shell. Its `crates/splitty-tauri/src/remote.rs`, the `desktop-backend --backend ssh` helper (`native::helper::ssh` in `crates/splitty-server/src/native/helper.rs`) and the requirements `desktop-remote` Remote Windows and Remote Window Entry Points are in the history of the `remove-tauri-shell` commit as input for this change's design. `server-modes`, Desktop App Hosting On Windows, scenario "Remote only" now states that the app reports that it needs WSL.

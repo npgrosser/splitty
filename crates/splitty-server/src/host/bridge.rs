@@ -1,6 +1,6 @@
 //! The host end of `remote-bridge --transport native-v1`. SSH authenticates
 //! the owner; only this host resolves its private daemon endpoint. Each bridge
-//! owns one native client identity, independent of other remote windows.
+//! owns one native client identity, independent of other host connections.
 
 use crate::native::relay::{forward, validate_input};
 use splitty_transport::{admission, negotiation, peer::Peer, queue, wire::Kind};

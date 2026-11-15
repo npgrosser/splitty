@@ -18,7 +18,7 @@ An actual request to run this release workflow authorizes its version commit, an
 
 ## Create and push the release
 
-From the clean release checkout, run `bash scripts/release.sh VERSION`. It updates the versions in `Cargo.toml`, `Cargo.lock` and the Tauri config, commits them and creates annotated tag `vVERSION`. Verify with `bash scripts/release.sh --check vVERSION` and record `git rev-parse 'vVERSION^{commit}'` as `release_sha`.
+From the clean release checkout, run `bash scripts/release.sh VERSION`. It updates the versions in `Cargo.toml` and `Cargo.lock`, commits them and creates annotated tag `vVERSION`. Verify with `bash scripts/release.sh --check vVERSION` and record `git rev-parse 'vVERSION^{commit}'` as `release_sha`.
 
 Push the release commit to the selected branch and only that tag in one atomic operation. For remote `origin` and the selected branch in `release_branch`:
 
@@ -32,7 +32,7 @@ Verify the remote's peeled tag points to `release_sha`. Locate the `Release` run
 
 ## Build for this host and deliver
 
-Read [references/platform-builds.md](references/platform-builds.md) for the detected platform. Build the desktop package locally from **the exact release commit**. The package is the native app: WSL means its Windows NSIS setup, macOS its DMG for the Mac's architecture, and native Linux its deb, rpm and tar.gz. The legacy web apps are built locally only on request. Downloading CI's completed desktop installer is not a substitute for the requested local build.
+Read [references/platform-builds.md](references/platform-builds.md) for the detected platform. Build the desktop package locally from **the exact release commit**. The package is the native app: WSL means its Windows NSIS setup, macOS its DMG for the Mac's architecture, and native Linux its deb, rpm and tar.gz. Downloading CI's completed desktop installer is not a substitute for the requested local build.
 
 Use a dedicated clean checkout at the release commit if the working tree may change during the build. Keep dependency/build caches when safe, but select only artifacts from this successful build with the expected version/architecture; do not pick the newest file in a directory containing older builds. Do not use test-skipping flags unless requested. Record the commit, build command, output path and checksum.
 

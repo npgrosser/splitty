@@ -1,6 +1,6 @@
 # Local desktop packages
 
-The local build is the native app (`crates/splitty-gpui`), the only package a release publishes for each system. The legacy Tauri web app is not released and is built locally only when requested; `docs/development.md` names its build.
+The local build is the native app (`crates/splitty-gpui`), the only package a release publishes for each system.
 
 Detect WSL before treating `uname -s = Linux` as a Linux desktop. Use the companion `scripts/downloads.py` probe. Do not change `HOME`, `home` or `CODEX_HOME` to stage builds. Paths with spaces and apostrophes need proper quoting; prefer argument arrays/PowerShell `-File` over interpolated command strings.
 
@@ -12,13 +12,13 @@ Use the existing bridge from the checkout at `release_sha`:
 bash scripts/windows-installer.sh
 ```
 
-It creates/reuses a Windows-drive checkout, fetches this repository's committed HEAD into it, and runs `packaging/windows/build.ps1` there (native app by default) using native Windows Rust/MSVC, Node/pnpm, NSIS (`makensis.exe`, also found in the Tauri CLI's cache) and WSL for the backend payload. It prints `Setup: <windows path>` for the built installer. Do not pass `--install`, `--skip-tests` or `--web` (the legacy Tauri app) by default. A Linux build inside WSL would produce the wrong desktop package.
+It creates/reuses a Windows-drive checkout, fetches this repository's committed HEAD into it, and runs `packaging/windows/build.ps1` there using native Windows Rust/MSVC, Node/pnpm, NSIS (`makensis.exe` on `PATH` or in its default install directory) and WSL for the backend payload. It prints `Setup: <windows path>` for the built installer. Do not pass `--install` or `--skip-tests` by default. A Linux build inside WSL would produce the wrong desktop package.
 
 The native executable links the pinned terminal library. `SPLITTY_GHOSTTY_VT_DIR` names the Windows path of a built prefix; without it the build runs `scripts/bootstrap-libghostty-vt.py` with Windows Python, which downloads and builds it once into the user cache.
 
 Use an existing clean `SPLITTY_WINDOWS_CHECKOUT` when configured. If the default preview checkout contains other work, choose a separate release checkout, e.g. under the Windows user's `Code` folder; never discard the preview's changes. The wrapper requires WSL interop, `powershell.exe`, `wslpath`, native Windows Git, Node/pnpm, Rust/MSVC and the payload prerequisites from `packaging/windows/README.md`. `SPLITTY_WINDOWS_PATH` can add native Windows tools to PATH.
 
-The Windows staging checkout's HEAD must equal `release_sha`. The native installer is `target/x86_64-pc-windows-msvc/release/bundle/native/Splitty_<VERSION>_x64-setup.exe` (the path the wrapper printed); the legacy one, when requested, is under `bundle/nsis/` and is named `Splitty Web_<VERSION>_x64-setup.exe` (the release calls it `Splitty-Web_<VERSION>_x64-setup.exe`). Verify the file was produced during this build; pass its WSL path to the Downloads helper. The wrapper's current x64 restriction is real: report an unsupported Windows architecture instead of labeling an x64 package as native ARM64.
+The Windows staging checkout's HEAD must equal `release_sha`. The native installer is `target/x86_64-pc-windows-msvc/release/bundle/native/Splitty_<VERSION>_x64-setup.exe` (the path the wrapper printed). Verify the file was produced during this build; pass its WSL path to the Downloads helper. The wrapper's current x64 restriction is real: report an unsupported Windows architecture instead of labeling an x64 package as native ARM64.
 
 If the wrapper's interpolated PowerShell command cannot represent a path/distro containing apostrophes, use a clean Windows-drive checkout at `release_sha` and invoke `packaging/windows/build-from-wsl.sh` there; that bridge uses PowerShell `-File` with separate arguments.
 
@@ -30,7 +30,7 @@ Use a checkout on a Windows drive. Run release versioning through WSL (or Git Ba
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1
 ```
 
-`-App native` is the default; `-App web` builds the legacy Tauri app. Select an existing WSL distribution with `-Distro` if needed. Inspect the same versioned output as above. Run the helper with `py -3` or an available Python 3; it queries Windows Downloads directly. This build needs WSL for its Linux backend even though the desktop app is native Windows.
+Select an existing WSL distribution with `-Distro` if needed. Inspect the same versioned output as above. Run the helper with `py -3` or an available Python 3; it queries Windows Downloads directly. This build needs WSL for its Linux backend even though the desktop app is native Windows.
 
 ## Shared payloads for native macOS and Linux
 
@@ -68,11 +68,9 @@ packaging/macos/native/build.sh \
   --shell-integration "$payload_dir/darwin-aarch64/shell-integration"
 ```
 
-It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, assembles the ad-hoc signed `Splitty.app`, verifies its signature and writes `build/native-macos/Splitty_<VERSION>_aarch64.dmg` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this Mac's own `splitty` instead of the release's static server; say so if that was used. The app is built for the host's architecture: an Intel Mac produces `Splitty_<VERSION>_x64.dmg`, which the release does not publish; report that instead of labeling it as the release package.
+It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, assembles the ad-hoc signed `Splitty.app`, verifies its signature and writes `build/native-macos/Splitty_<VERSION>_aarch64.dmg` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this Mac's own `splitty` instead of the release's static server; say so if that was used. The app is built for the host's architecture: an Intel Mac produces `Splitty_<VERSION>_x64.dmg`, also published by the release.
 
 Inspect the app executable's architecture with `file`/`lipo -info`, verify the bundle version, and copy the DMG to the macOS Downloads folder. Do not install into `/Applications` or stop a running app merely to produce a download.
-
-The legacy web app (only when requested) is `packaging/macos/build.sh` (`--universal` for a universal DMG); it builds missing payloads itself and writes under `target/release/bundle/dmg/` or `target/universal-apple-darwin/release/bundle/dmg/`.
 
 ## Native Linux
 

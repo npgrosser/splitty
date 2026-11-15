@@ -1,17 +1,12 @@
-name: Windows installers
+name: Windows installer
 
 # Builds the Windows installer of the native app (crates/splitty-gpui,
 # packaging/windows/native) around the static servers of server-payloads.yml
-# (the x86_64 one is the Windows apps' WSL backend). The legacy web app (Tauri,
-# installed as "Splitty Web") is built only on request and is not released.
+# (the x86_64 one is the Windows app's WSL backend).
 
 on:
   workflow_dispatch:
     inputs:
-      web:
-        description: Also build the legacy web app's installer
-        type: boolean
-        default: false
       payloads:
         description: Build the static servers in this run
         type: boolean
@@ -19,10 +14,6 @@ on:
   # Called by release.yml for tagged releases.
   workflow_call:
     inputs:
-      web:
-        description: Also build the legacy web app's installer
-        type: boolean
-        default: false
       payloads:
         description: Build the static servers; false when the caller's run already holds their artifacts
         type: boolean
@@ -122,94 +113,5 @@ jobs:
         with:
           name: splitty-windows-x64-native
           path: out/Splitty_*_x64-setup.exe
-          if-no-files-found: error
-          retention-days: 3
-
-  web:
-    name: Web app NSIS installer (Tauri)
-    if: ${{ !failure() && !cancelled() && inputs.web }}
-    needs: payloads
-    runs-on: windows-2025
-    timeout-minutes: 60
-    # Remote windows install these on hosts without WSL too: the x86_64
-    # archive (also the WSL backend), the aarch64 one and the macOS ones,
-    # built into the app.
-    env:
-      SPLITTY_REMOTE_PAYLOAD_X86_64: ${{ github.workspace }}/crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz
-      SPLITTY_REMOTE_PAYLOAD_AARCH64: ${{ github.workspace }}/payloads/splitty-wsl-aarch64.tar.gz
-      SPLITTY_REMOTE_PAYLOAD_DARWIN_AARCH64: ${{ github.workspace }}/payloads/splitty-darwin-aarch64.tar.gz
-      SPLITTY_REMOTE_PAYLOAD_DARWIN_X86_64: ${{ github.workspace }}/payloads/splitty-darwin-x86_64.tar.gz
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-        with:
-          toolchain: stable
-          targets: x86_64-pc-windows-msvc
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: windows-tauri
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: wsl-payload
-          path: crates/splitty-tauri/resources
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: remote-payload-aarch64
-          path: payloads
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: remote-payload-darwin
-          path: payloads
-
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: frontend-dist
-          path: frontend/dist
-
-      - name: Install frontend tooling
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile
-
-      - name: Test Windows launcher and navigation guard
-        run: cargo test --locked --release --package splitty-gui --target x86_64-pc-windows-msvc --lib
-
-      - name: Build NSIS installer
-        working-directory: crates/splitty-tauri
-        run: '& "../../frontend/node_modules/.bin/tauri.cmd" build --target x86_64-pc-windows-msvc --bundles nsis'
-
-      # The bundler names the setup after the product, "Splitty Web"
-      # (tauri.windows.conf.json); the release file has no space.
-      - name: Collect installer
-        shell: pwsh
-        run: |
-          $setups = @(Get-ChildItem -Path target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter "*-setup.exe")
-          if ($setups.Count -ne 1) { throw "expected one setup in bundle/nsis, found $($setups.Count)" }
-          $name = $setups[0].Name
-          if ($name -notlike "Splitty Web_*_x64-setup.exe") { throw "unexpected setup name: $name" }
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item -LiteralPath $setups[0].FullName -Destination (Join-Path out ("Splitty-Web_" + $name.Substring("Splitty Web_".Length)))
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: splitty-windows-x64-web
-          path: out/Splitty-Web_*_x64-setup.exe
           if-no-files-found: error
           retention-days: 3

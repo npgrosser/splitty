@@ -1,7 +1,7 @@
 # Splitty architecture model
 
 The module-level map of Splitty in the [LikeC4](https://likec4.dev) DSL: the people and external
-systems, the containers (the Rust crates, the web frontend, the desktop shells, the stores), and
+systems, the containers (the Rust crates, the web frontend, the native desktop app, the stores), and
 the components of each crate with the dependencies allowed between them. `check/` compares the
 model with the code in both directions, so it can be trusted without reading imports. Concepts
 (ops model, shadow mode, the two protocol paths, server modes) are explained in
@@ -22,7 +22,6 @@ into operating-system processes.
 | `gpui.c4` | The native desktop app (GPUI): window, workspace, terminal engine and startup |
 | `server.c4` | The components of `splitty-server` (the `splitty` binary) and their relationships, also into the core |
 | `remote.c4` | The components of `splitty-remote` (SSH, install, handshake, bridge, tunnel, known hosts) and their relationships |
-| `desktop.c4` | The components of `splitty-gui` (the Tauri app) and their relationships, also into the core and the server |
 | `views.c4` | Context, containers, connection components, the components of each crate, and one view per composition root |
 | `check/` | The workspace crate `splitty-architecture`, whose test runs the check |
 
@@ -45,7 +44,7 @@ pnpm --dir architecture validate   # syntax and references, without layout
 ```
 
 The views use auto-layout only. The server's component view leaves out the relationships of
-`main`; the two composition-root views show what `main` and `app` use.
+`main`; the server composition-root view shows what `main` uses.
 
 ## Querying the model
 
@@ -65,17 +64,16 @@ finds the components of a capability.
 
 ## Conventions
 
-**Containers are the crates.** `splitty-core`, `splitty-server`, `splitty-gui`,
+**Containers are the crates.** `splitty-core`, `splitty-server`,
 `splitty-client-core` and `splitty-gpui` are containers,
 next to the web frontend and the stores. The core is a container of its own,
-although it is only ever linked into the `splitty` binary and the desktop apps. That way each
+although it is only ever linked into the `splitty` binary and the native desktop app. That way each
 crate's components sit in one place, and a relationship into the core reads as the use of a
 library.
 
 **Components are modules.** A component names its code in `metadata { module 'splitty_core::mux' }`,
 the module path as Rust spells it, starting with the target's crate name: `splitty_core`,
-`splitty_client_core`, `splitty_server`, `splitty` (the server's binary), `splitty_tauri_lib`,
-`splitty_gui` and `splitty_gpui`. Where one
+`splitty_client_core`, `splitty_server`, `splitty` (the server's binary) and `splitty_gpui`. Where one
 capability covers a component, it also names its spec in `metadata { spec 'workspace-model' }`
 (a directory under `../openspec/specs/`). Components stop at top-level modules. The one exception
 is `mux::effect_runner`, which makes "within the mux, only the effect runner touches the PTY
@@ -84,7 +82,7 @@ layer" a checked rule.
 **Ownership by longest prefix.** A file belongs to the component whose module is the longest prefix
 of its module path. So `splitty_core::mux::effect_runner` belongs to `effect_runner`, and
 `splitty_core::mux::reducer` belongs to `mux`. There are two exceptions:
-- A component that names a crate root (`main` for `splitty`, `app` for `splitty_tauri_lib`, `app_main` for `splitty_gui`, `client_root` for `splitty_client_core`, `gpui_main` for `splitty_gpui`) owns only the root file, so a new module in that crate still needs a component of its own.
+- A component that names a crate root (`main` for `splitty`, `client_root` for `splitty_client_core`, `gpui_main` for `splitty_gpui`) owns only the root file, so a new module in that crate still needs a component of its own.
 - A root that holds nothing but `mod` declarations, attributes and comments, such as the library roots of `splitty-core` and `splitty-server`, needs no owner.
 
 **Flat siblings.** All components are direct children of their container, also where one module

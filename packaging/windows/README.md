@@ -5,10 +5,9 @@ toolchains: WSL builds the static Linux backend and Windows builds the
 application plus the NSIS installer. The local build script orchestrates both
 and keeps their incremental caches.
 
-`build.ps1` builds the native app by default: `splitty-gpui.exe`, packed by
+`build.ps1` builds the native app: `splitty-gpui.exe`, packed by
 `native/bundle.ps1` with `native/installer.nsi` as `Splitty.exe` with the
-backend archive in `resources\`. `-App web` builds the legacy Tauri/WebView2
-app with the Tauri bundler instead; it installs as "Splitty Web".
+backend archive in `resources\`.
 
 ## Prerequisites
 
@@ -16,8 +15,8 @@ app with the Tauri bundler instead; it installs as "Splitty Web".
 - Visual Studio 2022 Build Tools with **Desktop development with C++** and a
   Windows 10/11 SDK
 - Rust stable (MSVC), Git for Windows, Node.js 24, and pnpm 11 on Windows
-- For the native app: NSIS 3 (`makensis.exe` on `PATH`, in its default install
-  directory or in the Tauri CLI's cache) and the pinned libghostty-vt, either
+- NSIS 3 (`makensis.exe` on `PATH` or in its default install directory) and
+  the pinned libghostty-vt, either
   as `GHOSTTY_VT_DIR` or built by `scripts\bootstrap-libghostty-vt.py`
   (Python 3)
 - Rust stable, `musl-tools`, and `file` inside the selected WSL distribution
@@ -34,10 +33,9 @@ target cache is automatically stored in the Linux filesystem, while MSVC and
 NSIS work from the native Windows path. A checkout below `\\wsl$` is not
 supported by the Windows build tools.
 
-The build includes servers for both x86_64 and aarch64 Linux hosts. Remote
-windows can install them over Windows SSH without WSL at runtime; the WSL
-backend also carries the aarch64 server for remote screens. These are the same
-payloads included by the release workflow.
+The WSL backend carries the servers for remote Linux and macOS hosts. These
+are the same payloads included by the release workflow. The local WSL archive
+is written to `build\windows-payload\`.
 
 ## Build from Windows
 
@@ -54,8 +52,7 @@ iteration, `-SkipTests` skips the frontend check and desktop unit tests:
 powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -SkipTests
 ```
 
-The finished installer is written to `bundle\native\` (native app) or
-`bundle\nsis\` (`-App web`) below:
+The finished installer is written to `bundle\native\` below:
 
 ```text
 target\x86_64-pc-windows-msvc\release\

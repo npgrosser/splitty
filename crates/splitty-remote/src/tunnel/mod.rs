@@ -22,10 +22,7 @@ pub use supervisor::{
 
 use std::io;
 use std::net::TcpListener;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Mutex,
-};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -161,21 +158,6 @@ pub struct Failure {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
-}
-
-impl Failure {
-    pub fn from_error_budgeted(
-        error: &impl std::fmt::Display,
-        budget: &ConnectionBudget,
-    ) -> io::Result<Charged<Self>> {
-        budget.display(error, false).map(|message| {
-            message.map(|message| Self {
-                migration: None,
-                message,
-                hint: None,
-            })
-        })
-    }
 }
 
 impl RemoteError {
@@ -428,7 +410,6 @@ pub struct SshRemote {
     answered: Mutex<Option<std::sync::Arc<Charged<String>>>>,
     protocol: u32,
     assignment: admission::Assignment,
-    update: AtomicBool,
 }
 
 impl SshRemote {
@@ -447,13 +428,7 @@ impl SshRemote {
             answered: Mutex::new(None),
             protocol,
             assignment,
-            update: AtomicBool::new(false),
         }
-    }
-
-    pub fn with_update(self, update: bool) -> Self {
-        self.update.store(update, Ordering::Release);
-        self
     }
 
     fn server(&self) -> Server {
@@ -608,10 +583,6 @@ impl Remote for SshRemote {
             .map_err(|error| from_ssh_budgeted(self.host(), error, &self.ssh.context().budget))
     }
 
-    fn take_update_intent(&self) -> bool {
-        self.update.swap(false, Ordering::AcqRel)
-    }
-
     async fn migrate_legacy(&self, daemon: &RunningDaemon) -> Result<(), RemoteError> {
         let Some(handshake::LegacyMigration::Ready { token, .. }) = &daemon.legacy_migration else {
             return Err(RemoteError::InvalidAnswer {
@@ -710,32 +681,8 @@ pub async fn open(
     assignment: admission::Assignment,
     on_progress: impl FnMut(Charged<Progress>) + Send,
 ) -> Result<(SshRemote, Connected<NativeBridge>), RemoteError> {
-    open_with_update(
-        ssh,
-        version,
-        protocol,
-        payload_for,
-        assignment,
-        false,
-        on_progress,
-    )
-    .await
-}
-
-/// Only a native launcher or an explicitly confirmed host update supplies
-/// `update`. The intent belongs to this preparation, never later reconnects.
-pub async fn open_with_update(
-    ssh: Ssh,
-    version: &'static str,
-    protocol: u32,
-    payload_for: PayloadFor,
-    assignment: admission::Assignment,
-    update: bool,
-    on_progress: impl FnMut(Charged<Progress>) + Send,
-) -> Result<(SshRemote, Connected<NativeBridge>), RemoteError> {
     let owner = ssh.owner_context();
-    let remote =
-        SshRemote::new(ssh, version, protocol, payload_for, assignment).with_update(update);
+    let remote = SshRemote::new(ssh, version, protocol, payload_for, assignment);
     let connected = match owner {
         None => connect(&remote, on_progress).await?,
         Some(owner) => {

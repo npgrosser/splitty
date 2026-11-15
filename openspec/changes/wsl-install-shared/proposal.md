@@ -26,3 +26,7 @@ The Windows app installs its WSL backend with code of its own (`crates/splitty-t
 ## Architecture impact
 
 `architecture/desktop.c4`: `windows_wsl` uses `splitty-remote`'s `install` and `ssh`.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-tauri-shell`: the Tauri shell is removed. The Windows app's own WSL install code is now `crates/splitty-gpui/src/startup/wsl.rs`, not `crates/splitty-tauri/src/windows_wsl.rs`; `tauri.windows.conf.json` and the model's `architecture/desktop.c4` are gone, and the Windows installer workflow is `windows-installer.yml`. What this proposal says about those files applies to their successors.

@@ -8,7 +8,7 @@ The rules for building live in a few places and hold for work without an OpenSpe
 - `docs/issues/openspec-baseline-findings.md`: known bugs, stale docs and test gaps.
 - `openspec/open-decisions.md`: provisional decisions waiting for the maintainer's review.
 - `roadmap/README.md` (German): order and milestones; the next milestone is listed under "Als Nächstes".
-- `docs/native-ui-handoff.md`: state, packages and open work of the native app (`crates/splitty-gpui`), the default desktop app; read before continuing native UI changes. The Tauri shell (`crates/splitty-tauri`) around the web frontend is legacy: it keeps building in CI and is not released.
+- `docs/native-ui-handoff.md`: state, packages and open work of the native app (`crates/splitty-gpui`), the desktop app; read before continuing native UI changes.
 
 ## Tests
 
@@ -25,10 +25,9 @@ A test task names its level and extends an existing test where one fits. A new s
 - During the work: targeted tests of what you touch, for example `cargo test -p splitty-core pty::` or `cargo test -p splitty-server --test daemon_lifecycle`, and `pnpm test <file>` in `frontend/`.
 - Before a merge, once (the same as CI; `cargo test` runs the architecture check, which needs `pnpm install --dir architecture` once):
   - `cargo fmt --all --check`
-  - `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`
-  - `cargo test --workspace --exclude splitty-gui`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace`
   - where `crates/splitty-gpui` is touched: `cargo test -p splitty-gpui --features ui-test-support` (the view tests are gated on that feature)
-  - where `crates/splitty-tauri` is touched: `cargo clippy -p splitty-gui --all-targets -- -D warnings` and `cargo test -p splitty-gui --lib`
   - where `packaging/linux/native` is touched: `packaging/linux/native/build.sh --executable target/release/splitty-gpui --cli target/release/splitty --out <dir>` after release builds of `splitty-gpui` and `splitty-server` (needs `dpkg-deb` and `rpmbuild`; CI also packs the macOS disk image)
   - where `frontend/` is touched: `pnpm check`, `pnpm test` and `pnpm build` there
   - `openspec validate --specs`
@@ -38,8 +37,8 @@ A test task names its level and extends an existing test where one fits. A new s
 - OpenSpec changes use `spec-driven` (proposal, specs, design, tasks) when they are large, span several components or the protocol, or change data formats or security invariants; otherwise `light` (`openspec/schemas/light`: proposal with its "Architecture impact" line and a short "Decisions" list, specs, tasks, no design; `openspec new change <name> --schema light`, and `skip_specs: true` in `.openspec.yaml` when no behavior changes). Tiny fixes need no change.
 - Drafts (proposal, maybe design, a "Draft" note in their first lines) are completed with specs and tasks when they are next, then implemented with `/opsx:apply` and closed with `/opsx:archive`.
 - Do not stop for decisions the maintainer has not made: decide, mark it "(provisional, tbd)" in the change, and add a bullet to `openspec/open-decisions.md`.
-- Specs of UI parts (the web frontend, the desktop shells' windows) state only what crosses the protocol or an API and the UX concepts and decisions a reader cannot see in the built app (what closing a remote screen does, what happens on reconnect); no scenario per screen, layout, label or style.
+- Specs of UI parts (the web frontend, the native app's windows) state only what crosses the protocol or an API and the UX concepts and decisions a reader cannot see in the built app (what closing a remote screen does, what happens on reconnect); no scenario per screen, layout, label or style.
 - The repository is public. Docs, specs, comments, tests and commit messages describe the system, not people: no quotes from conversations, no notes on who asked or decided, no personal machines, accounts, host names or paths.
 - Archived OpenSpec changes stay local (`openspec/changes/archive/` is gitignored); the main specs are the record.
 - Commits follow the conventional style of the log (`fix(pty): …`, `docs(openspec): …`). After an archive, commit right away; never push.
-- On Windows, local work runs in WSL by design; remote-only use works without WSL (see `roadmap/README.md`, Milestone 7).
+- On Windows, local work runs in WSL by design; a Windows machine without WSL has no desktop app until the draft `native-windows-without-wsl` is implemented.

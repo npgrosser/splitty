@@ -23,7 +23,7 @@ Use targeted checks during implementation. The full gate in 4.2 remains deferred
 ## 4. Integration checks
 
 - [x] 4.1 Run targeted GPUI terminal and workspace in-process tests plus the owned motion smoke, and verify Drawer pin, drag and Screen transitions preserve the existing command counts and reduced-motion path.
-- [ ] 4.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`, `cargo test --workspace --exclude splitty-gui`, and `openspec validate --specs` once before merge; verify all pass. Install architecture dependencies with `pnpm install --dir architecture` first if absent.
+- [ ] 4.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `openspec validate --specs` once before merge; verify all pass. Install architecture dependencies with `pnpm install --dir architecture` first if absent.
 
 ## Drawer and drop validation (2026-11-08)
 

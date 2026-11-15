@@ -65,7 +65,7 @@ pub async fn client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// Host intent is supplied by an authorized main broker/gateway. It is not a
-/// command understood by a remote bridge or an assigned remote window.
+/// command understood by a remote bridge or a host relay.
 pub async fn client_with_host<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     read: &mut R,
     write: &mut W,

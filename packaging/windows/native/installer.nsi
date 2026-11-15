@@ -16,6 +16,7 @@ SetCompressor /SOLID lzma
 
 !define PRODUCT "Splitty"
 !define MAIN_BINARY "Splitty.exe"
+; Remove the executable from releases before the v0.3.0 native app.
 !define LEGACY_BINARY "splitty-gui.exe"
 !define INSTALL_KEY "Software\splitty\Splitty"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Splitty"

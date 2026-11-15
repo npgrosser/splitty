@@ -17,9 +17,7 @@ There are two ways to look at a host:
 | [`splitty connect`](#splitty-connect) | Your browser | The `splitty` command |
 
 Host keys are checked strictly in both: connect to a new host once with plain
-`ssh` and verify its fingerprint. The Tauri shell built from source can also
-open a host in a window of its own
-([development](development.md#the-tauri-shell)).
+`ssh` and verify its fingerprint.
 
 ## Host requirements
 

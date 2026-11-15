@@ -237,8 +237,6 @@ model {
     hub -> splitty.transport.wire 'Native preparation, host prelude and fixed service identity'
     native -> splitty.transport.codec 'Serialize native preparation and relay frames'
     native -> splitty.remote.ssh 'Validated target and stdio-only owned SSH connector'
-    native -> splitty.remote.hosts 'Record successful explicit host opens; automatic recovery preserves forgotten hosts'
-    native -> splitty.remote.install 'Prepare the shipped host payload for an SSH helper'
     native -> splitty.remote.tunnel 'Bounded native SSH setup with progress and safe conditional updates'
 
 

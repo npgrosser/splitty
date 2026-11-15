@@ -2,8 +2,7 @@ name: Release
 
 # Builds every artifact for a `v*` tag and publishes them as a GitHub release
 # with SHA256SUMS and, for a public repository, build provenance attestations.
-# Each platform gets the native app (crates/splitty-gpui). The legacy Tauri
-# web app is not released; ci.yml keeps it building.
+# Each platform gets the native app (crates/splitty-gpui).
 # A weekly run on main and a run started by hand build everything and publish
 # nothing. The release is published only once every platform has built and
 # the last release has run against this build (version-skew); a tag with a suffix
@@ -62,7 +61,7 @@ jobs:
   windows:
     name: Windows
     needs: payloads
-    uses: ./.github/workflows/windows-tauri.yml
+    uses: ./.github/workflows/windows-installer.yml
     with:
       payloads: false
     permissions:

@@ -17,7 +17,7 @@ repo_root=$1
 output_dir=$2
 commit=${3:-local}
 arch=${4:-x86_64}
-# Linux (WSL, CI) or a Mac (packaging/macos/build.sh).
+# Linux (WSL, CI) or macOS.
 build_kernel=$(uname -s)
 # The x86_64 archive is also the Windows app's WSL backend; the name stays.
 archive_name=splitty-wsl-${arch}.tar.gz

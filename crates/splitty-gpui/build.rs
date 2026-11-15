@@ -86,7 +86,7 @@ fn main() {
 #[cfg(windows)]
 fn windows_resources() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets it"));
-    let icon = manifest.join("../splitty-tauri/icons/icon.ico");
+    let icon = manifest.join("icons/icon.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     let version = env::var("CARGO_PKG_VERSION").expect("Cargo sets CARGO_PKG_VERSION");
     let numbers: Vec<&str> = version.split(['.', '-', '+']).take(3).collect();

@@ -79,8 +79,6 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 - **Fixed in `cli-control`: generated screen IDs and spawn results.** HTTP creation returns the actual screen ID, revision and successful pane/session mappings; nudges use that ID. Failed starts return errors and never emit successful spawn events.
 - `reorder_screens` cannot be sent over HTTP; it falls through to the screen-op parser and returns 400.
-- The embedded Tauri server never removes its control socket file (`splitty-tauri/src/lib.rs:402`); the
-  standalone server does (`main.rs:538`, `main.rs:1088`).
 - Panes get `SPLITTY_SOCK` even when the socket could not be created (`main.rs:391-394`).
 - **`terminal.allowOsc52Write` is never saved** (found on 2026-10-13 while adding `remote.autoForwardPorts`).
   The server's settings have no such field (`config/settings.rs`, `TerminalSettings`), so `PATCH
@@ -138,23 +136,18 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 ### terminal-sessions
 
-- **Links in a terminal do not open in the desktop apps; they have to be copied by hand** (seen 2026-10-14
-  on Windows and macOS, cause of plain links not confirmed). Found and fixed the same day: OSC 8 hyperlinks asked
-  with `window.confirm`, which the macOS webview (wry 0.57 has no script dialogs there) answers with false, so they
-  never opened; a local pane's OSC 8 links took xterm's `window.open()`, which Tauri admits as a blank Splitty
-  window; the ghostty-web renderer gave local panes no links at all. All now go through `lib/terminal/hyperlinks.ts`
-  and `openExternalTarget`. Plain detected links already took the native opener (`plugin:opener|open_url`, scope
-  `http://*`, `https://*`) and work in the browser; a refusal there was only a console warning and is now an error
-  notice with the opener's reason. Next: a check in the desktop apps. Long URLs that a TUI hard-wraps were
+- **Links in a terminal of the web client had to be copied by hand** (seen 2026-10-14). Found and fixed the
+  same day: OSC 8 hyperlinks asked with `window.confirm` and a local pane's OSC 8 links took xterm's
+  `window.open()`; the ghostty-web renderer gave local panes no links at all. All now go through
+  `lib/terminal/hyperlinks.ts` and `openExternalTarget`. Long URLs that a TUI hard-wraps were
   matched only up to the line break; sessions now start with `FORCE_HYPERLINK=1`, so Claude Code sends them as
   OSC 8 hyperlinks that open whole from every line (Codex sends them without it). Plain text that a program wraps
   itself is still matched per line, and xterm.js underlines only the hovered line of a wrapped hyperlink.
-- **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium, Edge and WebView2 (Windows
-  app)** (verified in Chromium on 2026-10-15): both call `navigator.clipboard.readText()`
+- **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium and Edge** (verified in
+  Chromium on 2026-10-15): both call `navigator.clipboard.readText()`
   (`lib/context_menus.ts`, `Workspace.svelte`), which the page's own `Permissions-Policy: clipboard-read=()` blocks
   ("The Clipboard API has been blocked because of a permissions policy"). The paste shortcuts work, since they use
-  the browser's `paste` event. Options: drop the menu entry and the command, or read the clipboard natively in the
-  desktop shells and keep the policy for the browser.
+  the browser's `paste` event. Option: drop the menu entry and the command.
 - Notifications (`process.idle`, `process.finished`, `session.exited`) only exist for sessions some connection
   streams: the engine tracks a session from `create`/`attach` on, and the watchers that feed it run per stream
   (`protocol/dispatcher.rs`). Output, title and OSC 133 state are captured without a client, but a session nobody
@@ -248,17 +241,10 @@ Hardening candidates, not open holes.
   browser: `/api` without `Origin` is allowed, and a non-browser client can set the WebSocket `Origin`
   freely. Locally that is a shell on the PC; through `splitty connect` it is a shell on the remote host.
   Side effect: two Splitty servers in one browser profile log each other out (same cookie name and
-  host). Users of the desktop apps are not affected since `remote-window` (2026-10-12): a main window
-  never loads another loopback page (navigation guard), and a host opened in a remote window gets a
-  cookie store of its own, in memory only, that visits no other server. What remains is the browser path
+  host). The native app is not affected: it uses no browser credentials. What remains is the browser path
   (`serve`, `connect`) in a profile shared with other loopback servers; the planned `remote-screens` hub
   avoids remote cookies entirely. Possible mitigation: a second, origin-bound secret (sessionStorage is
   port-scoped) required next to the cookie, a deliberate MODIFIED of `access-control`.
-- **Fixed in `remote-window` (2026-10-12): Tauri granted IPC to every `http://127.0.0.1:*` page in the
-  main window** (`capabilities/app.json`), including the `wsl_*` commands on Windows, so only the
-  navigation guard kept another loopback page out. The main window's capability is now added at runtime
-  for the exact origin of its backend (`crates/splitty-tauri/src/capability.rs`, `access-control`,
-  Desktop Shell Command Scope), and remote windows are in no capability.
 
 - The server never sets `SPLITTY_TOKEN`/`SPLITTY_SERVER` for panes but does not scrub them from its own inherited
   environment either (`pty/session.rs:110-119`).
@@ -273,9 +259,9 @@ Hardening candidates, not open holes.
   under a grant gets a not-found error instead of a refusal (found on 2026-11-06).
 - Binding `[::1]` passes the loopback and Host checks, but the origin allowlist only has `127.0.0.1`/`localhost`
   (`http/mod.rs:61-66`), so the UI gets 403 from its own server. Broken, not insecure.
-- Not specced yet, needs a capability decision (likely a future `desktop-shell`): navigation and opener policy of
-  the desktop shell, OSC 52 clipboard policy, link scheme checks, template command confirmation, WSL protections
-  (non-root default user, credential redaction in logs).
+- Not specced yet, needs a capability decision (likely a future capability of the native app): OSC 52 clipboard
+  policy, link scheme checks, template command confirmation, WSL protections (non-root default user, credential
+  redaction in logs).
 
 ### packaging and releases
 
@@ -392,7 +378,8 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 - **Dead code.** `DockviewManager.addTerminalPane`, `moveScreen` in the screens store, the UI command
   `overlay.toggle`, the Drawer's "Templates" placeholder, `SplittyWebSocket.reconnect`, `setAuthState`,
   `loadTheme`, the unread `terminal.theme` setting, and the identical `getUnreadForPane`/`getUnreadForSession`.
-  `editor_target.ts` exists in `frontend/` and, in Rust, in the Tauri shell.
+  `editor_target.ts` exists in `frontend/` and, in Rust, as `native_workspace/editor_uri.rs` in
+  `splitty-client-core`; the shared vectors in `testdata/` check both.
 - Found on 2026-11-06 with `splitty-open`:
   - `terminalDirectoryItems` matches only `terminal-…` pane IDs, so terminals the CLI creates (`pane-…`) get no folder
     actions in their context menu.
@@ -465,6 +452,15 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   (`crates/splitty-client-core/src/native_workspace/files.rs`) replaces the characters Windows refuses but
   keeps device names (`CON`, `NUL`, `COM1`, with or without an extension) and trailing dots and spaces; saving
   such an offered file fails on Windows with the system's error instead of under an adjusted name.
+- **The native app does not adopt the login shell's `PATH`** (found on 2026-11-15 in `remove-tauri-shell`, RTS-3).
+  Started from the Dock, the Finder or a Linux desktop launcher, the app has the launcher's `PATH` (macOS:
+  launchd's `/usr/bin:/bin:/usr/sbin:/sbin`), and so has everything it starts without a shell: `ssh` with a
+  `ProxyCommand` from the user's SSH configuration (such as `gcloud` from `/opt/homebrew/bin`) fails, and the
+  embedded server's managed jobs miss the user's tools. Terminals are not affected; their login shells set their
+  own. The earlier web app's shell took `PATH` from `$SHELL -l -i -c` at startup (at most 5 s, `PATH` only); that
+  code (`login_path.rs`) is in the history of the `remove-tauri-shell` commit. The requirement `server-modes`,
+  Desktop App Command Search Path, went with that shell; moving the adoption into the native app is a change of
+  its own.
 
 ## Stale documentation
 
@@ -505,19 +501,6 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 behavior is recorded in `managed-jobs`, `cli`, `control-api` and the related main
 specs. The obsolete `SPLITTY_PORT`/`SPLITTY_TOKEN` discovery is gone; deferred CLI
 conveniences are listed in the roadmap, not treated as current guarantees.
-
-## Structure
-
-Found while building the architecture model (`architecture-model`, 2026-10-12); the model in `architecture/` records the current state.
-
-- **The server state is wired twice.** `build_state` in `crates/splitty-server/src/main.rs` and `start_embedded_server`
-  in `crates/splitty-tauri/src/lib.rs` both build the template store, the PTY manager, the dispatcher with its
-  environment and notification engine, the store, the effect runner, `WsState` and `AppState`, then the control socket
-  and the router. The copies already differ: only `build_state` fills in the default shell profile for restored
-  sessions and persists the store in daemon mode, which the embedded desktop server does not need today. A function in
-  `splitty-server` that builds the state for both composition roots would remove `app`'s relationships into `pty`,
-  `protocol`, `effect_runner` and `template`. Not done in `architecture-model` because the desktop startup only runs in
-  the app (provisional decision D5 there).
 
 ## Untested guarantees
 
@@ -563,8 +546,8 @@ that area touches them.
   `localStorage`).
 - **file-transfer,** left when it was archived (2026-10-29): checked end to end once by hand against a local `serve`
   in Chromium (Playwright, one-off: a 1.5 MiB drop, its sanitized name, mode and pasted path; `splitty download`
-  saved and dismissed). Untested: the same through the hub to an SSH host, downloads in the desktop shells
-  (WebView2, WebKitGTK, WKWebView), pasting files from the system clipboard, uploads over 10 MiB.
+  saved and dismissed). Untested: the same through the hub to an SSH host, pasting files from the system
+  clipboard, uploads over 10 MiB.
 - **version skew** (noted 2026-11-12, narrowed by `version-skew-smoke-test` the same day):
   `tests/version_skew.rs` runs the last release's static Linux x86_64 `splitty` (fetched and checked against the
   release's `SHA256SUMS` by `scripts/testing/fetch-last-release.sh`) against the current build, in CI on Linux and
@@ -582,6 +565,9 @@ that area touches them.
   than the last release (run once by hand against 0.2.4 on 2026-11-12: passed). The pinned rollback smoke in
   `tests/daemon_lifecycle.rs` needs Bubblewrap and does not run in CI. A run shows only what differs between the
   two builds: 0.3.1 and 0.3.2 differ in the server code by two settings.
+- **native app on Windows:** the startup failure of a machine without a WSL 2 distribution (`server-modes`,
+  Desktop App Hosting On Windows, "Remote only") is covered by the unit test of the candidate selection in
+  `crates/splitty-gpui/src/startup/wsl.rs` only; the dialog itself has not been checked on such a machine.
 
 ## Flaky tests
 
@@ -675,7 +661,7 @@ that area touches them.
   the static build without it.
 - Seen on 2026-11-07 in CI on `main`, each passing on the next commit without a related change:
   `daemon_lifecycle::remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions` in the
-  "Tauri native runtime (macOS)" job (`status.success()` at its bridge process), and
+  macOS job (`status.success()` at its bridge process), and
   `http::tests::a_forward_whose_ssh_ends_is_rebuilt_on_its_port` in "Rust tests". Locally,
   `remote_connect::the_hub_forwards_a_port_a_host_pane_listens_on` failed once in a full workspace run and passed
   alone. Not yet investigated.

@@ -253,7 +253,7 @@ impl Drop for ControlChannel {
 /// directory). The consequence is only that the in-shell `splitty` CLI cannot
 /// find this server — never that the server refuses to start.
 ///
-/// Lives here rather than in the binary so the Tauri app's embedded server uses
+/// Lives here rather than in the binary so the native app's embedded server uses
 /// the identical implementation; two copies of an authorisation boundary is one
 /// too many.
 pub fn spawn(service: std::sync::Arc<crate::service::State>) -> ControlChannel {

@@ -23,7 +23,7 @@
 ## 4. Integration checks
 
 - [x] 4.1 Run targeted client-core notification unit/in-process tests and GPUI Drawer production-view tests, then targeted strict Clippy for the touched crates; verify the focused results pass before broader checks.
-- [ ] 4.2 Before merge, run once: `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`, `cargo test --workspace --exclude splitty-gui` (after `pnpm install --dir architecture` where needed), and `openspec validate --specs`; verify all pass. This full check is deferred until integration review.
+- [ ] 4.2 Before merge, run once: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (after `pnpm install --dir architecture` where needed), and `openspec validate --specs`; verify all pass. This full check is deferred until integration review.
 
 Shared-ledger verification: seven notification tests pass, including canonical source/reset/removal fixtures, bounded fields/FIFO/read/settings policy, real embedded notification delivery with transport-credit release, and the opaque UI event factory joining both real peers while its Event remains retained. Existing connection tests (2), strict client-core all-target Clippy with UI test support, architecture checks (9 unit + 8 model), formatting and strict change validation pass. Scheduler integration and GPUI observation remain separate tasks; full merge CI remains deferred.
 

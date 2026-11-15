@@ -70,18 +70,10 @@ enum Commands {
     DesktopBackend {
         #[arg(long, value_parser = ["native-v1"])]
         transport: String,
-        #[arg(long, value_parser = ["embedded", "ssh"])]
+        #[arg(long, value_parser = ["embedded"])]
         backend: String,
-        #[arg(long, required_if_eq("backend", "ssh"), value_parser = splitty_remote::ssh::SshTarget::parse)]
-        target: Option<splitty_remote::ssh::SshTarget>,
-        /// Record an explicit desktop host-open intent after successful admission
-        #[arg(long, requires = "target", conflicts_with = "owner")]
-        remember_target: bool,
-        /// One explicit initial SSH update; never retained for reconnection
-        #[arg(long, requires = "target", conflicts_with = "owner")]
-        update: bool,
         /// Keep one embedded service across independent native substreams
-        #[arg(long, conflicts_with = "target")]
+        #[arg(long)]
         owner: bool,
     },
     /// Start an explicit browser gateway
@@ -800,46 +792,21 @@ async fn async_main() {
     }
 
     match cli.command {
-        Commands::DesktopBackend {
-            transport: _,
-            backend,
-            target,
-            owner,
-            remember_target,
-            update,
-        } => {
-            let result = match (backend.as_str(), target, owner, remember_target, update) {
-                ("embedded", None, true, false, false) => {
-                    splitty_server::native::helper::owner::embedded(
-                        tokio::io::stdin(),
-                        tokio::io::stdout(),
-                        connect_shutdown(),
-                    )
-                    .await
-                }
-                ("embedded", None, false, false, false) => {
-                    splitty_server::native::helper::embedded(
-                        tokio::io::stdin(),
-                        tokio::io::stdout(),
-                        connect_shutdown(),
-                    )
-                    .await
-                }
-                ("ssh", Some(target), false, remember, update) => {
-                    splitty_server::native::helper::ssh(
-                        tokio::io::stdin(),
-                        tokio::io::stdout(),
-                        target,
-                        remember,
-                        update,
-                        connect_shutdown(),
-                    )
-                    .await
-                }
-                _ => {
-                    eprintln!("desktop backend: --target is required only for --backend ssh");
-                    std::process::exit(2);
-                }
+        Commands::DesktopBackend { owner, .. } => {
+            let result = if owner {
+                splitty_server::native::helper::owner::embedded(
+                    tokio::io::stdin(),
+                    tokio::io::stdout(),
+                    connect_shutdown(),
+                )
+                .await
+            } else {
+                splitty_server::native::helper::embedded(
+                    tokio::io::stdin(),
+                    tokio::io::stdout(),
+                    connect_shutdown(),
+                )
+                .await
             };
             let cleanup = splitty_server::native::helper::settle_workers().await;
             if let Err(error) = result.and(cleanup) {
@@ -2750,9 +2717,8 @@ mod editor_cli_tests {
                 "--transport",
                 "native-v1",
                 "--backend",
-                "ssh",
-                "--target",
-                "user@vm",
+                "embedded",
+                "--owner",
             ],
             vec!["remote-bridge", "--transport", "native-v1"],
             vec!["remote-handshake", "--json"],
@@ -2774,6 +2740,20 @@ mod editor_cli_tests {
         ] {
             let parsed = Cli::try_parse_from(std::iter::once("splitty").chain(args)).unwrap();
             assert!(!grant_command_allowed(&parsed.command));
+        }
+        for args in [
+            vec!["--backend", "ssh"],
+            vec!["--backend", "ssh", "--target", "user@vm"],
+            vec!["--backend", "embedded", "--target", "user@vm"],
+            vec!["--backend", "embedded", "--remember-target"],
+            vec!["--backend", "embedded", "--update"],
+        ] {
+            assert!(Cli::try_parse_from(
+                ["splitty", "desktop-backend", "--transport", "native-v1"]
+                    .into_iter()
+                    .chain(args)
+            )
+            .is_err());
         }
         let scoped = Cli::try_parse_from(["splitty", "list-screens", "--json"]).unwrap();
         assert!(grant_command_allowed(&scoped.command));

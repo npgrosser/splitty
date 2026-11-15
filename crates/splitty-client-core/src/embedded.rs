@@ -413,6 +413,154 @@ mod tests {
         received
     }
 
+    /// In-process service behavior; a separate test process isolates the real
+    /// constructor's configuration without mutating the test runner's environment.
+    #[cfg(unix)]
+    #[test]
+    fn embedded_managed_jobs_start_and_shutdown_with_the_shared_service() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        if std::env::var_os("SPLITTY_EMBEDDED_TEST_CHILD").is_none() {
+            // Keep Unix socket paths below the macOS length limit too.
+            let fixture =
+                std::path::PathBuf::from("/tmp").join(format!("sp-{}", Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&fixture).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "embedded::tests::embedded_managed_jobs_start_and_shutdown_with_the_shared_service",
+                "--nocapture",
+            ]);
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("SPLITTY_") {
+                    child.env_remove(key);
+                }
+            }
+            let result = child
+                .env("SPLITTY_EMBEDDED_TEST_CHILD", "1")
+                .env("SPLITTY_CONFIG_DIR", &fixture)
+                .env("SHELL", "/bin/sh")
+                .output()
+                .expect("isolated test");
+            std::fs::remove_dir_all(fixture).unwrap();
+            assert!(
+                result.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return;
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let config = std::path::PathBuf::from(std::env::var_os("SPLITTY_CONFIG_DIR").unwrap());
+            let run = config.join("run");
+            std::fs::create_dir_all(run.join("keepers")).unwrap();
+            let daemon_socket = run.join("client.sock");
+            let keeper_socket = run.join("keepers/independent.sock");
+            let daemon = std::os::unix::net::UnixListener::bind(&daemon_socket).unwrap();
+            let keeper = std::os::unix::net::UnixListener::bind(&keeper_socket).unwrap();
+            use std::os::unix::fs::MetadataExt;
+            let daemon_inode = std::fs::symlink_metadata(&daemon_socket).unwrap().ino();
+            let keeper_inode = std::fs::symlink_metadata(&keeper_socket).unwrap().ino();
+            daemon.set_nonblocking(true).unwrap();
+            keeper.set_nonblocking(true).unwrap();
+            let discovery = json!({"pid":std::process::id(), "format":2,
+                "clientSocket":daemon_socket, "instance":"a".repeat(32), "transportVersion":999,
+                "socket":run.join("daemon.sock"), "version":"999.0.0", "protocol":999,
+                "keepsSessions":true,"startedAt":"fixture"}).to_string();
+            let discovery_path = config.join("daemon.json");
+            let token_path = config.join("auth-token");
+            let state_path = config.join("state.json");
+            let workspace = json!({"screens":{"independent":{
+                "id":"independent", "name":"Independent workspace", "revision":1,
+                "root":{"type":"slot", "id":"slot", "paneIds":[]},
+                "panes":{}, "sessions":{}
+            }}, "activeScreenId":"independent", "screenOrder":["independent"]}).to_string();
+            std::fs::write(&discovery_path, &discovery).unwrap();
+            std::fs::write(&token_path, "independent credential").unwrap();
+            std::fs::write(&state_path, &workspace).unwrap();
+
+            let service = EmbeddedService::start();
+            let mut client = service.connect().await.unwrap();
+            let instance = service.runtime.as_ref().unwrap().state.instance.clone();
+            let welcome = kind(&mut client, "mux.welcome").await;
+            assert_eq!(welcome.json().unwrap()["screens"], json!([]));
+            client.request_workspace().unwrap();
+            assert_eq!(kind(&mut client, "mux.workspace_snapshot").await.json().unwrap()["screens"], json!([]));
+            let ids = client.create_screen("Embedded terminal").unwrap();
+            let spawned = kind(&mut client, "mux.pane_spawned").await;
+            let session = spawned.json().unwrap()["sessionId"].as_str().unwrap();
+            assert_eq!(spawned.json().unwrap()["paneId"], ids.pane_id);
+            let terminal = service.runtime.as_ref().unwrap().pty.get(session).unwrap();
+            let mut api = service.api_stream().await.unwrap();
+            let reply = api.request(serde_json::from_value(json!("job.launch")).unwrap(), json!({"body":{
+                "requestId":Uuid::new_v4().to_string(), "cwd":config,
+                "argv":["/bin/sh", "-c", "echo $$ > job.pid; read line"],
+                "placement":{"kind":"screen"}
+            }}).as_object().unwrap().clone()).await.unwrap();
+            assert_eq!(reply.status, 201, "{}", reply.body);
+            let job: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+            assert_eq!(job["state"], "running");
+            let pid_file = config.join("job.pid");
+            let pid = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                        if let Ok(pid) = text.trim().parse::<u32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            let alive = || std::process::Command::new("/bin/kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status().unwrap().success();
+            assert!(alive());
+            assert!(!*terminal.done().borrow());
+            api.finish().await.unwrap();
+            client.finish().await.unwrap();
+            service.close().await.unwrap();
+            assert!(!alive(), "service close awaits its managed job");
+            assert!(*terminal.done().borrow(), "service close awaits its terminal");
+
+            assert_eq!(std::fs::read_to_string(&discovery_path).unwrap(), discovery);
+            assert_eq!(std::fs::read_to_string(&state_path).unwrap(), workspace);
+
+            // Fresh, corrupt, stale and absent discovery all start empty, and
+            // none adopts the persisted workspace or contacts either sentinel.
+            for discovery_contents in [Some(discovery.as_str()), Some("not valid JSON"), Some(
+                r#"{"pid":4294967295,"port":1,"version":"old","protocol":1,"socket":"unused","startedAt":"fixture"}"#
+            ), None] {
+                if let Some(contents) = discovery_contents {
+                    std::fs::write(&discovery_path, contents).unwrap();
+                } else {
+                    std::fs::remove_file(&discovery_path).unwrap();
+                }
+                let next = EmbeddedService::start();
+                let mut client = next.connect().await.unwrap();
+                assert_ne!(next.runtime.as_ref().unwrap().state.instance, instance);
+                assert_eq!(kind(&mut client, "mux.welcome").await.json().unwrap()["screens"], json!([]));
+                let mut api = next.api_stream().await.unwrap();
+                let jobs = api.request(serde_json::from_value(json!("job.list")).unwrap(), Default::default()).await.unwrap();
+                assert_eq!(serde_json::from_str::<serde_json::Value>(&jobs.body).unwrap()["jobs"], json!([]));
+                api.finish().await.unwrap();
+                client.finish().await.unwrap();
+                next.close().await.unwrap();
+                assert_eq!(std::fs::read_to_string(&discovery_path).ok().as_deref(), discovery_contents);
+                assert_eq!(std::fs::read_to_string(&state_path).unwrap(), workspace);
+                assert_eq!(std::fs::read_to_string(&token_path).unwrap(), "independent credential");
+                assert_eq!(std::fs::symlink_metadata(&daemon_socket).unwrap().ino(), daemon_inode);
+                assert_eq!(std::fs::symlink_metadata(&keeper_socket).unwrap().ino(), keeper_inode);
+                assert_eq!(daemon.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                assert_eq!(keeper.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            }
+        });
+    }
+
     /// Real PTYs through the real native service, within this process: the
     /// required evidence is session behavior and ownership, not binary startup.
     #[tokio::test]

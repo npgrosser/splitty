@@ -8,6 +8,12 @@ and how to report a vulnerability, see [`SECURITY.md`](../../SECURITY.md).
 Severity is as assessed at the time of the finding. "Fixed" means the issue
 is closed in the current code; where a test pins the behavior, it is named.
 
+Note of 2026-11-15 (`remove-tauri-shell`): the Tauri shell around the web
+frontend (`crates/splitty-tauri`) is removed. SR-03, SR-11 (as far as it
+concerns the shell's DevTools and packaged pages), SR-25, SR-26 and SR-27
+concern that shell; their entries stay as the record of the review, and the
+code and tests they name under `crates/splitty-tauri` no longer exist.
+
 ## Summary
 
 | ID | Severity | Finding | Status |

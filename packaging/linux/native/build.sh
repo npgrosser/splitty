@@ -143,13 +143,13 @@ mkdir -p "$stage/opt" "$stage/usr/bin" "$stage/usr/share/applications" \
 cp -R "$app" "$stage/opt/splitty"
 ln -s ../../opt/splitty/splitty-gpui "$stage/usr/bin/splitty-gpui"
 install -m 0644 "$here/splitty.desktop" "$stage/usr/share/applications/splitty.desktop"
-install -m 0644 "$repo_root/crates/splitty-tauri/icons/icon.png" \
+install -m 0644 "$repo_root/crates/splitty-gpui/icons/icon.png" \
     "$stage/usr/share/icons/hicolor/512x512/apps/splitty.png"
 
 # The tar.gz runs from wherever it is unpacked; it brings the desktop entry
 # and the icon for those who want to install them.
 install -m 0644 "$here/splitty.desktop" "$app/splitty.desktop"
-install -m 0644 "$repo_root/crates/splitty-tauri/icons/icon.png" "$app/splitty.png"
+install -m 0644 "$repo_root/crates/splitty-gpui/icons/icon.png" "$app/splitty.png"
 install -m 0644 "$repo_root/LICENSE" "$app/LICENSE"
 
 echo "[3/3] Packing"

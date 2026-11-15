@@ -55,13 +55,6 @@ The app assigns each window its backend. Remote screens reach their hosts only t
 so on Windows they use WSL's `ssh`. The UI is part of the app's executable; a
 remote host supplies terminal data and service responses, never UI code.
 
-The Tauri shell built from source keeps the same backend placement behind a
-WebView: its pages reach the native process over IPC, and the native process
-assigns each page its backend and permissions. Its separate remote windows
-hold their own SSH connection, with authority only for their assigned host,
-and on Windows use Windows OpenSSH without WSL
-([development](development.md#the-tauri-shell)).
-
 ## Explicit browser access and separate daemons
 
 ```mermaid
@@ -144,7 +137,7 @@ until exit is observed; it does not stop the remote daemon or its keepers.
 
 | Boundary | What authorizes it |
 | --- | --- |
-| App window to local backend | The app's own in-process channel or owned child pipes; the Tauri shell adds a native-assigned document proof, role and backend for its pages |
+| App window to local backend | The app's own in-process channel or owned child pipes |
 | Client to host's SSH service | System OpenSSH host-key verification and the selected user's keys/agent/configuration |
 | Host bridge to daemon | Private directory/socket permissions, OS peer UID and verified daemon instance |
 | Browser to explicit gateway | Gateway-local bootstrap/session credentials, exact Host/Origin and WebSocket admission checks |
@@ -189,7 +182,6 @@ Run `pnpm --dir architecture dev` from the repository root and select a view:
 | `connections` — Connection components | Native, browser and SSH boundaries across the existing modules |
 | `gpui` — splitty-gpui components | The app's windows, workspace view, terminal engine and startup |
 | `client_core` — splitty-client-core components | The app's UI-free sources, connections and app-owned backends |
-| `desktop` — Desktop app components | The Tauri shell: document authority, app-owned backends, WSL and remote windows |
 | `remote` — splitty-remote components | SSH invocation, payload installation, bridge, owner and supervision |
 | `server` — splitty-server components | Native endpoint, browser gateway, shared operations and client sessions |
 | `transport` — splitty-transport components | Framing, negotiation, cancellation and bounded delivery |

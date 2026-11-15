@@ -252,7 +252,7 @@ mod tests {
         }
     }
 
-    /// The vectors the web client and the Tauri shell are checked against.
+    /// The vectors shared with the web client.
     #[test]
     fn shared_vectors() {
         for (name, file, default_editor) in [

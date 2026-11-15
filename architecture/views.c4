@@ -17,7 +17,7 @@ views {
 
   view containers of splitty {
     title 'Containers'
-    description 'The crates, the web frontend, the desktop shells and the stores, with the planned MCP server.'
+    description 'The crates, the web frontend, the native desktop app and the stores, with the planned MCP server.'
     include *
     style element.tag = #external {
       color muted
@@ -56,7 +56,7 @@ views {
   view connections {
     title 'Connection components'
     description 'Code dependencies implementing native, browser and SSH connections. These are modules, not runtime processes; docs/networking.md shows the physical transports and their lifetimes.'
-    include splitty.web, splitty.desktop.client_ipc, splitty.server.http, splitty.server.native, splitty.server.hub, splitty.server.host, splitty.remote.owner, splitty.remote.tunnel, splitty.remote.bridge, splitty.remote.ssh, remote_host
+    include splitty.web, splitty.server.http, splitty.server.native, splitty.server.hub, splitty.server.host, splitty.remote.owner, splitty.remote.tunnel, splitty.remote.bridge, splitty.remote.ssh, remote_host
     autoLayout LeftRight
     style element.tag = #external {
       color muted
@@ -72,27 +72,14 @@ views {
 
   view remote of splitty.remote {
     title 'splitty-remote components'
-    description 'Reaching a host over SSH, installing the server there, the tunnel, the bridge and the known hosts, with the server and desktop components that use them.'
-    include splitty.remote.*, splitty.server.main, splitty.server.host, splitty.server.hub, splitty.desktop.remote
-  }
-
-  view desktop of splitty.desktop {
-    title 'Desktop app components'
-    description 'The desktop app\'s components and what remote windows use of splitty-remote. The composition root view shows what app uses in the core and the server.'
-    include splitty.desktop.*, splitty.desktop.remote -> splitty.remote.*
+    description 'Reaching a host over SSH, installing the server there, the tunnel, the bridge and the known hosts, with the server components that use them.'
+    include splitty.remote.*, splitty.server.main, splitty.server.host, splitty.server.hub
   }
 
   view main_root of splitty.server.main {
     title 'Composition root: splitty binary'
     description 'main.rs and everything it uses.'
     include splitty.server.main, splitty.server.main -> splitty.server.*, splitty.server.main -> splitty.core.*, splitty.server.main -> splitty.remote.*
-    autoLayout LeftRight
-  }
-
-  view app_root of splitty.desktop.app {
-    title 'Composition root: desktop app'
-    description 'lib.rs of the desktop app and everything it uses.'
-    include splitty.desktop.app, splitty.desktop.app -> splitty.desktop.*, splitty.desktop.app -> splitty.server.*, splitty.desktop.app -> splitty.core.*
     autoLayout LeftRight
   }
 }

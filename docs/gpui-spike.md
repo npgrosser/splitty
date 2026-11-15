@@ -7,8 +7,8 @@ The development app opens an isolated workspace with real service-owned terminal
 sessions, local Screens, split panes, tab groups and draggable dividers. Layouts
 come from the shared mux tree; terminal views survive layout updates and Screen
 switches.
-Closing the window ends its owned service. Saved production workspaces and the
-Tauri app remain separate.
+Closing the window ends its owned service. Saved production workspaces remain
+separate.
 
 The current terminal uses statically linked `libghostty-vt` 1.0.0 through a
 UI-independent owned engine. The [terminal build instructions](development.md#native-terminal-library-for-gpui)
@@ -2229,8 +2229,8 @@ GPUI has no text letter spacing and no text shadow:
 Left out because they need new capabilities:
 
 - "Open Folder in" (VS Code, Zed, SFTP client) in the tab menu: the link
-  builders live in the Tauri shell, and the native client has no reviewed way
-  to open `vscode://`, `zed://` or `sftp://` links.
+  builders lived only in the web client's shell then, and the native client had
+  no reviewed way to open `vscode://`, `zed://` or `sftp://` links.
 - Move to Screen on remote Screens: the transfer command is local-only at the
   worker's source admission and in the remote dispatch.
 - The "New screen" options menu, a Settings shortcut, an active state for

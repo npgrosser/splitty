@@ -52,7 +52,7 @@ function Resolve-File {
 $Executable = Resolve-File $Executable "The native executable"
 $Payload = Resolve-File $Payload "The WSL backend archive"
 $checksumFile = Resolve-File "$Payload.sha256" "The WSL backend checksum"
-$icon = Resolve-File (Join-Path $repoRoot "crates\splitty-tauri\icons\icon.ico") "The application icon"
+$icon = Resolve-File (Join-Path $repoRoot "crates\splitty-gpui\icons\icon.ico") "The application icon"
 $license = Resolve-File (Join-Path $repoRoot "LICENSE") "The license"
 $script = Resolve-File (Join-Path $PSScriptRoot "installer.nsi") "The installer script"
 
@@ -82,10 +82,7 @@ $makensis = Get-Command "makensis.exe" -CommandType Application -ErrorAction Sil
 if (-not $makensis) {
     $candidates = @(
         (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
-        (Join-Path $env:ProgramFiles "NSIS\makensis.exe"),
-        # The Tauri CLI downloads NSIS here when it builds the legacy installer.
-        (Join-Path $env:LOCALAPPDATA "tauri\NSIS\makensis.exe"),
-        (Join-Path $env:LOCALAPPDATA "tauri\NSIS\Bin\makensis.exe")
+        (Join-Path $env:ProgramFiles "NSIS\makensis.exe")
     )
     $makensis = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 }

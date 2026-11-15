@@ -34,7 +34,7 @@ pub enum Scope {
     /// this catalog. Job operations reach that socket through the job router
     /// it shares with the agent grant sockets instead.
     Control,
-    /// Explicit local host-management authority, unavailable to remote windows.
+    /// Explicit local host-management authority, unavailable to host relays.
     LocalHub,
 }
 

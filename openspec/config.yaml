@@ -6,9 +6,9 @@ context: |
   people. No quotes from conversations, no notes on who asked, chose or uses what, no personal machines,
   accounts, host names or paths (examples use me@192.0.2.x and /home/me).
   Archived changes (openspec/changes/archive/) are gitignored and stay local; the main specs are the record.
-  Platforms: Linux and macOS run server and desktop app natively; on Windows the WebView2 app is
-  native while server, PTYs and shells run inside WSL 2. Changes must not silently break either side.
-  The Rust server is the source of truth for workspace state; the web UI and desktop shells are clients.
+  Platforms: Linux and macOS run server and desktop app natively; on Windows the native app runs on
+  Windows while server, PTYs and shells run inside WSL 2. Changes must not silently break either side.
+  The Rust server is the source of truth for workspace state; the native app and the web UI are clients.
   Internal architecture (how it is built) lives in docs/architecture.md and is deliberately not specced. The
   module-level map is the architecture model in architecture/*.c4 (conventions in architecture/README.md):
   every crate and top-level module as a component with the dependencies allowed between them; cargo test
@@ -44,7 +44,7 @@ rules:
     - Behavior contracts only; no Rust type, module, crate or library names
     - Wire names (message types, HTTP paths, env vars, CLI commands and flags, on-disk paths) are part of the contract and belong in specs
     - Change existing capabilities with MODIFIED deltas; check `openspec list --specs` before adding a new capability
-    - For UI parts (the web frontend, the desktop shells' windows), requirements cover only what crosses the protocol or an API and UX concepts or decisions not evident from the built app; no WHEN/THEN per screen detail, layout, label or style
+    - For UI parts (the web frontend, the native app's windows), requirements cover only what crosses the protocol or an API and UX concepts or decisions not evident from the built app; no WHEN/THEN per screen detail, layout, label or style
   design:
     - Every design has an "Architecture impact" section naming the components and relationships of architecture/*.c4 and the concept sections of docs/architecture.md it adds, changes or removes, or stating "none"
     - Decisions taken without the maintainer's confirmation, to keep going, are listed under "Provisional decisions" with their decision ids and the date, open to the maintainer's feedback, and each also gets a bullet in openspec/open-decisions.md
@@ -53,7 +53,7 @@ rules:
     - When the architecture impact is not "none", the tasks update architecture/*.c4 (and docs/architecture.md where a concept changes) in the same change
     - When the change touches the wire protocol, the tasks bring docs/protocol.ts in line for the touched messages
     - Every test task names its level (unit, in-process, smoke as CLAUDE.md defines them) and extends an existing test where one fits; a new smoke test (a real splitty process) states why an in-process test cannot show it
-    - Every task list ends with targeted tests of what the change touched and then the one full check before the merge as CLAUDE.md lists it - cargo fmt --all --check, cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings and cargo test --workspace --exclude splitty-gui; when the change touches crates/splitty-tauri, cargo clippy -p splitty-gui --all-targets -- -D warnings and cargo test -p splitty-gui --lib as well; when it touches frontend/, pnpm check, pnpm test and pnpm build there; and openspec validate --specs. cargo test runs the architecture check, which needs pnpm install --dir architecture once
+    - Every task list ends with targeted tests of what the change touched and then the one full check before the merge as CLAUDE.md lists it - cargo fmt --all --check, cargo clippy --workspace --all-targets -- -D warnings and cargo test --workspace; when it touches frontend/, pnpm check, pnpm test and pnpm build there; and openspec validate --specs. cargo test runs the architecture check, which needs pnpm install --dir architecture once
 
 operations:
   apply:

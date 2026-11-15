@@ -64,3 +64,7 @@ Open questions for the design:
 - ACP: a dedicated pane widget, or embedded in the existing split tree?
 - ACP transport: the roadmap says JSON-RPC over WebSocket. Check the current ACP spec; agents are often run as a subprocess speaking JSON-RPC over stdio, which would need no new listener.
 - When to open the app-parser API to external plugins (after the internal API is stable).
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-tauri-shell`: the Windows WSL payload check that bundles `shell-integration/` lives in `windows-installer.yml` (formerly `windows-tauri.yml`).

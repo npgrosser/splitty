@@ -11,6 +11,6 @@
 ## 2. Integration checks
 
 - [x] 2.1 Run focused terminal, workspace menu and client-core focus/source tests, strict GPUI and client-core all-target Clippy and `openspec validate native-terminal-context-menu --strict`; verify each passes and record scope.
-- [ ] 2.2 At the later merge checkpoint, run `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`, `cargo test --workspace --exclude splitty-gui` and `openspec validate --specs`; install architecture dependencies with `pnpm install --dir architecture` first if absent. Full CI remains deferred until that checkpoint.
+- [ ] 2.2 At the later merge checkpoint, run `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` and `openspec validate --specs`; install architecture dependencies with `pnpm install --dir architecture` first if absent. Full CI remains deferred until that checkpoint.
 
 Targeted verification: workspace production/unit tests 93 passed (including five terminal-menu tests and 15 obsolete-action cases); terminal tests 17 passed; shared offline-focus unit test, four source-worker tests and two navigation-worker tests passed. Strict GPUI/client-core all-target Clippy, architecture checks (9 unit and 8 model), formatting and strict change validation passed. Offline publication retention is covered at the shared model unit boundary; source-envelope rejection and normal focus dispatch additionally run through the actual native worker. No new real-process harness or full merge CI was run.

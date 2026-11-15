@@ -26,3 +26,7 @@ Every start of the native app is a process of its own with its own embedded back
 ## Architecture impact
 
 Not determined yet; at least a relationship from the app's startup to a per-user handoff endpoint.
+
+## Carried-over design notes
+
+- 2026-11-15, `remove-tauri-shell`: the Tauri shell, the web app with the single-instance handoff, is removed. `server-modes`, Desktop App Hosting On Windows, scenario "Repeated start for the same distribution" now states one backend per app instance; this change changes that scenario.

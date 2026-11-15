@@ -2402,7 +2402,7 @@ interface KnownHost {
  * DELETE /api/remote/hosts  { target: string }
  *
  * Local display names and removal tombstones in remote-host-preferences.json,
- * shared by local server and desktop shells. All routes require API auth and
+ * shared by the local server's clients. All routes require API auth and
  * origin/Fetch Metadata checks and are absent from the control socket.
  * GET has no side effects; missing/corrupt files yield an empty document,
  * invalid saved rows are skipped. Files are owner-only and atomically replaced.
@@ -2844,23 +2844,22 @@ type ReverseForwardConflictCode =
   | "local_port_reserved";  // The local server's own port is never shared.
 
 // ============================================================================
-// 11. LOCAL EDITOR HANDOFF (desktop IPC, not a host/server command)
+// 11. LOCAL EDITOR HANDOFF (client-side, not a host/server command)
 //
 // Explicit "Open Folder in" submenu action on a hub terminal, never a server
-// command:
-//   Tauri:    invoke("open_remote_editor", { target, cwd, editor? })
-//             invoke("open_local_editor", { editor, cwd, wslDistro? })
+// command. The native app builds and dispatches the folder URI in its own
+// process; the browser client in the click handler. Both take the fields below:
+//   remote folder: { target, cwd, editor? }
+//   local folder:  { editor, cwd, wslDistro? }
 // Editor is "vscode" (remote default), "zed" or, for remote folders only,
 // "sftp" (the OS's handler for sftp: links); unknown values are rejected.
-// Both resolve after OS dispatch or reject with an error. Resolution is no
-// acknowledgement of installation, successful opening or SSH connection.
+// A handoff ends with the OS dispatch or an error. It is no acknowledgement
+// of installation, successful opening or SSH connection.
 //
 // Target comes from the owning connection; cwd from that pane's session.
-// The UI rechecks their identity at click time. Native handlers independently
-// validate inputs and generate only fixed folder URIs, never accepting an
-// arbitrary URI, executable or command string. Native access is restricted to
-// the exact-backend main UI; remote windows, bundled
-// setup pages and other origins gain no permission. Generic openers stay HTTP(S).
+// The UI rechecks their identity at click time. The native app independently
+// validates inputs and generates only fixed folder URIs, never accepting an
+// arbitrary URI, executable or command string. Generic openers stay HTTP(S).
 // Browsers generate and dispatch the URI synchronously during the user click.
 // No new HTTP endpoint or WebSocket message.
 interface RemoteEditorFolder {
@@ -3092,8 +3091,8 @@ export type ReviewServerMessage = {
   accepted: boolean;
 };
 
-// Dedicated desktop commands remain open_local_editor / open_remote_editor
-// with {cwd,editor,target?,wslDistro?,kind?:"file"|"folder"}; kind defaults to
+// A confirmed request's editor handoff takes
+// {cwd,editor,target?,wslDistro?,kind?:"file"|"folder"}; kind defaults to
 // folder for old callers.
 
 // GET /api/client-assignment: browser-gateway-only, authenticated by its local

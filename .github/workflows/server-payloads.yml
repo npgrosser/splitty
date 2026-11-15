@@ -2,7 +2,7 @@ name: Server payloads
 
 # Builds and tests the static servers every desktop app carries for hosts
 # (the x86_64 one is also the Windows apps' WSL backend) and checks the
-# archives. Called by release.yml and windows-tauri.yml; the archives are
+# archives. Called by release.yml and windows-installer.yml; the archives are
 # artifacts of the calling run.
 
 on:
@@ -64,7 +64,7 @@ jobs:
 
       - name: Test server and core
         run: >-
-          cargo test --locked --release --workspace --exclude splitty-gui --exclude splitty-gpui
+          cargo test --locked --release --workspace --exclude splitty-gpui
           --target x86_64-unknown-linux-musl
 
       # Built first, so the x86_64 server can carry it for aarch64 hosts.
@@ -117,13 +117,6 @@ jobs:
         with:
           name: remote-payload-darwin
           path: artifacts/splitty-darwin-*.tar.gz*
-          if-no-files-found: error
-          retention-days: 3
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: frontend-dist
-          path: frontend/dist
           if-no-files-found: error
           retention-days: 3
 

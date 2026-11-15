@@ -45,8 +45,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Lints and tests the server, the core and the native desktop app
-  # (crates/splitty-gpui); the legacy Tauri shell has its own jobs.
+  # Lints and tests the server, the core and the native desktop app.
   rust:
     name: Rust tests
     if: github.event_name != 'schedule'
@@ -114,10 +113,10 @@ jobs:
         run: pnpm install --frozen-lockfile --dir architecture
 
       - name: Lint server, core and architecture check
-        run: cargo clippy --locked --workspace --exclude splitty-gui --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Test server, core and architecture check
-        run: cargo test --locked --workspace --exclude splitty-gui
+        run: cargo test --locked --workspace
 
       # The native window's view tests are gated on this feature and need no
       # display.
@@ -334,57 +333,6 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
         run: cargo build --locked -p splitty-server --target aarch64-unknown-linux-musl
 
-  tauri-linux:
-    name: Tauri shell (Linux)
-    if: github.event_name != 'schedule'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          persist-credentials: false
-
-      - name: Install WebKitGTK
-        timeout-minutes: 10
-        run: >-
-          sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 install --yes
-          libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libayatana-appindicator3-dev
-
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-        with:
-          toolchain: stable
-          components: clippy
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: tauri-linux
-          # Pull requests restore the default branch's cache and save none.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
-
-      # Lints the Linux build only; the Windows bridge (windows_wsl::platform)
-      # and the macOS window code are compiled on their own platforms.
-      - name: Lint Tauri shell
-        run: cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
-
-      # Also validates the capabilities against the app manifest (build.rs) and
-      # runs the navigation guard tests.
-      - name: Test Tauri shell
-        run: cargo test --locked -p splitty-gui --lib
-
   frontend:
     name: Frontend
     if: github.event_name != 'schedule'
@@ -437,10 +385,9 @@ jobs:
         working-directory: architecture
         run: pnpm audit
 
-  # The native app (build, tests compiled, disk image packed) and the legacy
-  # Tauri shell's native runtime on macOS.
-  tauri-macos:
-    name: Native app and Tauri runtime (macOS)
+  # The native app (build, tests compiled, disk image packed) on macOS.
+  macos:
+    name: Native app (macOS)
     if: github.event_name != 'schedule'
     runs-on: macos-15
     timeout-minutes: 60
@@ -466,7 +413,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: tauri-macos
+          key: macos
           # Pull requests restore the default branch's cache and save none.
           save-if: ${{ github.ref == 'refs/heads/main' }}
           # Preserve compiled dependencies while platform checks are diagnosed.
@@ -481,19 +428,9 @@ jobs:
           /usr/sbin/lsof -v
           sudo -n -u nobody /usr/bin/python3 -c 'import os, sys; assert os.geteuid() != 0 and os.geteuid() != int(sys.argv[1])' "$(id -u)"
 
-      - name: Build packaged frontend
+      - name: Build frontend
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
-
-      - name: Check portable WKWebView harness preparation
-        run: |
-          python3 scripts/testing/tauri-wkwebview-smoke-test.py
-          python3 scripts/testing/tauri-wkwebview-smoke.py --prepare-only --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
-
-      - name: Lint and test native macOS application
-        run: |
-          cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
-          cargo test --locked -p splitty-gui --lib
 
       - name: Build pinned native terminal library
         run: |
@@ -545,21 +482,6 @@ jobs:
           cargo test --locked -p splitty-server --test daemon_lifecycle an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_cleanly -- --exact
           cargo build --locked -p splitty-server
 
-      # Real WKWebView/PTY/popout execution; no mock runtime or HTTP UI server.
-      - name: Run packaged WKWebView lifecycle smoke
-        run: >-
-          python3 scripts/testing/tauri-wkwebview-smoke.py
-          --full-ui --coexist-daemon --reloads 36
-          --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
-
-      - name: Verify WKWebView remote isolation and slow consumers
-        timeout-minutes: 6
-        run: >-
-          python3 scripts/testing/tauri-wkwebview-smoke.py
-          --isolation-consumer --reloads 1
-          --harness-dir "${RUNNER_TEMP}/splitty-macos-isolation-harness"
-          --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence/isolation-consumer"
-
       - name: Enforce macOS core test result
         if: always()
         env:
@@ -569,10 +491,3 @@ jobs:
             echo '::error::The macOS core suite did not pass; later runtime evidence does not waive this gate.'
             exit 1
           fi
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
-        with:
-          name: tauri-macos-native-evidence
-          path: ${{ runner.temp }}/splitty-macos-native-evidence
-          retention-days: 7
