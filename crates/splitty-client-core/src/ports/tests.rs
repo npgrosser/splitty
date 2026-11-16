@@ -75,7 +75,7 @@ mod api_cases {
         super::super::runtime::Consent {
             allocation: None,
             active: Arc::new(AtomicBool::new(true)),
-            expected: std::sync::atomic::AtomicU16::new(0),
+            expected: std::sync::Mutex::new(None),
         }
     }
     const ACTIVE: &str = r#"{"target":"vm1","remote":3000,"local":4173,"url":"https://malicious.invalid","state":"up"}"#;
@@ -364,4 +364,30 @@ fn response_decoding_bounds_malformed_input_and_projects_without_directory_membe
         .is_saved());
     drop(snapshot);
     assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn binding_urls_and_port_groups_are_explicit() {
+    let request =
+        ForwardRequest::open(MappingKey::new("vm1", 3000).unwrap(), None, false, None).unwrap();
+    for (bind, expected) in [
+        ("127.0.0.1", "http://localhost:4173/"),
+        ("0.0.0.0", "http://localhost:4173/"),
+        ("192.0.2.10", "http://192.0.2.10:4173/"),
+        ("::", "http://[::1]:4173/"),
+        ("2001:db8::10", "http://[2001:db8::10]:4173/"),
+    ] {
+        assert_eq!(
+            rewritten_url_at(&request, 4173, bind.parse().unwrap())
+                .unwrap()
+                .as_str(),
+            expected
+        );
+    }
+    let mut row = ForwardRow::new(request.key().clone());
+    assert_eq!(row.sort_group(), 2);
+    row.catalog_saved = true;
+    assert_eq!(row.sort_group(), 1);
+    row.state = ForwardState::Up;
+    assert_eq!(row.sort_group(), 0);
 }

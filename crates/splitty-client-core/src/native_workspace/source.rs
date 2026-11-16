@@ -29,6 +29,7 @@ pub(super) struct SourceRuntime {
     pub welcomed: bool,
     /// What this connection's `mux.welcome` listed; none before it.
     capabilities: Vec<String>,
+    catalog_requests: HashMap<uuid::Uuid, Instant>,
     workspace_refresh: WorkspaceRefresh,
     attached: HashSet<String>,
     visible: HashSet<String>,
@@ -78,6 +79,7 @@ impl SourceRuntime {
             owner,
             welcomed: false,
             capabilities: Vec::new(),
+            catalog_requests: HashMap::new(),
             workspace_refresh: WorkspaceRefresh::default(),
             attached: HashSet::new(),
             visible: HashSet::new(),
@@ -260,6 +262,42 @@ impl SourceRuntime {
                         error.to_string(),
                     ));
                 }
+            }
+            return Ok(out);
+        }
+        if let CommandKind::ManagePortCatalog {
+            request_id,
+            port,
+            name,
+        } = &command.kind
+        {
+            let row = splitty_core::protocol::CatalogPort {
+                port: *port,
+                name: name.clone().unwrap_or_default(),
+            };
+            let result = command.validate_source(self.owner).and_then(|()| {
+                if !row.is_valid() || self.catalog_requests.len() >= 32 {
+                    return Err(crate::connection::invalid(
+                        "Invalid port or too many pending catalog changes",
+                    ));
+                }
+                self.client.sender().json(
+                    splitty_transport::wire::Kind::Text,
+                    &serde_json::json!({
+                        "type": if name.is_some() { "ports.save" } else { "ports.remove" },
+                        "requestId": request_id.to_string(), "port": port, "name": name,
+                    }),
+                )
+            });
+            match result {
+                Ok(()) => {
+                    self.catalog_requests.insert(*request_id, Instant::now());
+                }
+                Err(error) => out.push(rejected_command(
+                    command.source,
+                    &command.kind,
+                    error.to_string(),
+                )),
             }
             return Ok(out);
         }
@@ -815,6 +853,7 @@ impl SourceRuntime {
         let result: std::io::Result<()> = match command {
             CommandKind::CreateRemoteScreen { .. }
             | CommandKind::ManageForward { .. }
+            | CommandKind::ManagePortCatalog { .. }
             | CommandKind::RefreshForwards
             | CommandKind::ManageShare { .. }
             | CommandKind::RefreshShares
@@ -1216,6 +1255,41 @@ impl SourceRuntime {
                 | MessageType::UploadFailed => {
                     self.files
                         .event(&self.client, source, &self.attached, json, &mut out.updates);
+                }
+                MessageType::PortCatalogResult => {
+                    if let Some(id) = json["requestId"]
+                        .as_str()
+                        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+                    {
+                        let error = match json.get("error") {
+                            Some(serde_json::Value::Null) => Some(None),
+                            Some(serde_json::Value::String(e)) if e.len() <= 2048 => {
+                                Some(Some(e.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(error) = error {
+                            if self.catalog_requests.remove(&id).is_some() {
+                                out.push(Update::PortCatalogResult {
+                                    source,
+                                    request_id: id,
+                                    error,
+                                });
+                            }
+                        }
+                    }
+                }
+                MessageType::PortCatalog => {
+                    if let Some(model) = &mut model {
+                        match model.observe_port_catalog(
+                            source,
+                            json,
+                            &self.client.sender().context().budget,
+                        ) {
+                            Ok(accepted) => out.changed |= accepted,
+                            Err(error) => out.push(Update::Status(error.to_string())),
+                        }
+                    }
                 }
                 MessageType::PortsChanged => {
                     if let Some(model) = &mut model {
@@ -1688,6 +1762,11 @@ impl SourceRuntime {
         let mut out = SourceEffects::default();
         self.files
             .expire(&self.client, self.owner, &mut out.updates);
+        self.catalog_requests.retain(|request_id, started| {
+            if started.elapsed() < Duration::from_secs(15) { return true; }
+            out.push(Update::PortCatalogResult { source: self.owner, request_id: *request_id, error: Some("Host did not confirm the change; reconnect to check its catalog before retrying".into()) });
+            false
+        });
         let globally_shown = window
             .shown_key()
             .is_some_and(|key| key.source_id() == self.id());

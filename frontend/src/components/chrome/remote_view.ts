@@ -54,10 +54,8 @@ export function portMenu(row: PortRow): { action: PortMenuAction; label: string;
   if (row.forward || row.saved?.enabled) {
     items.push({ action: "stop", label: "Stop", detail: row.saved ? "Pauses the saved rule until you resume it" : undefined });
   }
-  items.push(row.saved
-    ? { action: "label", label: "Edit label…" }
-    : { action: "label", label: "Remember…", detail: "Forward it again on later connections" });
-  if (!row.forward && row.saved && row.error?.code !== "local_port_conflict") {
+  items.push({ action: "label", label: "Name on host…", detail: "Shared by all computers connected to this host" });
+  if (!row.forward && row.error?.code !== "local_port_conflict") {
     items.push({ action: "local", label: "Use another local port…" });
   }
   if (row.saved) {

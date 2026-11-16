@@ -31,9 +31,13 @@ struct Stored {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredForward {
+    #[serde(default, rename = "autoLocal")]
+    auto_local: bool,
     target: String,
     remote: u16,
     local: u16,
+    #[serde(default = "splitty_core::native_api::forwards::default_bind")]
+    bind: std::net::IpAddr,
     label: String,
     enabled: bool,
 }
@@ -46,9 +50,11 @@ impl From<Stored> for Preferences {
                 .forwards
                 .into_iter()
                 .map(|row| SavedForward {
+                    auto_local: row.auto_local,
                     target: row.target,
                     remote: row.remote,
                     local: row.local,
+                    bind: row.bind,
                     label: row.label,
                     enabled: row.enabled,
                     last_error: None,
@@ -166,6 +172,7 @@ fn valid(document: &Preferences) -> bool {
     for row in &document.forwards {
         if row.remote == 0
             || row.local == 0
+            || !splitty_core::native_api::forwards::valid_bind(row.bind)
             || row.label.chars().count() > MAX_LABEL
             || !matches!(SshTarget::parse(&row.target), Ok(target) if target.as_str() == row.target)
             || !seen.insert((&row.target, row.remote))
@@ -189,9 +196,11 @@ mod tests {
 
     fn row(host: &str, port: u16) -> SavedForward {
         SavedForward {
+            auto_local: false,
             target: host.into(),
             remote: port,
             local: port,
+            bind: splitty_core::native_api::forwards::default_bind(),
             label: "Frontend".into(),
             enabled: false,
             last_error: None,

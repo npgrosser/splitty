@@ -91,10 +91,10 @@ describe("drawer port controls", () => {
     const forward = { target: "vm1", remote: 5173, local: 15173, state: "up" as const, url: "http://localhost:15173" };
     expect(portMenu({ port: 5173, saved, forward })).toEqual([
       { action: "stop", label: "Stop", detail: "Pauses the saved rule until you resume it" },
-      { action: "label", label: "Edit label…" },
+      { action: "label", label: "Name on host…", detail: "Shared by all computers connected to this host" },
       { action: "forget", label: "Forget", detail: "Keeps this forward running; Stop pauses it" },
     ]);
-    expect(portMenu({ port: 8000, process: "python" }).map((item) => item.action)).toEqual(["label"]);
+    expect(portMenu({ port: 8000, process: "python" }).map((item) => item.action)).toEqual(["label", "local"]);
     expect(portMenu({ port: 5173, saved: { ...saved, enabled: false } }).map((item) => item.action)).toEqual(["label", "local", "forget"]);
     expect([portPrimary({ port: 1, forward }), portPrimary({ port: 1, saved: { ...saved, enabled: false } }), portPrimary({ port: 1, process: "x" })])
       .toEqual(["Open", "Resume", "Forward"]);

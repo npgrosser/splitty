@@ -28,7 +28,8 @@ export interface RemoteForward {
   remote: number;
   /** The port here. */
   local: number;
-  /** Always `http://localhost:<local>`, never `127.0.0.1`, whose cookies are Splitty's. */
+  bind?: string;
+  /** Derived from the binding, using localhost for the default loopback to isolate cookies. */
   url: string;
   /** `down` while the local server rebuilds it. */
   state: "up" | "down";
@@ -50,7 +51,9 @@ export interface SavedForward {
   target: string;
   remote: number;
   local: number;
+  bind?: string;
   label: string;
+  autoLocal?: boolean;
   enabled: boolean;
   lastError?: ForwardFailure;
 }
@@ -62,10 +65,12 @@ export function forwardLabel(value: string): string {
 
 export function parseSavedForward(value: unknown): SavedForward | null {
   if (typeof value !== "object" || value === null) return null;
-  const { target, remote, local, label, enabled, lastError } = value as Record<string, unknown>;
+  const { target, remote, local, label, enabled, lastError, bind, autoLocal } = value as Record<string, unknown>;
   if (typeof target !== "string" || validateTarget(target) !== target || !isPort(remote) || !isPort(local)
     || typeof label !== "string" || typeof enabled !== "boolean") return null;
-  const saved: SavedForward = { target, remote, local, label: forwardLabel(label), enabled };
+  if (bind !== undefined && !bindingHost(bind)) return null;
+  if (autoLocal !== undefined && typeof autoLocal !== "boolean") return null;
+  const saved: SavedForward = { target, remote, local, label: forwardLabel(label), enabled, ...(typeof autoLocal === "boolean" ? { autoLocal } : {}), ...(typeof bind === "string" ? { bind } : {}) };
   const failure = parseFailure(lastError);
   if (failure) saved.lastError = failure;
   return saved;
@@ -104,6 +109,7 @@ export interface PortRow {
   port: number;
   /** From the host's last list; undefined when the host does not list the port (any more). */
   process?: string;
+  catalog?: { port: number; name: string };
   forward?: RemoteForward;
   saved?: SavedForward;
   error?: ForwardFailure;
@@ -154,10 +160,12 @@ export function parsePorts(value: unknown): DetectedPort[] | null {
 /** A forward as the local server answers with it, or null when it has not the shape. */
 export function parseForward(value: unknown): RemoteForward | null {
   if (typeof value !== "object" || value === null) return null;
-  const { target, remote, local, state } = value as Record<string, unknown>;
+  const { target, remote, local, state, bind } = value as Record<string, unknown>;
   if (typeof target !== "string" || validateTarget(target) !== target) return null;
   if (!isPort(remote) || !isPort(local)) return null;
-  return { target, remote, local, url: forwardUrl(local), state: state === "down" ? "down" : "up" };
+  const address = bindingHost(bind);
+  if (!address) return null;
+  return { target, remote, local, ...(typeof bind === "string" ? { bind } : {}), url: `http://${address}:${local}`, state: state === "down" ? "down" : "up" };
 }
 
 /** The forwards of a `GET /api/remote/forwards`, ordered by target and port. */
@@ -283,9 +291,22 @@ export function loopbackLink(raw: string): LoopbackLink | null {
 }
 
 /** The link at the forward's local port: host `localhost`, scheme, path, query and fragment kept. */
-export function forwardedLink(link: LoopbackLink, local: number): string {
+export function forwardedLink(link: LoopbackLink, local: number, bind?: string): string {
   const url = new URL(link.url.href);
-  url.hostname = "localhost";
+  url.hostname = bindingHost(bind) ?? "localhost";
   url.port = String(local);
   return url.href;
 }
+
+
+/** Numeric IP bindings only; URLs and DNS names are never accepted. */
+export function bindingIdentity(bind: unknown): string | null {
+  if (bind === undefined) return "127.0.0.1";
+  if (typeof bind !== "string" || !/^[0-9a-fA-F:.]+$/.test(bind) || (!bind.includes(":") && !/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/.test(bind))) return null;
+  try { return new URL(`http://${bind.includes(":") ? `[${bind}]` : bind}`).hostname; } catch { return null; }
+}
+export function bindingHost(bind: unknown): string | null {
+  const address = bindingIdentity(bind);
+  return address === "127.0.0.1" || address === "0.0.0.0" ? "localhost" : address === "[::]" ? "[::1]" : address;
+}
+export function portGroup(row: PortRow): number { return row.forward ? 0 : row.saved || row.catalog ? 1 : 2; }

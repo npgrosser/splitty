@@ -10,7 +10,7 @@ use std::{
     collections::VecDeque,
     future::{poll_fn, Future},
     pin::Pin,
-    sync::atomic::{AtomicU16, AtomicU64},
+    sync::{atomic::AtomicU64, Mutex},
     task::Poll,
 };
 
@@ -21,7 +21,7 @@ pub(crate) enum PortsEvent {
 pub(super) struct Consent {
     pub allocation: Option<Arc<Lease>>,
     pub active: Arc<AtomicBool>,
-    pub expected: AtomicU16,
+    pub expected: Mutex<Option<(u16, std::net::IpAddr)>>,
 }
 struct OpenConsent {
     id: Uuid,
@@ -157,7 +157,7 @@ impl<'a> PortsClient<'a> {
             Arc::new(Consent {
                 allocation: Some(lease.clone()),
                 active: Arc::new(AtomicBool::new(true)),
-                expected: AtomicU16::new(0),
+                expected: Mutex::new(None),
             })
         });
         if let Some(consent) = &consent {
@@ -369,15 +369,20 @@ impl<'a> PortsClient<'a> {
                     match result.active {
                         Ok(active) => {
                             for open in &self.consents {
-                                let expected = open.consent.expected.load(Ordering::Acquire);
-                                if expected != 0
-                                    && !active.iter().any(|row| {
+                                let expected = *open
+                                    .consent
+                                    .expected
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                if expected.is_some_and(|(local, bind)| {
+                                    !active.iter().any(|row| {
                                         row.target == open.key.target
                                             && row.remote == open.key.remote
-                                            && row.local == expected
+                                            && row.local == local
+                                            && row.bind == bind
                                             && row.state == ActiveState::Up
                                     })
-                                {
+                                }) {
                                     open.consent.active.store(false, Ordering::Release);
                                 }
                             }
@@ -786,7 +791,10 @@ mod tests {
         let consent = Arc::new(Consent {
             allocation: None,
             active: Arc::new(AtomicBool::new(true)),
-            expected: AtomicU16::new(4173),
+            expected: Mutex::new(Some((
+                4173,
+                splitty_core::native_api::forwards::default_bind(),
+            ))),
         });
         client.consents.push_back(OpenConsent {
             id: Uuid::new_v4(),
@@ -829,6 +837,29 @@ mod tests {
         assert!(
             !consent.active.load(Ordering::Acquire),
             "fresh absence must revoke the old browser consent"
+        );
+        // The same port on a different interface is a different destination.
+        consent.active.store(true, Ordering::Release);
+        client.loading_due = false;
+        client.dirty = false;
+        client.reading = Some(Passive {
+            revision: client.revision.load(Ordering::Acquire),
+            generation: client.generation,
+            context: queue::Context::default(),
+            future: Box::pin(async {
+                ReadResult {
+                    cleanup: Ok(()),
+                    active: Ok(charged(
+                        r#"[{"target":"host","remote":3000,"local":4173,"bind":"192.0.2.4","state":"up"}]"#,
+                    )),
+                    saved: Ok(charged(r#"{"version":1,"forwards":[]}"#)),
+                }
+            }),
+        });
+        assert!(matches!(next(&mut client).await, PortsEvent::Snapshot(_)));
+        assert!(
+            !consent.active.load(Ordering::Acquire),
+            "a changed binding revokes the old browser consent"
         );
         client.finish().await.unwrap();
         service.close().await.unwrap();

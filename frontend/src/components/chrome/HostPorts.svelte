@@ -9,8 +9,8 @@
   let adding = $state(false);
   const summary = $derived(portsSummary(rows));
   // Forwarded and saved ports first; the ones only detected are suggestions.
-  const kept = $derived(rows.filter((row) => row.forward || row.saved));
-  const detected = $derived(rows.filter((row) => !row.forward && !row.saved));
+  const kept = $derived(rows.filter((row) => row.forward || row.saved || row.catalog));
+  const detected = $derived(rows.filter((row) => !row.forward && !row.saved && !row.catalog));
 </script>
 
 <section class="host-ports" aria-label={`Ports on ${target}`}>

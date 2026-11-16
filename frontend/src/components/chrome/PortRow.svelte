@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PortRow } from "../../lib/remote/ports.ts";
-  import { MAX_FORWARD_LABEL } from "../../lib/remote/ports.ts";
+  import { MAX_FORWARD_LABEL, bindingHost } from "../../lib/remote/ports.ts";
   import { portNumber } from "../../lib/remote/manual_port.ts";
   import { portForwarding } from "../../stores/ports.svelte.ts";
   import { showContextMenu } from "../../stores/ui.svelte.ts";
@@ -11,15 +11,19 @@
   let editor = $state<"label" | "local" | null>(null);
   let label = $state("");
   let local = $state("");
+  let bind = $state("127.0.0.1");
+  let restore = $state(false);
   let inputError = $state("");
   const busy = $derived(row.pending !== undefined);
   const primary = $derived(portPrimary(row));
-  const name = $derived(row.saved?.label || row.process || "");
+  const name = $derived((row.catalog ? row.catalog.name : row.saved?.label) || row.process || "");
   const address = $derived(row.forward?.local ?? row.saved?.local);
 
   function edit(kind: "label" | "local") {
-    label = row.saved?.label ?? "";
-    local = "";
+    label = row.catalog?.name ?? row.saved?.label ?? "";
+    local = row.saved && !row.saved.autoLocal ? String(row.saved.local) : "";
+    bind = row.saved?.bind ?? row.forward?.bind ?? "127.0.0.1";
+    restore = row.saved?.enabled ?? false;
     inputError = "";
     editor = kind;
   }
@@ -44,16 +48,14 @@
 
   async function saveLabel() {
     if ([...label].length > MAX_FORWARD_LABEL) { inputError = "Label must be at most 200 characters."; return; }
-    if (await portForwarding()?.save(target, row.port, { label,
-      ...(row.saved || !row.forward ? {} : { local: row.forward.local }),
-    })) editor = null;
+    if (await portForwarding()?.saveCatalog(target, row.port, label)) editor = null;
   }
 
   async function useAlternate() {
-    const number = portNumber(local);
-    if (number === null) { inputError = "Enter a local port from 1 to 65535."; return; }
+    const number = local.trim() === "" ? undefined : portNumber(local);
+    if (number === null || !bindingHost(bind)) { inputError = "Enter a valid local port and IP address."; return; }
     inputError = "";
-    if (await portForwarding()?.forward(target, row.port, { local: number })) editor = null;
+    if (await portForwarding()?.forward(target, row.port, { local: number, bind, autoLocal: number === undefined, remember: restore, restore })) editor = null;
   }
 </script>
 
@@ -71,8 +73,10 @@
   </div>
   <!-- A port only detected says nothing more than its Forward button. -->
   {#if row.forward || row.saved || row.error || row.pending}
-    <div class="detail">{#if address !== undefined}<span class="address">localhost:{address}</span>{" · "}{/if}<span role="status">{portStatus(row)}</span>{#if row.saved?.label && row.process}{" · "}<span title={row.process}>{row.process}</span>{/if}</div>
+    <div class="detail">{#if address !== undefined}<span class="address">{bindingHost(row.forward?.bind ?? row.saved?.bind)}:{address}</span>{" · "}{/if}<span role="status">{portStatus(row)}</span>{#if row.saved?.label && row.process}{" · "}<span title={row.process}>{row.process}</span>{/if}</div>
   {/if}
+  {#if row.forward?.bind && row.forward.bind !== "127.0.0.1" && row.forward.bind !== "::1"}<p class="muted">Network access: {row.forward.bind}:{row.forward.local}</p>{/if}
+  {#if row.catalog}<button class="recovery" disabled={busy} onclick={() => void portForwarding()?.saveCatalog(target, row.port, null)}>Remove from host</button>{/if}
   {#if row.error}<p class="error" role="status">{[row.error.message, row.error.hint].filter(Boolean).join(" ")}</p>{/if}
   {#if !row.forward && row.error?.code === "local_port_conflict"}
     <button class="recovery" disabled={busy} onclick={() => edit("local")}>Use another local port…</button>
@@ -80,14 +84,16 @@
   {#if editor === "label"}
     <form aria-label={row.saved ? "Edit port label" : "Remember port"} use:focusInlineForm={() => { if (!busy) editor = null; }} onsubmit={(event) => { event.preventDefault(); void saveLabel(); }}>
       <label>Label <span class="muted">(optional)</span><input bind:value={label} placeholder="Frontend or API" disabled={busy} /></label>
-      {#if !row.saved}<p class="muted">Remember this mapping for future host connections.</p>{/if}
+      {#if !row.saved}<p class="muted">Save this port and its name on the host for all computers.</p>{/if}
       {#if inputError}<p role="alert">{inputError}</p>{/if}
-      <div class="actions"><button class="primary" disabled={busy}>{row.saved ? "Save label" : "Remember"}</button><button type="button" disabled={busy} onclick={() => editor = null}>Cancel</button></div>
+      <div class="actions"><button class="primary" disabled={busy}>Save on host</button><button type="button" disabled={busy} onclick={() => editor = null}>Cancel</button></div>
     </form>
   {:else if editor === "local" && !row.forward}
     <form aria-label="Change local port" use:focusInlineForm={() => { if (!busy) editor = null; }} onsubmit={(event) => { event.preventDefault(); void useAlternate(); }}>
-      <label>Alternate local port<input bind:value={local} inputmode="numeric" placeholder="15173" disabled={busy} required /></label>
-      <p class="muted">Uses this exact port. A saved mapping changes only after success.</p>
+      <label>Alternate local port<input bind:value={local} inputmode="numeric" placeholder="Automatic" disabled={busy} /></label>
+      <label>Listen on IP address<input bind:value={bind} placeholder="127.0.0.1" disabled={busy} /></label>
+      <label><input type="checkbox" bind:checked={restore} disabled={busy} /> Automatically forward on this computer</label>
+      <p class="muted">Empty local port selects a free port automatically. 127.0.0.1 stays private; a LAN/VPN IP or 0.0.0.0 allows network clients.</p>
       {#if inputError}<p role="alert">{inputError}</p>{/if}
       <div class="actions"><button class="primary" disabled={busy}>Forward here</button><button type="button" disabled={busy} onclick={() => editor = null}>Cancel</button></div>
     </form>

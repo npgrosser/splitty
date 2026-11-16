@@ -182,6 +182,13 @@ fn assemble(
 
     let config = Arc::new(RwLock::new(config));
     let hub = Arc::new(hub.with_settings(config.clone()));
+    let port_watch = client_session::ports::PortWatch::new(dispatcher.backend().clone())
+        .with_catalog(
+            config_path
+                .parent()
+                .expect("config directory")
+                .to_path_buf(),
+        );
     let client_state = Arc::new(
         client_session::ClientState::new(
             mux_store.clone(),
@@ -192,7 +199,8 @@ fn assemble(
             notify_tx,
             server_mode.to_string(),
         )
-        .with_hub(hub.clone()),
+        .with_hub(hub.clone())
+        .with_ports(port_watch),
     );
 
     let state = Arc::new(super::State {

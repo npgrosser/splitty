@@ -34,9 +34,13 @@ struct PortForm {
     remote: Entity<InputState>,
     local: Entity<InputState>,
     label: Entity<InputState>,
+    original_name: String,
+    shared_name_saved: bool,
+    bind: Entity<InputState>,
     restore: bool,
     edit_saved: bool,
     pending: Option<Uuid>,
+    catalog_pending: Option<(SourceToken, Uuid, Option<ForwardAction>)>,
     error: Option<String>,
 }
 
@@ -341,11 +345,28 @@ impl Workspace {
             .map(super::hosts::display)
             .unwrap_or_else(|| format!("Port {}", key.remote()));
         let detail = match row.local() {
-            Some(local) => format!("{} → localhost:{local}", key.remote()),
+            Some(_) => format!(
+                "{} → {}{}",
+                key.remote(),
+                row.address().unwrap_or_default(),
+                if row.bind().is_unspecified() {
+                    " · All interfaces"
+                } else if !row.bind().is_loopback() {
+                    " · Network access"
+                } else {
+                    ""
+                }
+            ),
             None => format!("Remote {} · TCP", key.remote()),
         };
         let primary_key = key.clone();
-        let primary_local = row.local();
+        let primary_local = if row.auto_local() && !active {
+            None
+        } else {
+            row.local()
+        };
+        let primary_bind = row.bind();
+        let primary_address = row.address();
         let settings_row = row.clone();
         let settings_weak = weak.clone();
         let primary = if active { "Copy address" } else { "Forward" };
@@ -381,7 +402,15 @@ impl Workspace {
                             .font_weight(FontWeight::MEDIUM)
                             .overflow_hidden()
                             .text_ellipsis()
-                            .child(label),
+                            .child(label)
+                            .when(row.is_catalog_saved(), |view| {
+                                view.child(
+                                    div()
+                                        .text_size(chrome_rems(10.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Saved on host"),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -447,12 +476,13 @@ impl Workspace {
                                 row.key() == &primary_key
                                     && row.state() == ForwardState::Up
                                     && row.local() == primary_local
+                                    && row.bind() == primary_bind
                             });
                             if valid {
-                                if let Some(local) = primary_local {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(format!(
-                                        "localhost:{local}"
-                                    )));
+                                if let Some(address) = &primary_address {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        address.clone(),
+                                    ));
                                 }
                             }
                         } else {
@@ -606,6 +636,10 @@ impl Workspace {
             .unwrap_or_default();
         let local_value = row
             .as_ref()
+            .filter(|row| {
+                !row.auto_local()
+                    || matches!(row.state(), ForwardState::Up | ForwardState::Rebuilding)
+            })
             .and_then(ForwardRow::local)
             .map(|port| port.to_string())
             .unwrap_or_default();
@@ -626,13 +660,24 @@ impl Workspace {
         });
         let local = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Use remote port")
+                .placeholder("Automatic: remote port or a free port")
                 .default_value(local_value)
         });
+        let original_name = label_value.clone();
         let label = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("Optional")
                 .default_value(label_value)
+        });
+        let bind_value = row
+            .as_ref()
+            .map(ForwardRow::bind)
+            .unwrap_or_else(|| std::net::Ipv4Addr::LOCALHOST.into())
+            .to_string();
+        let bind = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("127.0.0.1")
+                .default_value(bind_value)
         });
         let edit_saved = row.as_ref().is_some_and(ForwardRow::is_saved);
         let edit_key = row.as_ref().map(|row| row.key().clone());
@@ -645,9 +690,13 @@ impl Workspace {
             remote,
             local,
             label,
+            original_name,
+            shared_name_saved: row.as_ref().is_some_and(ForwardRow::is_catalog_saved),
+            bind,
             restore: row.as_ref().is_some_and(ForwardRow::restores_on_connect),
             edit_saved,
             pending: None,
+            catalog_pending: None,
             error: None,
         });
         if let Some(form) = self
@@ -667,7 +716,7 @@ impl Workspace {
             let Some(view) = weak.upgrade() else {
                 return dialog.title("Add port");
             };
-            let Some((target, remote, local, label, restore, editing, edit_state, pending, error)) = ({
+            let Some((target, remote, local, label, bind, restore, editing, edit_state, pending, error)) = ({
                 let workspace = view.read(cx);
                 workspace.ports.form.as_ref().map(|form| {
                     (
@@ -675,10 +724,11 @@ impl Workspace {
                         form.remote.clone(),
                         form.local.clone(),
                         form.label.clone(),
+                        form.bind.clone(),
                         form.restore,
                         form.edit_key.is_some(),
                         form.edit_state,
-                        form.pending.is_some(),
+                        form.pending.is_some() || form.catalog_pending.is_some(),
                         form.error.clone(),
                     )
                 })
@@ -699,6 +749,9 @@ impl Workspace {
             let open = weak.clone();
             let save = weak.clone();
             let restore_weak = weak.clone();
+            let shared_save = weak.clone();
+            let shared_remove = weak.clone();
+            let local_save = weak.clone();
             let field = |id: &'static str,
                          label_text: &'static str,
                          input: &Entity<InputState>,
@@ -797,7 +850,7 @@ impl Workspace {
                     }); })))
             });
             dialog
-                .title(if editing { "Local port settings" } else { "Add port" })
+                .title(if editing { "Port settings" } else { "Add port" })
                 .overlay_closable(false)
                 .keyboard(true)
                 .close_button(false)
@@ -840,12 +893,24 @@ impl Workspace {
                         .gap_3()
                         .child(field("port-target", "SSH target", &target, editing))
                         .child(field("port-remote", "Remote port", &remote, editing))
+                        .child(field("port-label", "Service name on host", &label, false))
+                        .child(div().text_sm().text_color(cx.theme().muted_foreground)
+                            .child("Saved ports and names are shared by all computers connected to this host."))
+                        .child(div().flex().flex_wrap().gap_2()
+                            .child(Button::new("port-catalog-save").label("Save on host").small().disabled(pending)
+                                .on_click(move |_, window, cx| { let _ = shared_save.update(cx, |this, cx| this.submit_port_catalog(false, None, window, cx)); }))
+                            .when(editing, |v| v.child(Button::new("port-catalog-remove").label("Remove from host").small().ghost().disabled(pending)
+                                .tooltip("Remove the shared entry; keep local forwards and settings")
+                                .on_click(move |_, window, cx| { let _ = shared_remove.update(cx, |this, cx| this.submit_port_catalog(true, None, window, cx)); }))))
+                        .child(div().border_t_1().border_color(cx.theme().border).pt_3().child("Forwarding on this computer"))
+                        .child(field("port-bind", "Listen on IP address", &bind, matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding))))
+                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child("127.0.0.1: this computer only · LAN/VPN IP: that interface · 0.0.0.0: all IPv4 interfaces. Network clients can access the forwarded service; its authentication still applies."))
                         .child(field("port-local", "Local port (optional)", &local, matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding))))
                         .when(matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding)), |view| view.child(
                             div().text_sm().text_color(cx.theme().muted_foreground).child("Stop forwarding before changing the local port.")))
                         .when(editing, |view| view.child(
                             div().text_sm().text_color(cx.theme().muted_foreground)
-                                .child("These settings belong to this computer. Saving does not start or stop forwarding."),
+                                .child("The local port and automatic forwarding apply only to this computer."),
                         ))
                         .child(Checkbox::new("port-restore")
                             .label("Restore when I connect")
@@ -855,7 +920,8 @@ impl Workspace {
                                     if let Some(form) = this.ports.form.as_mut() { form.restore = *next; cx.notify(); }
                                 });
                             }))
-                        .child(field("port-label", "Personal label (optional)", &label, false))
+                        .child(Button::new("port-local-save").label("Save local settings only").small().disabled(pending)
+                            .on_click(move |_, window, cx| { let _ = local_save.update(cx, |this, cx| this.submit_local_port_form(ForwardAction::Save, window, cx)); }))
                         .child(local_actions)
                         .when_some(error, |view, error| {
                             view.child(
@@ -870,7 +936,168 @@ impl Workspace {
         cx.notify();
     }
 
-    fn submit_port_form(&mut self, action: ForwardAction, _: &mut Window, cx: &mut Context<Self>) {
+    fn submit_port_form(
+        &mut self,
+        action: ForwardAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Save changed names and new catalog entries on the host first.
+        // Unchanged names do not make local settings depend on connectivity.
+        let shared = self.ports.form.as_ref().is_some_and(|form| {
+            (action == ForwardAction::Save && form.edit_key.is_none())
+                || form.label.read(cx).value().as_str() != form.original_name.as_str()
+        });
+        if shared {
+            self.submit_port_catalog(false, Some(action), window, cx);
+        } else {
+            self.submit_local_port_form(action, window, cx);
+        }
+    }
+
+    fn submit_port_catalog(
+        &mut self,
+        remove: bool,
+        continuation: Option<ForwardAction>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &self.ports.form else {
+            return;
+        };
+        if form.pending.is_some()
+            || form.catalog_pending.is_some()
+            || self.lifecycle_token() != Some(form.owner)
+        {
+            return;
+        }
+        let prepare = || -> Result<_, String> {
+            let target = form.target.read(cx).value().to_string();
+            let remote = decimal_port(&form.remote.read(cx).value(), false, "Remote port")?
+                .expect("required");
+            let name = form.label.read(cx).value().to_string();
+            if continuation.is_some() {
+                let local = decimal_port(&form.local.read(cx).value(), true, "Local port")?;
+                let bind = form
+                    .bind
+                    .read(cx)
+                    .value()
+                    .parse::<std::net::IpAddr>()
+                    .map_err(|_| "Enter a valid local IP address".to_owned())?;
+                ForwardRequest::save(
+                    MappingKey::new(&target, remote).map_err(|e| e.to_string())?,
+                    local,
+                    None,
+                )
+                .and_then(|request| request.with_bind(bind))
+                .map_err(|e| e.to_string())?;
+            }
+            if name.chars().count() > 200 || name.chars().any(char::is_control) {
+                return Err(
+                    "Name must be at most 200 characters without control characters".into(),
+                );
+            }
+            let model = self.model.as_ref().ok_or("Workspace unavailable")?;
+            let source = model
+                .source_for_target(target.trim())
+                .and_then(|id| model.execution_token(id))
+                .ok_or("Connect this host to manage its shared ports")?;
+            Ok((source, remote, name))
+        };
+        let result = prepare().and_then(|(source, port, name)| {
+            let id = Uuid::new_v4();
+            self.commands
+                .try_send(WorkerCommand::new(
+                    source,
+                    Command::ManagePortCatalog {
+                        request_id: id,
+                        port,
+                        name: (!remove).then_some(name),
+                    },
+                ))
+                .map_err(|e| e.to_string())?;
+            Ok((source, id))
+        });
+        let form = self.ports.form.as_mut().expect("form");
+        match result {
+            Ok((source, id)) => {
+                form.catalog_pending = Some((source, id, continuation));
+                form.error = None;
+                for input in [
+                    &form.target,
+                    &form.remote,
+                    &form.local,
+                    &form.label,
+                    &form.bind,
+                ] {
+                    input.update(cx, |input, cx| input.set_disabled(true, cx));
+                }
+                // A disconnect may destroy the source driver before it can
+                // deliver a result. Never leave the form permanently pending.
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_secs(16)).await;
+                    let _ = this.update_in(cx, |this, window, cx| this.port_catalog_result(source, id, Some("Host confirmation was lost. Check the shared catalog before retrying.".into()), window, cx));
+                }).detach();
+            }
+            Err(error) => form.error = Some(error),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn port_catalog_result(
+        &mut self,
+        source: SourceToken,
+        id: Uuid,
+        error: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &mut self.ports.form else {
+            return;
+        };
+        let Some((captured, pending, continuation)) = form.catalog_pending else {
+            return;
+        };
+        if captured != source || pending != id {
+            return;
+        }
+        form.catalog_pending = None;
+        for input in [
+            &form.target,
+            &form.remote,
+            &form.local,
+            &form.label,
+            &form.bind,
+        ] {
+            input.update(cx, |input, cx| input.set_disabled(false, cx));
+        }
+        if let Some(error) = error {
+            form.error = Some(error);
+        } else if self
+            .model
+            .as_ref()
+            .is_none_or(|m| m.execution_token(source.source_id()) != Some(source))
+        {
+            form.error =
+                Some("Host connection changed; reconnect to inspect the saved port".into());
+        } else if let Some(action) = continuation {
+            form.shared_name_saved = true;
+            self.ports.link_notice =
+                Some("Service saved on host; applying local forwarding settings".into());
+            self.submit_local_port_form(action, window, cx);
+        } else {
+            self.ports.link_notice = Some("Shared port catalog updated".into());
+            self.cancel_port_form(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn submit_local_port_form(
+        &mut self,
+        action: ForwardAction,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(form) = self.ports.form.as_ref() else {
             return;
         };
@@ -888,7 +1115,8 @@ impl Workspace {
         let target = form.target.read(cx).value().to_string();
         let remote = form.remote.read(cx).value().to_string();
         let local = form.local.read(cx).value().to_string();
-        let label = form.label.read(cx).value().to_string();
+        let bind = form.bind.read(cx).value().parse::<std::net::IpAddr>();
+        let label = String::new();
         let build = || -> Result<ForwardRequest, String> {
             let local = decimal_port(&local, true, "Local port")?;
             let key = if let Some(key) = &form.edit_key {
@@ -897,7 +1125,7 @@ impl Workspace {
                 let remote = decimal_port(&remote, false, "Remote port")?.expect("required port");
                 MappingKey::new(&target, remote).map_err(|error| error.to_string())?
             };
-            let label = (form.edit_saved || !label.is_empty()).then_some(label);
+            let label = (form.edit_saved && form.shared_name_saved).then_some(label);
             match action {
                 ForwardAction::Start => {
                     ForwardRequest::start(key, local, form.edit_saved || form.restore, label)
@@ -908,7 +1136,13 @@ impl Workspace {
                 ForwardAction::Save => ForwardRequest::save(key, local, label),
                 _ => unreachable!(),
             }
-            .map(|request| request.with_restore(form.restore))
+            .map_err(|error| error.to_string())?
+            .with_bind(bind.map_err(|_| "Enter a valid local IP address".to_owned())?)
+            .map(|request| {
+                request
+                    .with_restore(form.restore)
+                    .with_auto_local(local.is_none())
+            })
             .map_err(|error| error.to_string())
         };
         let request = match build() {
@@ -960,7 +1194,13 @@ impl Workspace {
                 let form = self.ports.form.as_mut().expect("form");
                 form.pending = Some(id);
                 form.error = None;
-                for input in [&form.target, &form.remote, &form.local, &form.label] {
+                for input in [
+                    &form.target,
+                    &form.remote,
+                    &form.local,
+                    &form.label,
+                    &form.bind,
+                ] {
                     input.update(cx, |input, cx| input.set_disabled(true, cx));
                 }
             }
@@ -1243,7 +1483,13 @@ impl Workspace {
                         form.error = Some(
                             "Stop submitted. The earlier port action is no longer current.".into(),
                         );
-                        for input in [&form.target, &form.remote, &form.local, &form.label] {
+                        for input in [
+                            &form.target,
+                            &form.remote,
+                            &form.local,
+                            &form.label,
+                            &form.bind,
+                        ] {
                             input.update(cx, |input, cx| input.set_disabled(false, cx));
                         }
                     }
@@ -1403,7 +1649,13 @@ impl Workspace {
                 } else {
                     result.reason().map(str::to_owned)
                 };
-                for input in [&form.target, &form.remote, &form.local, &form.label] {
+                for input in [
+                    &form.target,
+                    &form.remote,
+                    &form.local,
+                    &form.label,
+                    &form.bind,
+                ] {
                     input.update(cx, |input, cx| input.set_disabled(false, cx));
                 }
             }
@@ -2103,7 +2355,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_port_edit_enter_submits_metadata_save_without_resuming() {
+    fn paused_port_edit_enter_saves_local_settings_without_a_host_connection() {
         with_view(|window, view| {
             let owner = Uuid::new_v4();
             let (commands, mut receiver) = mpsc::channel(4);
@@ -2128,8 +2380,8 @@ mod tests {
                     assert!(!form.target.read(cx).is_editable());
                     assert!(!form.remote.read(cx).is_editable());
                     assert!(form.local.read(cx).focus_handle(cx).is_focused(window));
-                    form.label
-                        .update(cx, |input, cx| input.set_value("Changed", window, cx));
+                    form.local
+                        .update(cx, |input, cx| input.set_value("4174", window, cx));
                 });
             });
             window.simulate_keystrokes("enter");
@@ -2210,6 +2462,76 @@ mod tests {
                         "failed attempt retains accepted saved local port"
                     );
                 });
+            });
+        });
+    }
+    #[test]
+    fn shared_names_project_without_discovery_and_save_only_to_the_captured_host() {
+        with_view(|window, view| {
+            let (commands, mut receiver) = mpsc::channel(4);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    let mut model = WindowWorkspace::new(Uuid::new_v4());
+                    let (screen, _) = model.ui_test_remote_terminal_fixture("vm1").unwrap();
+                    model
+                        .ui_test_port_catalog(screen.source_id(), &[(8080, "API")])
+                        .unwrap();
+                    let owner = model.lifecycle_token();
+                    let source = model.execution_token(screen.source_id()).unwrap();
+                    workspace.model = Some(model);
+                    workspace.commands = commands;
+                    workspace.destination = Destination::Hosts;
+                    workspace.ports.set_owner(owner);
+                    workspace.ports.accept(Arc::new(
+                        ForwardSnapshot::ui_test_fixture(owner, 1, Some("[]"), None).unwrap(),
+                    ));
+                    let row = workspace
+                        .ports
+                        .rows(workspace.model.as_ref())
+                        .pop()
+                        .unwrap();
+                    assert_eq!(row.label(), Some("API"));
+                    assert!(row.is_catalog_saved());
+                    assert!(!row.is_saved());
+                    workspace.open_port_form(Some(row), window, cx);
+                    workspace
+                        .ports
+                        .form
+                        .as_ref()
+                        .unwrap()
+                        .label
+                        .update(cx, |input, cx| input.set_value("Backend", window, cx));
+                    workspace.submit_port_catalog(false, None, window, cx);
+                    let sent = receiver.try_recv().unwrap();
+                    assert_eq!(sent.source_token(), Some(source));
+                    let Command::ManagePortCatalog {
+                        request_id,
+                        port,
+                        name,
+                    } = sent.kind()
+                    else {
+                        panic!("shared command")
+                    };
+                    assert_eq!(*port, 8080);
+                    assert_eq!(name.as_deref(), Some("Backend"));
+                    workspace.port_catalog_result(owner, *request_id, None, window, cx);
+                    assert!(
+                        workspace
+                            .ports
+                            .form
+                            .as_ref()
+                            .unwrap()
+                            .catalog_pending
+                            .is_some(),
+                        "another source cannot settle the edit"
+                    );
+                    workspace.port_catalog_result(source, *request_id, None, window, cx);
+                    assert!(workspace.ports.form.is_none());
+                    assert!(
+                        receiver.try_recv().is_err(),
+                        "saving a shared name never forwards"
+                    );
+                })
             });
         });
     }

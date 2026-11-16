@@ -4343,6 +4343,11 @@ impl Workspace {
                         cx.notify();
                     }
                 }
+                Update::PortCatalogResult {
+                    source,
+                    request_id,
+                    error,
+                } => self.port_catalog_result(source, request_id, error, window, cx),
                 Update::Forward(result) => self.forward_result(result, window, cx),
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),

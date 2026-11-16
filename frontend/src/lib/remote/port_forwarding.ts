@@ -17,7 +17,7 @@ import type { ConnSocket } from "../protocol/socket.ts";
 import { hostOf, type ConnKey } from "../connection/server_connection.ts";
 import { MAX_NAME, MAX_TEXT, plainLines, plainText } from "../protocol/untrusted.ts";
 import {
-  forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts, portKey, portLists,
+  portGroup, bindingHost, bindingIdentity, forwardedLink, loopbackLink, parseForward, parseForwards, parsePorts, portKey, portLists,
   withForward, parseSavedForward, parseSavedForwards, forwardLabel, isPort, MAX_FORWARD_LABEL,
   type DetectedPort, type HostPorts, type PortAction, type RemoteForward, type SavedForward, type ForwardFailure,
 } from "./ports.ts";
@@ -65,6 +65,11 @@ export class ForwardError extends Error {
 }
 
 interface Host {
+  socket: ConnSocket;
+  catalog?: { port: number; name: string }[];
+  revision?: number;
+  catalogError?: string;
+  requests: Map<string, (error: string | null) => void>;
   target: string;
   /** The last list; undefined until the first after a (re)connect. */
   ports: DetectedPort[] | undefined;
@@ -74,7 +79,10 @@ export interface ForwardOptions {
   open?: boolean;
   local?: number;
   remember?: boolean;
+  restore?: boolean;
   label?: string;
+  bind?: string;
+  autoLocal?: boolean;
 }
 
 export class PortForwarding {
@@ -100,18 +108,31 @@ export class PortForwarding {
   watch(conn: WatchedConnection): () => void {
     const target = hostOf(conn.key);
     if (target === undefined) return () => {};
-    const host: Host = { target, ports: undefined };
+    const host: Host = { target, socket: conn.socket, requests: new Map(), ports: undefined };
     this.hosts.set(conn.key, host);
     this.schedule();
     const unsubMessage = conn.socket.onMessage((msg) => {
       if (msg.type === "ports.changed") this.portsChanged(host, msg.ports);
+      if (msg.type === "ports.catalog" && Number.isSafeInteger(msg.revision) && msg.revision >= (host.revision ?? 0)
+          && Array.isArray(msg.ports) && msg.ports.length <= 256
+          && msg.ports.every(p => p !== null && typeof p === "object" && isPort(p.port) && typeof p.name === "string" && [...p.name].length <= 200 && !/[\u0000-\u001f\u007f-\u009f]/.test(p.name))
+          && new Set(msg.ports.map(p => p.port)).size === msg.ports.length) {
+        host.catalog = msg.ports; host.revision = msg.revision;
+        host.catalogError = typeof msg.error === "string" ? msg.error.slice(0, 2048) : undefined;
+        this.deps.changed();
+      }
+      if (msg.type === "ports.result" && (msg.error === null || typeof msg.error === "string")) host.requests.get(msg.requestId)?.(msg.error);
+
     });
     // While the host is away its ports are unknown; its next list is a first one again.
     const unsubDisconnect = conn.socket.onDisconnect(() => {
       host.ports = undefined;
+      host.catalog = undefined; host.revision = undefined;
+      for (const finish of host.requests.values()) finish("Host disconnected; check its catalog before retrying");
       this.deps.changed();
     });
     return () => {
+      for (const finish of host.requests.values()) finish("Host connection closed");
       unsubMessage();
       unsubDisconnect();
       if (this.hosts.get(conn.key) === host) this.hosts.delete(conn.key);
@@ -146,11 +167,42 @@ export class PortForwarding {
   /** The Ports lists as the UI shows them. */
   lists(): HostPorts[] {
     const hosts = [...this.hosts].map(([key, host]) => ({ key, ports: host.ports }));
-    return portLists(hosts, this.forwardList, (target, port) => this.pending.get(portKey(target, port)), this.savedList)
-      .map((host) => ({ ...host, rows: host.rows.map((row) => {
+    const lists = portLists(hosts, this.forwardList, (target, port) => this.pending.get(portKey(target, port)), this.savedList);
+    for (const host of this.hosts.values()) {
+      if (!host.catalog?.length) continue;
+      let list = lists.find(list => list.target === host.target);
+      if (!list) { list = { target: host.target, rows: [] }; lists.push(list); }
+      for (const entry of host.catalog) {
+        let row = list.rows.find(row => row.port === entry.port);
+        if (!row) { row = { port: entry.port }; list.rows.push(row); }
+        row.catalog = entry;
+      }
+    }
+    for (const list of lists) list.rows.sort((a, b) => portGroup(a) - portGroup(b) || a.port - b.port);
+    return lists.map((host) => ({ ...host, rows: host.rows.map((row) => {
         const error = this.errorOf(host.target, row.port);
         return error ? { ...row, error } : row;
       }) }));
+  }
+
+  /** Explicit shared metadata mutation; never queued for reconnect. */
+  async saveCatalog(target: string, port: number, name: string | null): Promise<boolean> {
+    const host = [...this.hosts.values()].find(h => h.target === target && h.catalog !== undefined);
+    let error: string | null = null;
+    if (!host) error = "Connect the host and update its Splitty daemon to manage shared ports";
+    else if (host.catalogError) error = host.catalogError;
+    else if (!isPort(port) || (name !== null && ([...name].length > 200 || /[\u0000-\u001f\u007f-\u009f]/.test(name)))) error = "Invalid port or service name";
+    else if (host.requests.size >= 32) error = "Too many pending port changes";
+    else error = await new Promise<string | null>(resolve => {
+      const id = crypto.randomUUID();
+      const timer = setTimeout(() => finish("Host confirmation timed out; check its catalog before retrying"), 15000);
+      const finish = (error: string | null) => { clearTimeout(timer); host.requests.delete(id); resolve(error); };
+      host.requests.set(id, finish);
+      try { host.socket.send(name === null ? { type: "ports.remove", requestId: id, port } : { type: "ports.save", requestId: id, port, name }); }
+      catch { finish("Port change could not be sent"); }
+    });
+    if (error) this.deps.notify({ id: `catalog:${target}:${port}`, kind: "error", title: "Shared port change failed", description: error });
+    return error === null;
   }
 
   /** A local change feed replaces polling; mutations still reconcile their own result. */
@@ -224,16 +276,17 @@ export class PortForwarding {
       const request = this.mutate(key, "forward", async (current) => {
         try {
           validateMapping(target, port, options.local, options.label);
+          if (options.bind !== undefined && !bindingHost(options.bind)) throw new Error("Enter a valid IP address");
           const saved = this.savedOf(target, port);
           // A cached active entry may have been stopped in another window.
           const forward = await this.request(target, port, options);
           if (!current()) return null;
           let preference: SavedForward | undefined;
           let rememberFailure: { error: unknown } | undefined;
-          if (options.remember) {
+          if (options.remember || (saved && options.restore !== undefined)) {
             // Two independent requests: a failed save must leave the live tunnel visible.
             try {
-              preference = await this.put(target, port, { local: forward.local, label: options.label });
+              preference = await this.put(target, port, { local: forward.local, label: options.label, bind: forward.bind, autoLocal: options.autoLocal, enabled: options.restore ?? true });
             } catch (err) {
               rememberFailure = { error: err };
             }
@@ -248,11 +301,11 @@ export class PortForwarding {
           // key protected by this lane and its generation, never the full list.
           this.forwardList = this.forwardList.filter((f) => portKey(f.target, f.remote) !== key);
           if (active) this.forwardList = withForward(this.forwardList, active);
-          if (!active || active.state !== "up" || active.local !== forward.local) {
+          if (!active || active.state !== "up" || active.local !== forward.local || bindingIdentity(active.bind) !== bindingIdentity(forward.bind)) {
             throw new ForwardError("The forward is no longer available at the verified local port. Try again.");
           }
           if (preference) this.savedList = withForward(this.savedList, preference);
-          else if (saved) this.savedList = withForward(this.savedList, { ...saved, local: active.local, enabled: true, lastError: undefined });
+          else if (saved) this.savedList = withForward(this.savedList, { ...saved, local: active.local, bind: active.bind, ...(options.autoLocal === undefined ? {} : { autoLocal: options.autoLocal }), enabled: true, lastError: undefined });
           if (rememberFailure) this.recordError(key, `Port ${port} is forwarded but was not remembered`, rememberFailure.error);
           this.deps.changed();
           return active;
@@ -280,7 +333,7 @@ export class PortForwarding {
   }
 
   /** Save metadata only; no host connection or forwarding request. */
-  save(target: string, port: number, options: { local?: number; label?: string } = {}): Promise<boolean> {
+  save(target: string, port: number, options: { local?: number; label?: string; bind?: string; autoLocal?: boolean; enabled?: boolean } = {}): Promise<boolean> {
     const key = portKey(target, port);
     return this.mutate(key, "save", async (current) => {
       try {
@@ -357,13 +410,17 @@ export class PortForwarding {
     return task;
   }
 
-  private async put(target: string, port: number, options: { local?: number; label?: string }): Promise<SavedForward> {
+  private async put(target: string, port: number, options: { local?: number; label?: string; bind?: string; autoLocal?: boolean; enabled?: boolean }): Promise<SavedForward> {
     const res = await this.deps.fetch(PREFERENCES_PATH, jsonRequest("PUT", {
       target, port, ...options, ...(options.label === undefined ? {} : { label: forwardLabel(options.label) }),
     }));
     if (!res.ok) throw await failure(res);
     const saved = parseSavedForward(await res.json());
-    if (!saved || saved.target !== target || saved.remote !== port) throw new ForwardError("Invalid saved mapping response.");
+    if (!saved || saved.target !== target || saved.remote !== port
+      || (options.local !== undefined && saved.local !== options.local)
+      || (options.bind !== undefined && bindingIdentity(saved.bind) !== bindingIdentity(options.bind))
+      || (options.autoLocal !== undefined && (saved.autoLocal ?? false) !== options.autoLocal)
+      || (options.enabled !== undefined && saved.enabled !== options.enabled)) throw new ForwardError("Invalid saved mapping response.");
     return saved;
   }
 
@@ -382,7 +439,7 @@ export class PortForwarding {
     void request.then((forward) => {
       this.releaseReservation(key, reservation);
       if (forward && !this.disposed && version === this.versions.get(key)) {
-        this.openUrl(link ? forwardedLink(link, forward.local) : forward.url, forward, reservation);
+        this.openUrl(link ? forwardedLink(link, forward.local, forward.bind) : forward.url, forward, reservation);
       } else reservation?.close();
     });
   }
@@ -408,6 +465,7 @@ export class PortForwarding {
     this.disposed = true;
     clearInterval(this.timer);
     this.timer = undefined;
+    for (const host of this.hosts.values()) for (const finish of host.requests.values()) finish("Window closed");
     this.hosts.clear();
     for (const key of this.reservations.keys()) this.cancelReservations(key);
   }
@@ -423,12 +481,13 @@ export class PortForwarding {
 
   private async request(target: string, port: number, options: ForwardOptions): Promise<RemoteForward> {
     const res = await this.deps.fetch(FORWARDS_PATH, jsonRequest("POST", {
-      target, port, ...(options.local === undefined ? {} : { local: options.local }),
+      target, port, ...(options.restore === undefined ? {} : { preserveRestore: true }), ...(options.local === undefined ? {} : { local: options.local }), ...(options.bind === undefined ? {} : { bind: options.bind }), ...(options.autoLocal === undefined ? {} : { autoLocal: options.autoLocal }),
     }));
     if (!res.ok) throw await failure(res);
     const forward = parseForward(await res.json());
     if (!forward || forward.target !== target || forward.remote !== port
-      || (options.local !== undefined && forward.local !== options.local)) {
+      || (options.local !== undefined && forward.local !== options.local)
+      || (options.bind !== undefined && bindingIdentity(forward.bind) !== bindingIdentity(options.bind))) {
       throw new ForwardError("The local Splitty server answered with a different mapping.");
     }
     return forward;

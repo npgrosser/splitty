@@ -8,7 +8,7 @@ import { hostKey, type ServerConnection } from "../connection/server_connection.
 import type { SavedForward } from "./ports.ts";
 import { manualPort } from "./manual_port.ts";
 
-interface WireForward { target: string; remote: number; local: number; url: string; state: "up" | "down" }
+interface WireForward { target: string; remote: number; local: number; url: string; state: "up" | "down"; bind?: string }
 
 type RequestBody = { target: string; port: number; local?: number; label?: string };
 
@@ -50,7 +50,8 @@ class FakeHub {
       }
       const preference: SavedForward = { target: body.target, remote: body.port,
         local: body.local ?? saved?.local ?? active?.local ?? body.port,
-        label: body.label ?? saved?.label ?? "", enabled: saved?.enabled ?? true,
+        label: body.label ?? saved?.label ?? "", enabled: body.enabled ?? saved?.enabled ?? true,
+        bind: body.bind ?? saved?.bind ?? active?.bind, autoLocal: body.autoLocal ?? saved?.autoLocal,
         ...(saved?.lastError ? { lastError: saved.lastError } : {}),
       };
       if (savedIndex >= 0) this.saved[savedIndex] = preference; else this.saved.push(preference);
@@ -61,9 +62,9 @@ class FakeHub {
         return json(409, { code: "active_mapping_conflict", error: "Stop before changing the active mapping." });
       }
       const local = body.local ?? saved?.local ?? this.localFor(body.port);
-      const created: WireForward = active ?? { target: body.target, remote: body.port, local, url: `http://localhost:${local}`, state: "up" };
+      const created: WireForward = active ?? { target: body.target, remote: body.port, local, url: `http://localhost:${local}`, state: "up", bind: body.bind ?? saved?.bind };
       if (!active) this.forwards.push(created);
-      if (saved) { saved.local = created.local; saved.enabled = true; delete saved.lastError; }
+      if (saved) { saved.local = created.local; if (!body.preserveRestore) saved.enabled = true; delete saved.lastError; }
       return json(200, created);
     }
     if (saved) { saved.enabled = false; delete saved.lastError; }
@@ -199,8 +200,8 @@ describe("PortForwarding: the hosts' lists", () => {
     await ports.refresh();
     expect(ports.lists()).toEqual([
       { target: "vm1", rows: [
-        { port: 3000, process: "node" },
         { port: 8000, process: "python3", forward: { target: "vm1", remote: 8000, local: 8001, url: "http://localhost:8001", state: "down" } },
+        { port: 3000, process: "node" },
       ] },
       { target: "old", rows: [{ port: 4000, forward: { target: "old", remote: 4000, local: 4000, url: "http://localhost:4000", state: "up" } }] },
     ]);
@@ -446,7 +447,7 @@ describe("PortForwarding: saved mappings and explicit consent", () => {
     await ports.forward("vm1", 5173);
     expect(hub.of("PUT", PREFERENCES_PATH)).toEqual([]);
     await ports.forward("vm1", 5173, { remember: true, label: "Frontend" });
-    expect(hub.of("PUT", PREFERENCES_PATH)).toEqual([{ method: "PUT", body: { target: "vm1", port: 5173, local: 40123, label: "Frontend" } }]);
+    expect(hub.of("PUT", PREFERENCES_PATH)).toEqual([{ method: "PUT", body: { target: "vm1", port: 5173, local: 40123, label: "Frontend", enabled: true } }]);
     expect(ports.saved()[0].local).toBe(40123);
   });
 
@@ -1124,5 +1125,47 @@ describe("PortForwarding: browser activation reservations", () => {
     expect(reservation.open).toHaveBeenCalledWith("https://localhost:15173/app?x=1#top");
     expect(opened).toHaveLength(1);
     expect(hub.of("POST")).toHaveLength(2);
+  });
+});
+
+
+describe("shared host port catalog", () => {
+  it("shows named services without discovery and rejects older snapshots", () => {
+    const { ports, hub } = setup();
+    const vm = host("vm1"); ports.watch(vm.conn);
+    vm.socket.message({ type: "ports.catalog", revision: 2, ports: [{ port: 8080, name: "API" }], error: null });
+    expect(ports.lists()[0].rows[0].catalog?.name).toBe("API");
+    vm.socket.message({ type: "ports.catalog", revision: 1, ports: [], error: null });
+    expect(ports.lists()[0].rows[0].catalog?.name).toBe("API");
+    expect(hub.requests.filter(r => r.method !== "GET")).toEqual([]);
+    vm.socket.drop();
+    expect(ports.lists()).toEqual([]);
+  });
+  it("waits for acknowledgement and does not replay changes after disconnect", async () => {
+    const { ports, hub } = setup(); const vm = host("vm1"); ports.watch(vm.conn);
+    vm.socket.message({ type: "ports.catalog", revision: 0, ports: [], error: null });
+    const saving = ports.saveCatalog("vm1", 8080, "API");
+    const request = vm.socket.sentOfType("ports.save")[0];
+    expect(request.name).toBe("API");
+    vm.socket.message({ type: "ports.result", requestId: request.requestId, error: null });
+    expect(await saving).toBe(true);
+    const pending = ports.saveCatalog("vm1", 8080, "Other"); vm.socket.drop();
+    expect(await pending).toBe(false);
+    vm.socket.message({ type: "ports.catalog", revision: 1, ports: [{ port: 8080, name: "API" }], error: null });
+    expect(vm.socket.sentOfType("ports.save")).toHaveLength(2);
+    expect(hub.requests.filter(r => r.method !== "GET")).toEqual([]);
+  });
+});
+
+
+describe("local binding preferences", () => {
+  it("opens the confirmed VPN address and keeps restoration explicitly disabled", async () => {
+    const { hub, ports, opened } = setup();
+    hub.saved = [preference({ enabled: true })];
+    await ports.refresh();
+    expect(await ports.forward("vm1", 5173, { local: 15173, bind: "192.0.2.4", autoLocal: true, restore: false, open: true })).not.toBeNull();
+    expect(ports.saved()[0]).toMatchObject({ bind: "192.0.2.4", autoLocal: true, enabled: false });
+    expect(opened).toEqual(["http://192.0.2.4:15173"]);
+    expect(hub.of("POST")[0].body).toMatchObject({ preserveRestore: true, bind: "192.0.2.4" });
   });
 });

@@ -39,6 +39,7 @@ model {
       }
     }
 
+    client_session -> splitty.remote.hosts 'Atomic private writes of the shared host port catalog'
     client_session -> hub 'Passive change feed, validated catalog observations and the hub-auto-forward-v1 capability'
     client_session -> splitty.remote.ssh_askpass 'Change feed and pending questions, announced to local hub connections'
     native -> service 'Validated operation catalog, shared dispatch and bounded response serialization'

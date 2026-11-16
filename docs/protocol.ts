@@ -712,6 +712,7 @@ interface MuxWorkspaceResync {
 }
 
 type ClientMessage =
+  | PortCatalogRequest
   | SessionCreate
   | SessionAttach
   | SessionDetach
@@ -1109,6 +1110,18 @@ interface PortsChanged extends ServerEvent {
   ports: ListeningPort[];
 }
 
+/** port-catalog-v1: durable host service metadata, independent of discovery. */
+interface PortCatalog extends ServerEvent {
+  type: "ports.catalog";
+  revision: number;
+  ports: { port: number; name: string }[];
+  error: string | null;
+}
+type PortCatalogRequest =
+  | { type: "ports.save"; requestId: string; port: number; name: string }
+  | { type: "ports.remove"; requestId: string; port: number };
+interface PortCatalogResult { type: "ports.result"; requestId: string; error: string | null }
+
 // --- Program Status ---
 
 /**
@@ -1221,6 +1234,8 @@ type ServerMessage =
   | MuxPaneSpawned
   | MuxBusy
   // Listening ports
+  | PortCatalog
+  | PortCatalogResult
   | PortsChanged
   // Program status
   | ProgramStatusChanged
@@ -2615,9 +2630,9 @@ interface CatalogScreen {
  * neither forwarding endpoint is exposed on the control socket.
  *
  * One owned, foreground ssh -N -T -a -x per mapping, from
- * 127.0.0.1:<local> here to localhost:<port> on the host. Saved/explicit local
- * ports are exact. Otherwise use the remote port if free, or a free alternate.
- * Every candidate is checked on IPv4 and IPv6 loopback; only unavailable IPv6
+ * <bind>:<local> here (default 127.0.0.1) to localhost:<port> on the host. Fixed/explicit local
+ * ports are exact. autoLocal rules and unsaved automatic mappings use the remote port if free, or a free alternate.
+ * Default IPv4 loopback/wildcard candidates are also checked on IPv6 loopback; only unavailable IPv6
  * is exempt. No dummy IPv6 listener is left behind. Configured LocalForward,
  * RemoteForward and DynamicForward are refused (code "forward").
  *
@@ -2665,15 +2680,21 @@ interface RemoteForwardKey {
 }
 
 interface OpenRemoteForward extends RemoteForwardKey {
-  /** Exact local port, integer 1..65535. Omitted: saved local, else best effort. */
+  /** Numeric local IP; default loopback. Explicit wildcard/LAN/VPN enables network access. */
+  bind?: string;
+  /** Permit a free alternate on initial start/restore; explicit local remains exact. */
+  autoLocal?: boolean;
+  /** Exact local port, integer 1..65535. Omitted: fixed saved local, else best effort. */
   local?: number;
-  /** Omitted/false is explicit consent; true cannot be combined with local. */
+  /** Omitted/false is explicit consent; true cannot be combined with local, bind or autoLocal. */
   automatic?: boolean;
   /** Explicit opening preserves the saved restore choice instead of enabling it. */
   preserveRestore?: boolean;
 }
 
 interface RemoteForward {
+  /** Omitted means 127.0.0.1. */
+  bind?: string;
   target: string;
   /** The host's port. */
   remote: number;
@@ -2700,7 +2721,7 @@ interface RemoteForward {
  * Forget removes saved metadata/errors, leaving an active forward supervised.
  *
  * Persisted atomically as remote-forwards.json in the private config directory:
- * {version:1,forwards:[{target,remote,local,label,enabled}]}; modes 0700/0600 on
+ * {version:1,forwards:[{target,remote,local,bind,autoLocal,label,enabled}]}; modes 0700/0600 on
  * Unix. Max 32 saved entries per target and 256 overall, disabled included;
  * overflow is preference_limit, without eviction. Invalid/missing/unreadable
  * files read empty without rewrite. No credential or lastError is stored.
@@ -2711,6 +2732,8 @@ interface RemoteForward {
  * readiness or explicit action; no new RemoteHubMessage is introduced.
  */
 interface SaveRemoteForward extends RemoteForwardKey {
+  bind?: string;
+  autoLocal?: boolean;
   local?: number;
   /** At most 200 Unicode characters. "" clears; omitted preserves/defaults. */
   label?: string;
@@ -2719,6 +2742,10 @@ interface SaveRemoteForward extends RemoteForwardKey {
 }
 
 interface SavedRemoteForward {
+  /** Omitted means 127.0.0.1. */
+  bind?: string;
+  /** Omitted means fixed local port for saved rules. */
+  autoLocal?: boolean;
   target: string;
   remote: number;
   local: number;

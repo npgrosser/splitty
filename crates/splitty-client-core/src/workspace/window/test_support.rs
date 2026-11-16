@@ -46,6 +46,16 @@ impl WindowWorkspace {
         Ok(())
     }
 
+    #[doc(hidden)]
+    pub fn ui_test_port_catalog(&mut self, id: SourceId, ports: &[(u16, &str)]) -> io::Result<()> {
+        let mut source = self
+            .source_mut(id)
+            .ok_or_else(|| invalid("fixture source missing"))?;
+        let owner = source.source_token();
+        source.observe_port_catalog(owner, &json!({"revision":1,"ports":ports.iter().map(|(port,name)|json!({"port":port,"name":name})).collect::<Vec<_>>(),"error":null}), &ConnectionBudget::default())?;
+        Ok(())
+    }
+
     /// Apply one `program_status.changed` through the production validator,
     /// as a source whose welcome listed the capability.
     #[doc(hidden)]

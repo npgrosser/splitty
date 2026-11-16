@@ -65,6 +65,8 @@ export interface EditorRequest {
   expiresAt: number;
 }
 export type IncomingMessage =
+  | { type: "ports.save"; requestId: string; port: number; name: string }
+  | { type: "ports.remove"; requestId: string; port: number }
   | { type: "hub.catalog.observe"; target: string; screens: readonly {id: string; name?: string; panes: number}[] }
   | { type: "mux.extract_template"; requestId: string; screenId: string; name: string; root?: string }
   | { type: "mux.assess_close"; requestId: string; scope: CloseScope }
@@ -311,6 +313,8 @@ export type OutgoingMessage =
   | MuxPaneSpawned
   | MuxOpFailed
   // Listening ports
+  | { type: "ports.catalog"; revision: number; ports: { port: number; name: string }[]; error: string | null }
+  | { type: "ports.result"; requestId: string; error: string | null }
   | PortsChanged
   // Commands
   | ServerCommand

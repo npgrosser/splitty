@@ -21,6 +21,9 @@ pub(super) fn validate_active(rows: &[ActiveForward]) -> io::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for row in rows {
         valid_key(&row.target, row.remote, row.local)?;
+        if !splitty_core::native_api::forwards::valid_bind(row.bind) {
+            return Err(invalid("Invalid forwarding binding"));
+        }
         if !seen.insert((&row.target, row.remote)) {
             return Err(invalid("Duplicate active forward"));
         }
@@ -29,6 +32,9 @@ pub(super) fn validate_active(rows: &[ActiveForward]) -> io::Result<()> {
 }
 pub(super) fn validate_saved(row: &SavedForward) -> io::Result<()> {
     valid_key(&row.target, row.remote, row.local)?;
+    if !splitty_core::native_api::forwards::valid_bind(row.bind) {
+        return Err(invalid("Invalid forwarding binding"));
+    }
     if row.label.chars().count() > 200 {
         return Err(invalid("Oversized saved forwarding label"));
     }
@@ -96,6 +102,12 @@ fn body(request: &ForwardRequest, local: Option<u16>, label: bool) -> Map<String
     let mut body = json!({"target":request.key.target(),"port":request.key.remote()});
     if let Some(local) = local {
         body["local"] = json!(local);
+    }
+    if let Some(auto_local) = request.auto_local {
+        body["autoLocal"] = json!(auto_local);
+    }
+    if let Some(bind) = request.bind {
+        body["bind"] = json!(bind.to_string());
     }
     if label {
         if let Some(enabled) = request.restore {
@@ -194,6 +206,8 @@ async fn save(
         || saved.target != request.key.target
         || saved.remote != request.key.remote
         || local.is_some_and(|local| local != saved.local)
+        || request.bind.is_some_and(|bind| bind != saved.bind)
+        || request.auto_local.is_some_and(|v| v != saved.auto_local)
         || request
             .label
             .as_ref()
@@ -246,13 +260,19 @@ pub(super) async fn mutate(
                 if active.target != request.key.target
                     || active.remote != request.key.remote
                     || request.local.is_some_and(|local| local != active.local)
+                    || request.bind.is_some_and(|bind| bind != active.bind)
+                    || !splitty_core::native_api::forwards::valid_bind(active.bind)
                     || active.state != ActiveState::Up
                 {
                     return Err(Failure::uncertain());
                 }
                 revision.fetch_add(1, Ordering::AcqRel);
                 if let Some(consent) = consent {
-                    consent.expected.store(active.local, Ordering::Release);
+                    *consent
+                        .expected
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some((active.local, active.bind));
                 }
                 if request.remember {
                     if let Err(failure) = save(client, request, Some(active.local), revision).await
@@ -277,6 +297,7 @@ pub(super) async fn mutate(
                         row.target == active.target
                             && row.remote == active.remote
                             && row.local == active.local
+                            && row.bind == active.bind
                             && row.state == ActiveState::Up
                     }) {
                         return Err(Failure {
@@ -284,7 +305,7 @@ pub(super) async fn mutate(
                             reason: "Forward changed or stopped before browser opening".into(),
                         });
                     }
-                    if let Some(url) = rewritten_url(request, active.local) {
+                    if let Some(url) = rewritten_url_at(request, active.local, active.bind) {
                         result.open = Some(ForwardOpen {
                             _allocation: consent.allocation.clone(),
                             url,

@@ -697,6 +697,7 @@ mod tests {
             "scratchpad-versions-v1",
             "viewer-reviews-v1",
             "tab-group-transfer-v1",
+            "port-catalog-v1",
         ];
         let store = layout_store();
         let others = Default::default();

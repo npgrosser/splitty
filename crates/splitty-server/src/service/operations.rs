@@ -123,6 +123,10 @@ struct ForwardRequest {
 
 #[derive(Deserialize)]
 struct OpenForwardRequest {
+    #[serde(default, rename = "autoLocal", deserialize_with = "supplied")]
+    auto_local: Option<bool>,
+    #[serde(default, deserialize_with = "supplied")]
+    bind: Option<std::net::IpAddr>,
     target: String,
     port: i64,
     #[serde(default, deserialize_with = "supplied")]
@@ -136,6 +140,10 @@ struct OpenForwardRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SaveForwardRequest {
+    #[serde(default, rename = "autoLocal", deserialize_with = "supplied")]
+    auto_local: Option<bool>,
+    #[serde(default, deserialize_with = "supplied")]
+    bind: Option<std::net::IpAddr>,
     target: String,
     port: i64,
     #[serde(default, deserialize_with = "supplied")]
@@ -166,12 +174,16 @@ pub(crate) async fn save_forward(hub: &Hub, body: Value) -> Reply {
         Err(error) => return refuse_forward_request(&error),
     };
     match hub
-        .save_forward_with_restore(
+        .save_forward_at(
             &request.target,
             request.port,
             request.local,
             request.label,
             request.enabled,
+            splitty_core::native_api::forwards::ForwardOptions {
+                bind: request.bind,
+                auto_local: request.auto_local,
+            },
         )
         .await
     {
@@ -210,12 +222,16 @@ pub(crate) async fn open_forward(hub: &Hub, body: Value) -> Reply {
         Err(error) => return refuse_forward_request(&error),
     };
     match hub
-        .open_forward_preserving_restore(
+        .open_forward_at(
             &request.target,
             request.port,
             request.local,
             request.automatic,
             request.preserve_restore,
+            splitty_core::native_api::forwards::ForwardOptions {
+                bind: request.bind,
+                auto_local: request.auto_local,
+            },
         )
         .await
     {

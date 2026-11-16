@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { bindingHost } from "../../lib/remote/ports.ts";
   import { manualPort } from "../../lib/remote/manual_port.ts";
   import { portForwarding } from "../../stores/ports.svelte.ts";
   import { focusInlineForm } from "./inline_focus.ts";
@@ -11,6 +12,7 @@
   let remote = $state("");
   let local = $state("");
   let label = $state("");
+  let bind = $state("127.0.0.1");
   let remember = $state(false);
   let busy = $state(false);
   let error = $state("");
@@ -19,14 +21,16 @@
     if (busy) return;
     const parsed = manualPort({ target: target || host, remote, local, label, remember });
     if (parsed.error) { error = parsed.error; return; }
+    if (start && !bindingHost(bind)) { error = "Enter a numeric listen IP address."; return; }
     const value = parsed.value!;
     const controller = portForwarding();
     if (!controller) { error = "Port forwarding is not ready yet."; return; }
     error = "";
     busy = true;
+    if (!(await controller.saveCatalog(value.target, value.port, label))) { busy = false; error = "Could not save the shared port. Connect or update the host and try again."; return; }
     const result = start
-      ? await controller.forward(value.target, value.port, value)
-      : await controller.save(value.target, value.port, { local: value.local, label: value.label });
+      ? await controller.forward(value.target, value.port, { ...value, bind, autoLocal: value.local === undefined, label: undefined, restore: remember })
+      : true;
     busy = false;
     if (!result || (start && remember && controller.errorOf(value.target, value.port))) {
       const failure = controller.errorOf(value.target, value.port);
@@ -55,18 +59,15 @@
     </label>
   </div>
   <p id={`${id}-local-hint`}>Set a local port to use that exact number.</p>
-  <label class="remember"><input type="checkbox" bind:checked={remember} disabled={busy} aria-describedby={remember ? `${id}-remember-hint` : undefined} /> Remember</label>
-  {#if remember}
-    <label>Label <span>(optional)</span>
-      <input bind:value={label} placeholder="Frontend or API" disabled={busy} />
-    </label>
-    <p id={`${id}-remember-hint`}>Restores when this host connects. Saving without starting uses the remote port unless a local port is set or already forwarded.</p>
-  {/if}
+  <label>Service name on host<input bind:value={label} placeholder="Frontend or API" disabled={busy} /></label>
+  <label>Listen on IP address<input bind:value={bind} placeholder="127.0.0.1" disabled={busy} /></label>
+  <p>127.0.0.1: this computer only. LAN/VPN IP: that interface. 0.0.0.0: all IPv4 interfaces; network clients can access this service.</p>
+  <label class="remember"><input type="checkbox" bind:checked={remember} disabled={busy} aria-describedby={remember ? `${id}-remember-hint` : undefined} /> Automatically forward on this computer</label>
   {#if error}<p id={`${id}-error`} class="error" role="alert">{error}</p>{/if}
   <div class="actions">
     <button class="primary" type="submit" disabled={busy}>{busy ? "Working…" : "Forward"}</button>
     <button type="button" disabled={busy} onclick={onclose}>Cancel</button>
-    {#if remember}<button class="save-only" type="button" disabled={busy} onclick={() => void submit(false)}>Save without starting</button>{/if}
+    <button class="save-only" type="button" disabled={busy} onclick={() => void submit(false)}>Save on host without forwarding</button>
   </div>
 </form>
 

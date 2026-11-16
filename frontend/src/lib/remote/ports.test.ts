@@ -199,3 +199,13 @@ describe("saved forward responses", () => {
     expect(portLists([], [], () => undefined, [frontend, api])[0].rows.map((r) => r.process)).toEqual([undefined, undefined]);
   });
 });
+
+
+it("derives browser addresses from validated numeric bindings and preserves allocation policy", () => {
+  for (const [bind, host] of [["0.0.0.0", "localhost"], ["192.0.2.4", "192.0.2.4"], ["::", "[::1]"], ["2001:db8::1", "[2001:db8::1]"]]) {
+    expect(parseForward({ ...forward("vm1", 3000, 4173), bind, url: "https://invalid.example" })?.url).toBe(`http://${host}:4173`);
+    expect(parseSavedForward({ ...saved(), bind, autoLocal: true })).toMatchObject({ bind, autoLocal: true });
+  }
+  for (const bind of [null, "https://example.com", "localhost", "192.0.2.4:80"]) expect(parseForward({ ...forward("vm1", 3000), bind })).toBeNull();
+  expect(parseSavedForward({ ...saved(), autoLocal: "true" })).toBeNull();
+});

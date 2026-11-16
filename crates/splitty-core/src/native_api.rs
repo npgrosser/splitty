@@ -376,6 +376,8 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "viewer.review",
     "viewer.review_answer",
     "hub.catalog.observe",
+    "ports.save",
+    "ports.remove",
 ];
 
 /// All session operations act on the assigned backend. Disconnect cancels its

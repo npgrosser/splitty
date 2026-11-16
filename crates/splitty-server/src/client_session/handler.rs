@@ -162,6 +162,10 @@ pub(super) async fn run(
                             }
                         } else { None };
                         {
+                            if matches!(value["type"].as_str(), Some("ports.save" | "ports.remove")) {
+                                super::ports::mutate(&client_state, &sender, &value).await;
+                                continue;
+                            }
                             if value["type"] == "hub.catalog.observe" {
                                 if let Some(hub) = hub {
                                     value.as_object_mut().expect("typed observation object").remove("type");

@@ -2,13 +2,16 @@
 //! Only explicit POST and successful host readiness may open a tunnel. Short
 //! map/storage locks never span SSH waits; a lane includes write-failure cleanup.
 
+use splitty_core::native_api::forwards::ForwardOptions;
+use splitty_core::native_api::forwards::{browser_host, default_bind, valid_bind};
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use splitty_remote::ssh::{SshTarget, TargetError};
-use splitty_remote::tunnel::{self, backoff, PortForward, PortReservation};
+use splitty_remote::tunnel::{self, backoff, PortReservation};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 
@@ -212,16 +215,39 @@ impl Forwards {
         automatic: bool,
         preserve_restore: bool,
     ) -> Result<ForwardInfo, ForwardError> {
+        self.open_with_bind(
+            target,
+            port,
+            local,
+            automatic,
+            preserve_restore,
+            ForwardOptions::default(),
+        )
+        .await
+    }
+    pub async fn open_with_bind(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        automatic: bool,
+        preserve_restore: bool,
+        options: ForwardOptions,
+    ) -> Result<ForwardInfo, ForwardError> {
+        let ForwardOptions { bind, auto_local } = options;
+        if bind.is_some_and(|ip| !valid_bind(ip)) {
+            return Err(ForwardError::Invalid("Invalid bind address".into()));
+        }
         let (target, key) = key(target, port)?;
         let local = local.map(check_port).transpose()?;
-        if automatic && local.is_some() {
+        if automatic && (local.is_some() || bind.is_some() || auto_local.is_some()) {
             return Err(ForwardError::Invalid(
                 "automatic forwarding cannot select a local port".into(),
             ));
         }
         self.ordered(key, move |shared, key| async move {
             shared
-                .open_ordered(&target, &key, local, !automatic, preserve_restore)
+                .open_ordered(&target, &key, local, !automatic, preserve_restore, options)
                 .await
         })
         .await
@@ -274,6 +300,29 @@ impl Forwards {
         label: Option<String>,
         enabled: Option<bool>,
     ) -> Result<SavedForward, ForwardError> {
+        self.save_with_bind(
+            target,
+            port,
+            local,
+            label,
+            enabled,
+            ForwardOptions::default(),
+        )
+        .await
+    }
+    pub async fn save_with_bind(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        label: Option<String>,
+        enabled: Option<bool>,
+        options: ForwardOptions,
+    ) -> Result<SavedForward, ForwardError> {
+        let ForwardOptions { bind, auto_local } = options;
+        if bind.is_some_and(|ip| !valid_bind(ip)) {
+            return Err(ForwardError::Invalid("Invalid bind address".into()));
+        }
         let (_, key) = key(target, port)?;
         let local = local.map(check_port).transpose()?;
         if label
@@ -292,17 +341,34 @@ impl Forwards {
             _ => None,
         });
         check_active(local, active)?;
+        let active_bind = state.slots.get(&key).and_then(|slot| match slot {
+            Slot::Open(f) => Some(f.bind),
+            _ => None,
+        });
+        if bind.zip(active_bind).is_some_and(|(a, b)| a != b) {
+            return Err(ForwardError::Invalid(
+                "Stop forwarding before changing its bind address".into(),
+            ));
+        }
         let prior = state.preferences.get(&key);
         let mut row = prior.clone().unwrap_or_else(|| SavedForward {
+            auto_local: false,
             target: key.target.clone(),
             remote: key.remote,
             local: active.unwrap_or(key.remote),
+            bind: active_bind.unwrap_or_else(default_bind),
             label: String::new(),
             enabled: true,
             last_error: None,
         });
         if let Some(local) = local {
             row.local = local;
+        }
+        if let Some(bind) = bind {
+            row.bind = bind;
+        }
+        if let Some(auto_local) = auto_local {
+            row.auto_local = auto_local;
         }
         if let Some(label) = label {
             row.label = label;
@@ -413,7 +479,9 @@ impl Forwards {
                     }
                 }
                 if let Ok(target) = SshTarget::parse(&key.target) {
-                    let _ = shared.open_ordered(&target, &key, None, false, true).await;
+                    let _ = shared
+                        .open_ordered(&target, &key, None, false, true, ForwardOptions::default())
+                        .await;
                 }
             }));
         }
@@ -451,7 +519,9 @@ impl Forwards {
             if lock(&shared.state).slots.contains_key(&key) {
                 return;
             }
-            let _ = shared.open_ordered(&target, &key, None, false, false).await;
+            let _ = shared
+                .open_ordered(&target, &key, None, false, false, ForwardOptions::default())
+                .await;
         });
         let mut tasks = lock(&self.operations);
         tasks.retain(|task| !task.is_finished());
@@ -509,10 +579,11 @@ impl Shared {
         local: Option<u16>,
         explicit: bool,
         preserve_restore: bool,
+        options: ForwardOptions,
     ) -> Result<ForwardInfo, ForwardError> {
         let _changed = ChangedOnDrop(self.changes.clone());
         let result = self
-            .open_inner(target, key, local, explicit, preserve_restore)
+            .open_inner(target, key, local, explicit, preserve_restore, options)
             .await;
         let mut state = lock(&self.state);
         match &result {
@@ -542,7 +613,9 @@ impl Shared {
         local: Option<u16>,
         explicit: bool,
         preserve_restore: bool,
+        options: ForwardOptions,
     ) -> Result<ForwardInfo, ForwardError> {
+        let ForwardOptions { bind, auto_local } = options;
         let saved = {
             let mut state = lock(&self.state);
             let saved = state.preferences.get(key);
@@ -551,6 +624,11 @@ impl Shared {
             }
             if let Some(Slot::Open(forward)) = state.slots.get(key) {
                 check_active(local, Some(forward.local))?;
+                if bind.is_some_and(|ip| ip != forward.bind) {
+                    return Err(ForwardError::Invalid(
+                        "Stop forwarding before changing its bind address".into(),
+                    ));
+                }
                 let info = forward.info(key);
                 if explicit {
                     if let Some(mut row) = saved {
@@ -558,6 +636,10 @@ impl Shared {
                             row.enabled = true;
                         }
                         row.local = info.local;
+                        row.bind = info.bind;
+                        if let Some(auto_local) = auto_local {
+                            row.auto_local = auto_local;
+                        }
                         state.preferences.put(row)?;
                     }
                 }
@@ -581,8 +663,18 @@ impl Shared {
             shared: self.clone(),
             key: key.clone(),
         };
-        let exact = local.or_else(|| saved.as_ref().map(|row| row.local));
-        let forward = self.start(target, key.remote, exact).await?;
+        let automatic_local = auto_local
+            .or_else(|| saved.as_ref().map(|row| row.auto_local))
+            .unwrap_or(false);
+        let exact = local.or_else(|| {
+            (!automatic_local)
+                .then(|| saved.as_ref().map(|row| row.local))
+                .flatten()
+        });
+        let bind = bind
+            .or_else(|| saved.as_ref().map(|row| row.bind))
+            .unwrap_or_else(default_bind);
+        let forward = self.start(target, key.remote, exact, bind).await?;
         let info = forward.info(key);
         let commit = {
             let mut state = lock(&self.state);
@@ -592,6 +684,10 @@ impl Shared {
                         row.enabled = true;
                     }
                     row.local = info.local;
+                    row.bind = info.bind;
+                    if let Some(auto_local) = auto_local {
+                        row.auto_local = auto_local;
+                    }
                     state.preferences.put(row)
                 } else {
                     Ok(())
@@ -615,18 +711,20 @@ impl Shared {
         target: &SshTarget,
         remote: u16,
         exact: Option<u16>,
+        bind: IpAddr,
     ) -> Result<Supervised, ForwardError> {
+        let reserve = |port| -> std::io::Result<PortReservation> {
+            let held = PortReservation::acquire_at(bind, port)?;
+            held.check_forward_address()?;
+            Ok(held)
+        };
         let reservation = match exact {
-            Some(port) => tunnel::reserve_exact(port)
-                .map_err(|source| ForwardError::LocalConflict { port, source })?,
-            None => {
-                tunnel::reserve(PortForward {
-                    local: remote,
-                    remote,
-                })
-                .map_err(|error| ForwardError::Failed(HubError::ForwardPort(error)))?
-                .1
+            Some(port) => {
+                reserve(port).map_err(|source| ForwardError::LocalConflict { port, source })?
             }
+            None => reserve(remote)
+                .or_else(|_| tunnel::reserve_free_at(bind))
+                .map_err(|error| ForwardError::Failed(HubError::ForwardPort(error)))?,
         };
         let local = reservation.port();
         let mut forwarding = self
@@ -642,7 +740,7 @@ impl Shared {
             })?;
         // Connector setup may await after the reservation check. Never expose
         // a tunnel whose localhost address was taken by IPv6 during that wait.
-        if let Err(source) = tunnel::check_forward_address(local) {
+        if let Err(source) = PortReservation::check_bind(bind, local) {
             forwarding.stop().await;
             return Err(ForwardError::LocalConflict {
                 port: local,
@@ -657,11 +755,12 @@ impl Shared {
             remote,
             local,
             forwarding,
-            (up.clone(), self.changes.clone()),
+            (up.clone(), self.changes.clone(), bind),
             stopped,
         ));
         Ok(Supervised {
             local,
+            bind,
             up,
             stop: Some(stop),
             task,
@@ -725,6 +824,7 @@ impl Drop for Pending {
 
 /// An open forward and the task that keeps it. Dropping it ends both.
 struct Supervised {
+    bind: IpAddr,
     local: u16,
     up: Arc<AtomicBool>,
     stop: Option<oneshot::Sender<()>>,
@@ -737,7 +837,8 @@ impl Supervised {
             target: key.target.clone(),
             remote: key.remote,
             local: self.local,
-            url: format!("http://localhost:{}", self.local),
+            bind: self.bind,
+            url: format!("http://{}:{}", browser_host(self.bind), self.local),
             state: if self.up.load(Ordering::SeqCst) {
                 ForwardState::Up
             } else {
@@ -773,7 +874,7 @@ async fn supervise(
     remote: u16,
     local: u16,
     mut forwarding: Box<dyn Forwarding>,
-    (up, changes): (Arc<AtomicBool>, super::Changes),
+    (up, changes, bind): (Arc<AtomicBool>, super::Changes, IpAddr),
     mut stop: oneshot::Receiver<()>,
 ) {
     let host = target.as_str();
@@ -786,7 +887,7 @@ async fn supervise(
             reason = forwarding.ended() => reason,
         };
         // Take the port back before another process can (SR-13).
-        let mut held = PortReservation::acquire_port(local).ok();
+        let mut held = PortReservation::acquire_at(bind, local).ok();
         up.store(false, Ordering::SeqCst);
         changes.send();
         tracing::info!(
@@ -800,15 +901,14 @@ async fn supervise(
                 let attempt = async {
                     let reservation = match held.take() {
                         Some(reservation) => reservation,
-                        None => {
-                            PortReservation::acquire_port(local).map_err(HubError::ForwardPort)?
-                        }
+                        None => PortReservation::acquire_at(bind, local)
+                            .map_err(HubError::ForwardPort)?,
                     };
                     reservation
                         .check_forward_address()
                         .map_err(HubError::ForwardPort)?;
                     let mut forwarding = connector.forward(&target, reservation, remote).await?;
-                    if let Err(error) = tunnel::check_forward_address(local) {
+                    if let Err(error) = PortReservation::check_bind(bind, local) {
                         forwarding.stop().await;
                         return Err(HubError::ForwardPort(error));
                     }
@@ -831,7 +931,7 @@ async fn supervise(
             match result {
                 Ok(forwarding) => break forwarding,
                 Err(error) => {
-                    held = PortReservation::acquire_port(local).ok();
+                    held = PortReservation::acquire_at(bind, local).ok();
                     let wait = backoff(failures);
                     failures += 1;
                     tracing::info!(
@@ -980,6 +1080,7 @@ mod tests {
         lock(&manager.shared.state).slots.insert(
             key,
             Slot::Open(Supervised {
+                bind: default_bind(),
                 local: 5173,
                 up: Arc::new(AtomicBool::new(true)),
                 stop: Some(stop),
@@ -1473,5 +1574,91 @@ mod tests {
         assert!(manager.preferences().forwards.is_empty());
         assert!(manager.list().is_empty());
         assert!(TcpListener::bind(("127.0.0.1", local)).is_ok());
+    }
+    #[tokio::test]
+    async fn network_binding_and_automatic_local_selection_survive_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path());
+        let manager = forwards_manager(&host, dir.path());
+        let busy = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let remote = busy.local_addr().unwrap().port();
+        let bind: IpAddr = "0.0.0.0".parse().unwrap();
+        let options = ForwardOptions {
+            bind: Some(bind),
+            auto_local: Some(true),
+        };
+        manager
+            .save_with_bind("vm1", remote.into(), None, None, Some(true), options)
+            .await
+            .unwrap();
+        manager.restore("vm1");
+        settle(&manager).await;
+        let live = manager.list().pop().unwrap();
+        assert_ne!(
+            live.local, remote,
+            "an automatic saved rule can use a free port"
+        );
+        assert_eq!(live.bind, bind);
+        assert!(
+            std::net::TcpStream::connect(("127.0.0.2", live.local)).is_ok(),
+            "wildcard listener reaches other local interfaces"
+        );
+        assert!(
+            manager
+                .open_with_bind(
+                    "vm1",
+                    remote.into(),
+                    None,
+                    false,
+                    true,
+                    ForwardOptions {
+                        bind: Some(default_bind()),
+                        auto_local: None
+                    }
+                )
+                .await
+                .is_err(),
+            "changing visibility requires stopping first"
+        );
+        host.end_forward(remote);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while host
+                .asked()
+                .iter()
+                .filter(|call| call.starts_with("forward "))
+                .count()
+                < 2
+                || manager.list()[0].state != ForwardState::Up
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.list()[0].local,
+            live.local,
+            "rebuild retains the established address"
+        );
+        assert!(std::net::TcpStream::connect(("127.0.0.2", live.local)).is_ok());
+        manager.stop("vm1", remote.into()).await.unwrap();
+        assert!(TcpListener::bind((bind, live.local)).is_ok());
+        let saved = manager.preferences().forwards.pop().unwrap();
+        assert!(saved.auto_local);
+        assert_eq!(saved.bind, bind);
+        assert!(
+            manager
+                .open_with_bind(
+                    "vm1",
+                    remote.into(),
+                    Some(remote.into()),
+                    false,
+                    true,
+                    ForwardOptions::default()
+                )
+                .await
+                .is_err(),
+            "explicit ports never silently move"
+        );
     }
 }

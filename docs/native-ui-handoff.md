@@ -55,10 +55,8 @@ Keep temporary fixture paths short enough for Unix sockets.
   pane counts; the service keeps its stored ones (`hub-host-state-v1`; an
   older service is sent nothing). Remembered remote Screens are written per
   host (`remoteScreens.updateHost`); an older service is only read.
-- Ports: the window shows detected ports, forwards and saved rules and starts
-  forwards only on explicit actions. `remote.autoForwardPorts` is the
-  service's (`hub-auto-forward-v1`, `splitty_server::hub::auto_forward`); the
-  window has no automatic forwarding of its own.
+- Ports: each daemon owns a durable shared catalog (`port-catalog-v1`), including names and manually added services. Native clients merge it with session-scoped discovery and local forwarding state. Host naming/removal and local port/bind/restoration controls are separate. Local bindings default to loopback; explicit LAN/VPN or wildcard bindings and automatic free-port selection are supported. Established tunnels retain their address across rebuilds. `remote.autoForwardPorts` still belongs to the local service; catalog edits never trigger it. Legacy personal names can be copied explicitly with Save on host; connecting does not overwrite shared names.
+
 - One captured local/remote rename editor: double-click/F2/context menu;
   Enter/Blur commit, Escape cancels. Names change only after canonical readback.
   Hover actions have a fixed lane, preserving title hitboxes and a full tooltip.

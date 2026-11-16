@@ -11,6 +11,21 @@ use crate::mux::{ScreenInfo, ScreenState};
 use crate::pty::ports::ListeningPort;
 use crate::pty::status::ProgramStatus;
 
+/// A service remembered on this daemon, independently of a listening process.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPort {
+    pub port: u16,
+    pub name: String,
+}
+impl CatalogPort {
+    pub fn is_valid(&self) -> bool {
+        self.port != 0
+            && self.name.chars().count() <= 200
+            && !self.name.chars().any(char::is_control)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client → Server message types (used for request dispatching)
 // ---------------------------------------------------------------------------
@@ -303,6 +318,15 @@ pub enum ServerEvent {
         id: String,
         timestamp: i64,
         ports: Vec<ListeningPort>,
+    },
+
+    #[serde(rename = "ports.catalog", rename_all = "camelCase")]
+    PortCatalog {
+        revision: u64,
+        id: String,
+        timestamp: i64,
+        ports: Vec<CatalogPort>,
+        error: Option<String>,
     },
 
     // -- Program status -----------------------------------------------------
@@ -795,6 +819,16 @@ impl ServerEvent {
             id: generate_event_id(),
             timestamp: now_millis(),
             command,
+        }
+    }
+
+    pub fn port_catalog(ports: Vec<CatalogPort>, error: Option<String>, revision: u64) -> Self {
+        Self::PortCatalog {
+            revision,
+            id: generate_event_id(),
+            timestamp: now_millis(),
+            ports,
+            error,
         }
     }
 

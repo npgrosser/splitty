@@ -17,6 +17,7 @@ use splitty_core::protocol::capability;
 /// The `mux.welcome` capability `kind` needs, if any.
 pub(super) fn required_capability(kind: &CommandKind) -> Option<&'static str> {
     match kind {
+        CommandKind::ManagePortCatalog { .. } => Some(capability::PORT_CATALOG),
         CommandKind::MoveGroup { .. } => Some(capability::LAYOUT_ARRANGE),
         CommandKind::TransferGroup { .. } => Some(capability::TAB_GROUP_TRANSFER),
         _ => None,
