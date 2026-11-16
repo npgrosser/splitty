@@ -360,6 +360,8 @@ fn main() -> anyhow::Result<()> {
         );
         let result = gpui_kit::open_window(
             WindowOptions {
+                // Match the installed splitty.desktop entry on Wayland and X11.
+                app_id: cfg!(target_os = "linux").then(|| "splitty".into()),
                 window_bounds: Some(WindowBounds::centered(size(px(1200.), px(760.)), cx)),
                 titlebar: Some(TitlebarOptions {
                     title: Some(

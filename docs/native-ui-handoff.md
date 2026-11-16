@@ -333,6 +333,9 @@ connection failed as incompatible are not shown outside the update offer.
   executable and the WSL backend archive into a per-user NSIS installer that
   replaces the web app of earlier releases in place; the app starts without
   arguments and installs its backend into the chosen distribution.
+- Linux main and SSH prompt windows use `app_id` / `WM_CLASS` `splitty`, matching
+  `splitty.desktop` and its `StartupWMClass`, so the desktop can associate running
+  windows with the launcher icon and taskbar entry.
 - CI lints and tests the app with the workspace on Linux, builds it on macOS
   and Windows, packs the Linux packages on Ubuntu 22.04 (installing the deb)
   and packs the macOS disk image. The release workflow publishes the native
@@ -355,9 +358,7 @@ connection failed as incompatible are not shown outside the update offer.
   obligations. Its checklist is not superseded wholesale by these two changes.
   Inspect source and each task before accepting additional parity claims.
 - Packaging: the macOS disk image and the Windows installer are built only on
-  their CI runners; watch the first CI and release runs. The app sets no
-  window `app_id`, so Linux desktops cannot yet match its windows to
-  `splitty.desktop` (no `StartupWMClass`). CI compiles the app's tests on
+  their CI runners; watch the first CI and release runs. CI compiles the app's tests on
   Windows and macOS but runs them on Linux only. There is no native AppImage,
   no native package for Intel Macs or aarch64 Linux, and the macOS app's
   minimum system version is whatever the build's linker targets; it is tested
