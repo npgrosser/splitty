@@ -8,6 +8,12 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-window-chrome` NWC-1 to NWC-4** (2026-11-17, provisional, tbd; recorded in the change's design):
+  - **NWC-1:** independent interface, decoration, title-bar colors and button policy. Alternative: coupled appearance presets.
+  - **NWC-2:** built-in desktop interface profile plus pinned component/renderer support for rounded client silhouettes. Alternatives: GTK integration or waiting for upstream clipping support.
+  - **NWC-3:** macOS/Windows apply native/custom decoration changes on restart from confirmed appearance. Alternative: recreate active windows.
+  - **NWC-4:** all three client window buttons by default, with desktop layout as a choice. Alternative: default to the desktop layout, often Close only on GNOME.
+
 - **`native-remembered-appearance` NRA-1 to NRA-3** (2026-11-15, provisional, tbd; recorded in the change's proposal, behavior in the `settings` spec):
   - **NRA-1:** the native app keeps the appearance selection it last applied in `last-appearance.json` in the configuration directory of the computer it runs on (Windows `%APPDATA%\splitty\`), as a private file; the directory follows `SPLITTY_CONFIG_DIR`. Alternatives: the platform's cache directory, or the Windows state file that holds the chosen distribution.
   - **NRA-2:** one file for all windows and instances, whichever WSL distribution the backend runs in; the last applied appearance wins, and a smoke run or an explicit WSL target neither reads nor writes it. Alternative: one remembered selection per distribution.

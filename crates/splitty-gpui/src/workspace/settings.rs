@@ -21,6 +21,10 @@ use std::rc::Rc;
 use uuid::Uuid;
 
 const APPEARANCE: &[SettingsField] = &[
+    SettingsField::InterfaceStyle,
+    SettingsField::WindowDecoration,
+    SettingsField::TitleBarStyle,
+    SettingsField::WindowButtons,
     SettingsField::ThemeMode,
     SettingsField::Theme,
     SettingsField::ThemeDark,
@@ -823,7 +827,11 @@ impl SettingsView {
             | SettingsField::NotificationProcessExited
             | SettingsField::NotificationProcessCrashed
             | SettingsField::NotificationProgramStatus => None,
-            SettingsField::ThemeMode
+            SettingsField::InterfaceStyle
+            | SettingsField::WindowDecoration
+            | SettingsField::WindowButtons
+            | SettingsField::TitleBarStyle
+            | SettingsField::ThemeMode
             | SettingsField::ZoomScope
             | SettingsField::CloseOnExit
             | SettingsField::EditorFile
@@ -1067,8 +1075,22 @@ impl SettingsView {
         let owner = self.owner;
         let current = self.value(field);
         let default = self.default_value(field);
-        let enabled = self.enabled(field);
-        let disabled_reason = if current.is_none() {
+        let uses_system =
+            self.value(SettingsField::InterfaceStyle) == Some(SettingsValue::Text("system".into()));
+        let theme_owned = matches!(
+            field,
+            SettingsField::ThemeMode
+                | SettingsField::Theme
+                | SettingsField::ThemeDark
+                | SettingsField::ThemeLight
+                | SettingsField::FontSize
+                | SettingsField::FontFamily
+        );
+        let system_owned = uses_system && theme_owned;
+        let enabled = self.enabled(field) && !system_owned;
+        let disabled_reason = if system_owned {
+            Some("Managed by System interface style; your theme selection is kept")
+        } else if current.is_none() {
             Some("Connecting to local settings")
         } else if self.writes.contains_key(&field) {
             None
@@ -1326,6 +1348,10 @@ impl Render for SettingsView {
 
 fn field_label(field: SettingsField) -> &'static str {
     match field {
+        SettingsField::InterfaceStyle => "Interface style",
+        SettingsField::WindowDecoration => "Window decoration",
+        SettingsField::WindowButtons => "Window buttons",
+        SettingsField::TitleBarStyle => "Title bar colors",
         SettingsField::ThemeMode => "Theme mode",
         SettingsField::Theme => "Theme",
         SettingsField::ThemeDark => "Dark theme",
@@ -1362,6 +1388,26 @@ fn field_label(field: SettingsField) -> &'static str {
 
 fn field_description(field: SettingsField) -> &'static str {
     match field {
+        SettingsField::InterfaceStyle => {
+            "System colors, typography and spacing, or your selected theme"
+        }
+        SettingsField::WindowDecoration => {
+            if cfg!(target_os = "linux") {
+                "Desktop frame and controls, or Splitty's compact frame"
+            } else {
+                "System or Splitty frame. Restart Splitty to apply a change"
+            }
+        }
+        SettingsField::WindowButtons => {
+            "Desktop layout or minimize, maximize and close; native OS frames keep their controls"
+        }
+        SettingsField::TitleBarStyle => {
+            if cfg!(target_os = "linux") {
+                "Color the title bar independently of its style"
+            } else {
+                "System or interface colors. Restart Splitty to apply a change"
+            }
+        }
         SettingsField::ThemeMode => "Follow the system or use one theme",
         SettingsField::Theme => "Used when theme mode is fixed",
         SettingsField::ThemeDark => "Used when the system is dark",
@@ -1419,6 +1465,14 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
             "Follow interface theme".into()
         }
         SettingsValue::Text(text) => match (field, text.as_str()) {
+            (SettingsField::InterfaceStyle, "system") => "System".into(),
+            (SettingsField::InterfaceStyle, "theme") => "Splitty theme".into(),
+            (SettingsField::WindowDecoration, "system") => "System".into(),
+            (SettingsField::WindowDecoration, "splitty") => "Splitty".into(),
+            (SettingsField::WindowButtons, "system") => "System layout".into(),
+            (SettingsField::WindowButtons, "all") => "All three".into(),
+            (SettingsField::TitleBarStyle, "system") => "System".into(),
+            (SettingsField::TitleBarStyle, "theme") => "Match app theme".into(),
             (SettingsField::ThemeMode, "auto") => "Follow system".into(),
             (SettingsField::ThemeMode, "fixed") => "Fixed".into(),
             (SettingsField::ZoomScope, "window") => "Whole window".into(),

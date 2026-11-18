@@ -41,3 +41,10 @@ actual calloop idle fairness plus explicit wakeup without an fd event. The XIM
 filter/dispatch body is unchanged; the unit test checks its ordered message
 input, not a real input-method server. Actual X11 application acceptance is
 required alongside these tests to establish input/output progress under typing.
+
+## Rounded client frames
+
+Wayland and X11 pass the current scaled client frame and corner radii to the
+pinned renderer on each draw, including after resize, tiling and GPU recovery.
+Server-decorated windows disable the mask. The component wrapper remains the
+owner of frame radius; platform code does not select themes or desktop styles.

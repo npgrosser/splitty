@@ -17,6 +17,14 @@ const MAX_BYTES: u64 = 16 * 1024;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RememberedAppearance {
+    #[serde(default = "default_title_bar_style")]
+    pub interface_style: String,
+    #[serde(default = "default_window_decoration")]
+    pub window_decoration: String,
+    #[serde(default = "default_window_buttons")]
+    pub window_buttons: String,
+    #[serde(default = "default_title_bar_style")]
+    pub title_bar_style: String,
     pub theme_mode: String,
     pub theme: String,
     pub theme_dark: String,
@@ -32,11 +40,26 @@ pub struct RememberedAppearance {
     pub terminal_theme_light: String,
 }
 
+fn default_window_decoration() -> String {
+    "system".into()
+}
+fn default_window_buttons() -> String {
+    "all".into()
+}
+
+fn default_title_bar_style() -> String {
+    "theme".into()
+}
+
 impl RememberedAppearance {
     pub fn from_snapshot(snapshot: &AppearanceSnapshot) -> Self {
         let settings = snapshot.settings();
         let terminal = snapshot.terminal();
         Self {
+            interface_style: settings.interface_style.clone(),
+            window_decoration: settings.window_decoration.clone(),
+            window_buttons: settings.window_buttons.clone(),
+            title_bar_style: settings.title_bar_style.clone(),
             theme_mode: settings.theme_mode.clone(),
             theme: settings.theme.clone(),
             theme_dark: settings.theme_dark.clone(),
@@ -122,6 +145,10 @@ mod tests {
 
     fn appearance() -> RememberedAppearance {
         RememberedAppearance {
+            interface_style: "theme".into(),
+            window_decoration: "system".into(),
+            window_buttons: "all".into(),
+            title_bar_style: "theme".into(),
             theme_mode: "auto".into(),
             theme: "splitty-dark".into(),
             theme_dark: "tokyo-night".into(),
@@ -138,6 +165,39 @@ mod tests {
 
     fn directory() -> PathBuf {
         std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4().simple()))
+    }
+
+    #[test]
+    fn decoration_selection_survives_cache_and_old_caches_default_to_theme() {
+        let mut selection = appearance();
+        selection.title_bar_style = "system".into();
+        selection.interface_style = "system".into();
+        selection.window_decoration = "splitty".into();
+        selection.window_buttons = "system".into();
+        let value = serde_json::to_value(&selection).unwrap();
+        assert_eq!(
+            serde_json::from_value::<RememberedAppearance>(value.clone()).unwrap(),
+            selection
+        );
+        let mut old = value;
+        for key in [
+            "titleBarStyle",
+            "interfaceStyle",
+            "windowDecoration",
+            "windowButtons",
+        ] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let restored = serde_json::from_value::<RememberedAppearance>(old.clone()).unwrap();
+        assert_eq!(restored.interface_style, "theme");
+        assert_eq!(restored.window_decoration, "system");
+        assert_eq!(restored.window_buttons, "all");
+        assert_eq!(
+            serde_json::from_value::<RememberedAppearance>(old)
+                .unwrap()
+                .title_bar_style,
+            "theme"
+        );
     }
 
     #[test]

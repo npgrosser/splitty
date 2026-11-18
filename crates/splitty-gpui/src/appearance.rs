@@ -18,6 +18,7 @@ use std::rc::Rc;
 
 mod catalog;
 mod palette;
+pub mod titlebar;
 
 pub use catalog::{ChromeBlock, Maybe, ThemeCatalog, UiTheme};
 pub use palette::TerminalPalette;
@@ -39,6 +40,10 @@ pub struct TabAccent {
 
 #[derive(Clone, Debug)]
 pub struct NativeAppearance {
+    pub system_style: bool,
+    pub window_decoration: titlebar::WindowDecoration,
+    pub window_buttons: titlebar::WindowButtons,
+    pub title_bar_style: titlebar::TitleBarStyle,
     pub surface: u32,
     pub raised: u32,
     pub overlay: u32,
@@ -104,8 +109,33 @@ pub struct ThemeSelection<'a> {
 const DEFAULT_FONT_SIZE: f32 = 12.;
 
 impl NativeAppearance {
+    fn system_theme(scheme: ColorScheme) -> &'static str {
+        match scheme {
+            ColorScheme::Dark => "adwaita-dark",
+            ColorScheme::Light => "adwaita-light",
+        }
+    }
+
+    /// System mode owns its typography and density. Named theme preferences stay saved.
+    pub fn apply_desktop(&mut self, cx: &App) {
+        if !self.system_style {
+            return;
+        }
+        if let Some(desktop) = cx.try_global::<titlebar::DesktopAppearance>() {
+            self.font_family = desktop.font.family.clone();
+            self.font_size = desktop.font.size;
+            self.tab_font_size = desktop.font.size;
+            self.tab_height = if desktop.gnome { 38. } else { 34. };
+            self.radius = if desktop.gnome { 12. } else { 6. };
+        }
+    }
+
     pub fn fallback(ui_family: &str) -> Self {
         Self {
+            system_style: false,
+            window_decoration: titlebar::WindowDecoration::System,
+            window_buttons: titlebar::WindowButtons::All,
+            title_bar_style: titlebar::TitleBarStyle::Theme,
             surface: 0x10151c,
             raised: 0x18232f,
             overlay: 0x293b4d,
@@ -152,7 +182,11 @@ impl NativeAppearance {
         let terminal = snapshot.terminal();
         let mut result = Self::resolve(
             &ThemeSelection {
-                ui_theme: snapshot.ui_theme(),
+                ui_theme: if settings.interface_style == "system" {
+                    Self::system_theme(snapshot.os_scheme())
+                } else {
+                    snapshot.ui_theme()
+                },
                 os_scheme: snapshot.os_scheme(),
                 terminal_theme: terminal.theme(),
                 terminal_theme_dark: terminal.theme_dark(),
@@ -165,6 +199,11 @@ impl NativeAppearance {
             ui_family,
             mono_family,
         );
+        result.title_bar_style = titlebar::TitleBarStyle::from_setting(&settings.title_bar_style);
+        result.system_style = settings.interface_style == "system";
+        result.window_decoration =
+            titlebar::WindowDecoration::from_setting(&settings.window_decoration);
+        result.window_buttons = titlebar::WindowButtons::from_setting(&settings.window_buttons);
         // The levels to step through and show: the service's limits, or the
         // fallback ones of a service without metadata.
         result.zoom_steps = ZoomSteps::from_limits(snapshot.limits(SettingsField::Zoom));
@@ -185,7 +224,11 @@ impl NativeAppearance {
     ) -> Self {
         let mut result = Self::resolve(
             &ThemeSelection {
-                ui_theme: remembered.ui_theme(os_scheme),
+                ui_theme: if remembered.interface_style == "system" {
+                    Self::system_theme(os_scheme)
+                } else {
+                    remembered.ui_theme(os_scheme)
+                },
                 os_scheme,
                 terminal_theme: &remembered.terminal_theme,
                 terminal_theme_dark: &remembered.terminal_theme_dark,
@@ -198,6 +241,11 @@ impl NativeAppearance {
             ui_family,
             mono_family,
         );
+        result.title_bar_style = titlebar::TitleBarStyle::from_setting(&remembered.title_bar_style);
+        result.system_style = remembered.interface_style == "system";
+        result.window_decoration =
+            titlebar::WindowDecoration::from_setting(&remembered.window_decoration);
+        result.window_buttons = titlebar::WindowButtons::from_setting(&remembered.window_buttons);
         result.zoom =
             Zoom::from_values(remembered.zoom, &remembered.zoom_scope, &result.zoom_steps);
         result
@@ -787,6 +835,10 @@ mod tests {
     fn a_remembered_selection_resolves_as_the_settings_it_was_taken_from() {
         let catalog = ThemeCatalog::load(None);
         let mut remembered = RememberedAppearance {
+            interface_style: "theme".into(),
+            window_decoration: "system".into(),
+            window_buttons: "all".into(),
+            title_bar_style: "theme".into(),
             theme_mode: "auto".into(),
             theme: "splitty-dark".into(),
             theme_dark: "splitty-dark".into(),
@@ -802,6 +854,17 @@ mod tests {
         let shown = |remembered: &RememberedAppearance, scheme| {
             NativeAppearance::from_remembered(remembered, scheme, &catalog, &[], "UI", "Mono")
         };
+        let original = remembered.clone();
+        remembered.interface_style = "system".into();
+        let system = shown(&remembered, ColorScheme::Light);
+        assert!(system.system_style);
+        assert_eq!(system.scheme, ColorScheme::Light);
+        assert_eq!(
+            system.surface,
+            resolve(&selection("adwaita-light"), &catalog).surface
+        );
+        remembered.interface_style = "theme".into();
+        assert_eq!(remembered, original);
         let light = shown(&remembered, ColorScheme::Light);
         let expected = resolve(
             &ThemeSelection {

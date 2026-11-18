@@ -3482,6 +3482,13 @@ interface HubCatalogObservation {
 // { error: string, field: dottedFieldPath }; no change is persisted.
 // A field with `values` takes only a listed value; numbers compare by value.
 // terminal.xterm.scrollSensitivity and fastScrollSensitivity accept fractions.
+// appearance.titleBarStyle is "system" | "theme" (default "theme"); it selects
+// title-bar colors independently of geometry and application/terminal themes.
+// appearance.interfaceStyle is "system" | "theme" (default "theme").
+// appearance.windowDecoration is "system" | "splitty" (default "system").
+// appearance.windowButtons is "system" | "all" (default "all"); OS-owned frames
+// may retain their own controls. All four fields are metadata-gated native choices.
+// Legacy window.nativeTitleBar/titleBarColorMode remain separate web-shell settings.
 // appearance.zoom lists the zoom levels clients step through and offer as its
 // `values` (with min and max, no step); older servers publish
 // { min: 0.5, max: 3, step: 0.1 } and accept any level in that range.

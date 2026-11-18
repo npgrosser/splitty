@@ -228,6 +228,49 @@ not tried in a running window either.
 - The Ghostty engine boundary remains separate from GPUI rendering. Existing
   web/xterm workarounds are not automatically native feature requirements.
 
+## Window chrome
+
+Appearance separates interface styling, window decoration, title-bar colors and
+window buttons. `appearance/titlebar.rs` resolves geometry and color sources;
+`chrome.rs` renders the result and delegates close intent to the workspace. The
+interface's System profile follows desktop light/dark and typography while
+preserving the saved named theme and font choices. See
+[themes](themes.md#native-appearance-and-window-decoration).
+
+The GNOME decoration profile uses libadwaita header metrics: 34px hit targets,
+3px control spacing, 24px circular faces, original 16px symbolic canvases and a
+bold title. Inactive titles and controls dim together. The separate local icon
+adapter resolves four symbolic SVGs from XDG icon directories and recursive
+theme inheritance, then installed hicolor/Adwaita fallbacks. It bounds reads and
+inheritance, validates SVGs with GPUI, and retains only their bytes. Portal theme
+changes reload them on the background executor; rendering does no filesystem
+lookup. Unavailable symbols use the existing Kit icons. No GTK dependency or
+copied Adwaita artwork is needed; arbitrary GTK CSS remains outside this profile.
+
+Header side padding accounts for Adwaita's negative horizontal margin and the
+actual client border width, including tiled and maximized edges. The pinned
+Linux text adapter preserves variable-font weights through selection, shaping,
+metrics and rasterization; requesting Bold must not resolve to the Regular
+instance of the same font. Renderer regression tests use original miniature
+font fixtures, not bundled desktop fonts.
+
+Geometry follows the [libadwaita 1.10 header stylesheet](https://github.com/GNOME/libadwaita/blob/1.10.0/src/stylesheet/widgets/_header-bar.scss).
+The icon adapter implements the SVG window-control subset of the
+[freedesktop icon-theme lookup rules](https://specifications.freedesktop.org/icon-theme/latest/).
+
+Linux client frames use a per-window radius in the pinned component wrapper.
+The pinned WGPU renderer clips every content primitive to the same silhouette;
+window shadows keep their rounded geometry outside it. This is window-wide
+clipping, independent of GPUI's rectangular element masks. Wayland and X11 pass
+current scaled frame bounds and radii on every draw. Maximized and tiled corners
+are square where they meet the screen edge. Keep vendor archive/file hashes and
+licenses, and replace the patches only after equivalent upstream support passes
+real-window and GPU readback checks.
+
+macOS/Windows choose native versus custom decoration at startup and need a
+restart after changing decoration or title-bar colors. Their native caption
+behavior needs visual validation on those platforms.
+
 ## Themes
 
 The app resolves UI themes and terminal palettes in its own catalog

@@ -3,12 +3,12 @@ use x11rb::connection::RequestConnection;
 
 use crate::linux::X11ClientStatePtr;
 use gpui::{
-    AnyWindowHandle, Bounds, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs, Modifiers,
-    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
-    Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowKind, WindowParams, WindowVisibility, popup::PopupNotSupportedError,
-    px,
+    AnyWindowHandle, Bounds, Corners, Decorations, DevicePixels, ForegroundExecutor, GpuSpecs,
+    Modifiers, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge,
+    ScaledPixels, Scene, Size, Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowControlArea, WindowDecorations, WindowKind, WindowParams, WindowVisibility,
+    popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
@@ -291,6 +291,7 @@ pub struct X11WindowState {
     edge_constraints: Option<EdgeConstraints>,
     pub handle: AnyWindowHandle,
     last_insets: [u32; 4],
+    client_corner_radii: Corners<Pixels>,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
 }
 
@@ -854,6 +855,7 @@ impl X11WindowState {
                 client_side_decorations_supported,
                 decorations: WindowDecorations::Server,
                 last_insets: [0, 0, 0, 0],
+                client_corner_radii: Corners::default(),
                 edge_constraints: None,
                 accesskit_adapter: None,
                 counter_id: sync_request_counter,
@@ -1775,6 +1777,21 @@ impl PlatformWindow for X11Window {
             return;
         }
 
+        let [left, right, top, bottom] = inner.last_insets.map(|v| v as f32);
+        let extent = renderer.viewport_size();
+        let frame = Bounds::new(
+            gpui::point(ScaledPixels(left), ScaledPixels(top)),
+            gpui::size(
+                ScaledPixels(extent.width.0 as f32 - left - right),
+                ScaledPixels(extent.height.0 as f32 - top - bottom),
+            ),
+        );
+        let radii = if inner.decorations == WindowDecorations::Client {
+            inner.client_corner_radii.scale(inner.scale_factor)
+        } else {
+            Corners::default()
+        };
+        renderer.set_client_frame(frame, radii);
         renderer.draw(scene);
 
         if renderer.needs_redraw() {
@@ -1866,6 +1883,10 @@ impl PlatformWindow for X11Window {
                 Decorations::Client { tiling }
             }
         }
+    }
+
+    fn set_client_corner_radii(&self, radii: Corners<Pixels>) {
+        self.0.state.borrow_mut().client_corner_radii = radii;
     }
 
     fn set_client_inset(&self, inset: Pixels) {

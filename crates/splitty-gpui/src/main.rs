@@ -6,6 +6,7 @@
 mod app;
 mod appearance;
 mod askpass;
+mod chrome;
 mod document;
 mod offscreen;
 mod startup;
@@ -13,7 +14,10 @@ mod terminal;
 mod terminal_engine;
 mod workspace;
 
-use gpui_kit::component::{ActiveTheme as _, TitleBar};
+use appearance::titlebar::{
+    DecorationProfile, DesktopAppearance, DesktopWindowIcons, SystemFont, TitleBarAppearance,
+    TitleBarStyle, WindowDecoration,
+};
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::{
@@ -26,14 +30,7 @@ use std::{
     time::Duration,
 };
 
-/// Windows and macOS hide the system title bar of a workspace window and draw
-/// it in the theme's colors; macOS keeps its native window buttons.
-const CUSTOM_TITLEBAR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
-/// The web client's title bar height.
-const MACOS_TITLE_BAR_HEIGHT: Pixels = px(36.);
-/// Keeps the centered title clear of the window buttons on both sides.
-const MACOS_TITLE_INSET: Pixels = px(80.);
-/// Centers the native window buttons vertically in the 36 px bar.
+/// Centers native macOS traffic lights in the themed 36 px header.
 const MACOS_TRAFFIC_LIGHTS: Point<Pixels> = Point {
     x: px(9.),
     y: px(10.),
@@ -46,6 +43,14 @@ struct RootView {
     _title_subscription: Option<Subscription>,
     /// The window draws its own title bar in the theme's colors.
     custom_titlebar: bool,
+    startup_title_bar_style: TitleBarStyle,
+    startup_window_decoration: WindowDecoration,
+    requested_decoration: Option<WindowDecorations>,
+    gnome: bool,
+    system_font: SystemFont,
+    _desktop_observers: Vec<Subscription>,
+    #[cfg(target_os = "linux")]
+    _desktop_settings_task: Task<()>,
     waiting_for_appearance: bool,
     appearance_subscription: Option<Subscription>,
     reveal_timeout: Option<Task<()>>,
@@ -54,12 +59,111 @@ impl RootView {
     fn new(
         content: AnyView,
         workspace: Option<&Entity<workspace::Workspace>>,
+        title_bar_style: TitleBarStyle,
+        window_decoration: WindowDecoration,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Windows applies a hidden window's initial placement on activation.
         let windows_chrome = cfg!(target_os = "windows") && workspace.is_some();
-        let custom_titlebar = CUSTOM_TITLEBAR && workspace.is_some();
+        let custom_titlebar = cfg!(any(target_os = "windows", target_os = "macos"))
+            && !window_decoration.native(title_bar_style)
+            && workspace.is_some();
+        let desktop = cx
+            .try_global::<DesktopAppearance>()
+            .cloned()
+            .unwrap_or_else(|| DesktopAppearance::detect(cx));
+        let gnome = desktop.gnome;
+        let system_font = desktop.font;
+        let desktop_observers = vec![
+            window.observe_button_layout_changed(|window, _| window.refresh()),
+            window.observe_window_appearance(|window, _| window.refresh()),
+        ];
+        #[cfg(target_os = "linux")]
+        let desktop_settings_task = {
+            let renderer = cx.svg_renderer();
+            let background = cx.background_executor().clone();
+            cx.spawn_in(window, async move |this, cx| {
+                use futures::StreamExt as _;
+                let settings = ashpd::desktop::settings::Settings::new().await.ok();
+                // Subscribe before reading so concurrent desktop changes are not lost.
+                let changes = match &settings {
+                    Some(settings) => settings.receive_setting_changed().await.ok(),
+                    None => None,
+                };
+                let read_font = || async {
+                    let settings = settings.as_ref()?;
+                    let value = settings
+                        .read::<String>("org.gnome.desktop.interface", "font-name")
+                        .await
+                        .ok()?;
+                    let mut font = SystemFont::parse(&value)?;
+                    let scale = settings
+                        .read::<f64>("org.gnome.desktop.interface", "text-scaling-factor")
+                        .await
+                        .unwrap_or(1.);
+                    if scale.is_finite() && (0.5..=4.).contains(&scale) {
+                        font.size *= scale as f32;
+                    }
+                    Some(font)
+                };
+                let read_icons = || async {
+                    let theme = match &settings {
+                        Some(settings) => settings
+                            .read::<String>("org.gnome.desktop.interface", "icon-theme")
+                            .await
+                            .unwrap_or_default(),
+                        None => String::new(),
+                    };
+                    let renderer = renderer.clone();
+                    background
+                        .spawn(async move { DesktopWindowIcons::load(&theme, &renderer) })
+                        .await
+                };
+                let apply_icons = |icons, cx: &mut AsyncWindowContext| {
+                    let _ = this.update(cx, |_, cx| {
+                        cx.set_global(icons);
+                        cx.refresh_windows();
+                    });
+                };
+                let apply = |font: Option<SystemFont>, cx: &mut AsyncWindowContext| {
+                    if let Some(font) = font {
+                        let _ = this.update(cx, |this, cx| {
+                            this.system_font = font.clone();
+                            cx.set_global(DesktopAppearance {
+                                font,
+                                gnome: this.gnome,
+                            });
+                            if let Some(workspace) = &this.workspace {
+                                let _ = workspace.update(cx, |workspace, cx| {
+                                    workspace.refresh_desktop_appearance(cx)
+                                });
+                            }
+                            cx.notify();
+                        });
+                    }
+                };
+                apply(read_font().await, cx);
+                if gnome {
+                    apply_icons(read_icons().await, cx);
+                }
+                if let Some(mut changes) = changes {
+                    while let Some(value) = changes.next().await {
+                        if value.namespace() == "org.gnome.desktop.interface"
+                            && matches!(value.key(), "font-name" | "text-scaling-factor")
+                        {
+                            apply(read_font().await, cx);
+                        }
+                        if gnome
+                            && value.namespace() == "org.gnome.desktop.interface"
+                            && value.key() == "icon-theme"
+                        {
+                            apply_icons(read_icons().await, cx);
+                        }
+                    }
+                }
+            })
+        };
         let title = workspace.map_or_else(
             || "Splitty".to_owned(),
             |workspace| workspace.read(cx).window_title(),
@@ -98,6 +202,14 @@ impl RootView {
             title,
             _title_subscription: title_subscription,
             custom_titlebar,
+            startup_title_bar_style: title_bar_style,
+            startup_window_decoration: window_decoration,
+            requested_decoration: None,
+            gnome,
+            system_font,
+            _desktop_observers: desktop_observers,
+            #[cfg(target_os = "linux")]
+            _desktop_settings_task: desktop_settings_task,
             waiting_for_appearance: windows_chrome,
             appearance_subscription,
             reveal_timeout,
@@ -123,96 +235,91 @@ impl RootView {
     }
 }
 impl RootView {
-    /// Matches the web client's custom title bar (`TitleBar.svelte`): the
-    /// drawer's `surface-raised` background without a bottom divider, the title
-    /// centered over the window in `text-secondary`, and platform window
-    /// controls on the trailing edge (or native traffic lights on macOS).
-    /// The centered title overlay has no hitbox, so dragging and double clicks
-    /// reach the bar underneath it.
-    fn title_bar(&self, cx: &App) -> AnyElement {
-        let workspace = self.workspace.clone();
-        let (bg, title_color, font_family) = self
-            .workspace
+    fn title_bar_appearance(&self, window: &Window, cx: &App) -> TitleBarAppearance {
+        let fallback = appearance::NativeAppearance::fallback(&self.system_font.family);
+        let appearance = self.workspace.as_ref().and_then(|w| w.upgrade());
+        let appearance = appearance
             .as_ref()
-            .and_then(|workspace| workspace.upgrade())
-            .map(|workspace| {
-                let appearance = workspace.read(cx).appearance();
-                (
-                    rgb(appearance.raised).into(),
-                    rgb(appearance.secondary).into(),
-                    SharedString::from(appearance.font_family.clone()),
-                )
-            })
-            .unwrap_or_else(|| {
-                (
-                    cx.theme().sidebar,
-                    cx.theme().muted_foreground,
-                    if cfg!(target_os = "macos") {
-                        ".SystemUIFont".into()
-                    } else {
-                        cx.theme().font_family.clone()
-                    },
-                )
-            });
-        let title_inset = if cfg!(target_os = "macos") {
-            MACOS_TITLE_INSET
+            .map(|w| w.read(cx).appearance())
+            .unwrap_or(&fallback);
+        // Native decoration is selected when opening on macOS/Windows. Keep
+        // the current window internally consistent until the next launch.
+        let style = if cfg!(target_os = "linux") {
+            appearance.title_bar_style
         } else {
-            px(108.)
+            self.startup_title_bar_style
         };
-        div()
-            .relative()
-            .flex_shrink_0()
-            .child(
-                TitleBar::new()
-                    .h(MACOS_TITLE_BAR_HEIGHT)
-                    .bg(bg)
-                    .border_b_0()
-                    .on_close_window(move |_, window, cx| {
-                        if let Some(workspace) = workspace.as_ref() {
-                            let _ = workspace.update(cx, |workspace, cx| {
-                                workspace.request_window_close(window, cx);
-                            });
-                        } else {
-                            window.remove_window();
-                        }
-                    }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .px(title_inset)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        div()
-                            .id("window-title")
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .font_family(font_family)
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(title_color)
-                            .child(self.title.clone()),
-                    ),
-            )
-            .into_any_element()
+        let mut app = appearance.clone();
+        if !cfg!(target_os = "linux") {
+            app.window_decoration = self.startup_window_decoration;
+        }
+        let mut resolved = TitleBarAppearance::resolve(
+            style,
+            &app,
+            window.appearance(),
+            self.gnome,
+            self.system_font.clone(),
+        );
+        if resolved.profile == DecorationProfile::Adwaita {
+            resolved.icons = cx
+                .try_global::<DesktopWindowIcons>()
+                .cloned()
+                .unwrap_or_default();
+        }
+        resolved
+    }
+
+    fn title_bar(&self, window: &Window, cx: &App) -> AnyElement {
+        let workspace = self.workspace.clone();
+        chrome::WindowChrome {
+            title: self.title.clone(),
+            appearance: self.title_bar_appearance(window, cx),
+            on_close: Rc::new(move |window, cx| {
+                if let Some(workspace) = &workspace {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                        workspace.request_window_close(window, cx)
+                    });
+                } else {
+                    window.remove_window();
+                }
+            }),
+        }
+        .into_any_element()
     }
 }
 
 impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let show_titlebar = self.custom_titlebar
-            || (self.workspace.is_some()
-                && matches!(window.window_decorations(), Decorations::Client { .. }));
+        if cfg!(target_os = "linux") && self.workspace.is_some() {
+            let decoration = self
+                .workspace
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .map(|w| {
+                    let a = w.read(cx).appearance();
+                    if a.window_decoration.native(a.title_bar_style) {
+                        WindowDecorations::Server
+                    } else {
+                        WindowDecorations::Client
+                    }
+                })
+                .unwrap_or(WindowDecorations::Client);
+            if self.requested_decoration != Some(decoration) {
+                window.request_decorations(decoration);
+                self.requested_decoration = Some(decoration);
+            }
+            let radius = self.title_bar_appearance(window, cx).radius;
+            gpui_kit::component::set_window_corner_radius(window, cx, px(radius));
+        }
+        let show_titlebar = !window.is_fullscreen()
+            && (self.custom_titlebar
+                || (self.workspace.is_some()
+                    && matches!(window.window_decorations(), Decorations::Client { .. })));
         div()
             .size_full()
             .flex()
             .flex_col()
-            .when(show_titlebar, |view| view.child(self.title_bar(cx)))
+            .when(show_titlebar, |view| view.child(self.title_bar(window, cx)))
             .child(
                 div()
                     .flex_1()
@@ -225,7 +332,7 @@ impl Render for RootView {
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod title_tests {
-    use super::RootView;
+    use super::{RootView, TitleBarStyle};
     use gpui_kit::{AppContext, TestAppContext};
     use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
     use std::{
@@ -256,7 +363,14 @@ mod title_tests {
                 });
                 *workspace_out.borrow_mut() = Some(workspace.clone());
                 let root = cx.new(|cx| {
-                    RootView::new(workspace.clone().into(), Some(&workspace), window, cx)
+                    RootView::new(
+                        workspace.clone().into(),
+                        Some(&workspace),
+                        TitleBarStyle::Theme,
+                        super::WindowDecoration::System,
+                        window,
+                        cx,
+                    )
                 });
                 gpui_kit::base::Root::new(root, window, cx)
             }
@@ -343,6 +457,30 @@ fn main() -> anyhow::Result<()> {
     if let splitty_client_core::owned_service::LocalBackend::Wsl(launch) = &backend {
         startup::set_wsl_distro(launch.distro());
     }
+    let (startup_title_bar_style, startup_window_decoration) = if !probe
+        && !workspace_smoke
+        && !matches!(
+            backend,
+            splitty_client_core::owned_service::LocalBackend::Wsl(_)
+        ) {
+        let memory = splitty_client_core::appearance::AppearanceMemory::open(
+            splitty_client_core::appearance::AppearanceMemory::default_path(),
+        );
+        memory
+            .stored()
+            .map(|saved| {
+                (
+                    TitleBarStyle::from_setting(&saved.title_bar_style),
+                    WindowDecoration::from_setting(&saved.window_decoration),
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        (TitleBarStyle::default(), WindowDecoration::default())
+    };
+    let custom_titlebar = !probe
+        && cfg!(any(target_os = "windows", target_os = "macos"))
+        && !startup_window_decoration.native(startup_title_bar_style);
     let worker = Rc::new(RefCell::new(None));
     let launched_worker = worker.clone();
     let window_error = Rc::new(RefCell::new(None));
@@ -352,6 +490,7 @@ fn main() -> anyhow::Result<()> {
     let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     application.run(move |cx| {
         gpui_kit::init(cx);
+        cx.set_global(DesktopAppearance::detect(cx));
         terminal::init(cx);
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,
@@ -374,9 +513,10 @@ fn main() -> anyhow::Result<()> {
                         }
                         .into(),
                     ),
-                    appears_transparent: CUSTOM_TITLEBAR && !probe,
-                    traffic_light_position: (!probe).then_some(MACOS_TRAFFIC_LIGHTS),
+                    appears_transparent: custom_titlebar,
+                    traffic_light_position: custom_titlebar.then_some(MACOS_TRAFFIC_LIGHTS),
                 }),
+                app_owns_titlebar_drag: custom_titlebar,
                 show: !cfg!(target_os = "windows") || probe,
                 focus: !cfg!(target_os = "windows") || probe,
                 ..Default::default()
@@ -418,7 +558,16 @@ fn main() -> anyhow::Result<()> {
                     });
                     (workspace.clone().into(), Some(workspace))
                 };
-                cx.new(|cx| RootView::new(view, workspace.as_ref(), window, cx))
+                cx.new(|cx| {
+                    RootView::new(
+                        view,
+                        workspace.as_ref(),
+                        startup_title_bar_style,
+                        startup_window_decoration,
+                        window,
+                        cx,
+                    )
+                })
             },
         );
         if let Err(error) = result {

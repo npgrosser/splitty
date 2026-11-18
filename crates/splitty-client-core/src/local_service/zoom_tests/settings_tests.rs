@@ -31,6 +31,10 @@ fn edit(field: F) -> SettingsEdit {
     SettingsEdit::new(
         field,
         match field {
+            F::InterfaceStyle => V::Text("system".into()),
+            F::WindowDecoration => V::Text("splitty".into()),
+            F::WindowButtons => V::Text("system".into()),
+            F::TitleBarStyle => V::Text("system".into()),
             F::ThemeMode => V::Text("auto".into()),
             F::Theme
             | F::ThemeDark

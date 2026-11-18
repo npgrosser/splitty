@@ -42,6 +42,54 @@ The browser UI follows the same terminal settings with its own theme files: a
 palette it has no theme of that name for shows the UI theme's terminal colors
 there.
 
+## Native appearance and window decoration
+
+Appearance keeps four choices independent:
+
+| Setting | Choices | Owns |
+| --- | --- | --- |
+| Interface style | System / Splitty theme | Interface colors, typography and density |
+| Window decoration | System / Splitty | Frame shape, title-bar height, typography and controls |
+| Title bar colors | System / Match app theme | Client title-bar palette |
+| Window buttons | System layout / All three | Client minimize, maximize/restore and close controls |
+
+System interface style follows the desktop light/dark preference and typography
+through a built-in desktop profile. GNOME uses the bundled Adwaita palette and
+roomier spacing. This is GPUI styling; arbitrary GTK CSS and native GTK widgets
+are not imported. Saved theme and font choices remain available when returning
+to Splitty theme. An explicit terminal palette remains separate.
+
+System decoration uses a native OS frame when system colors are selected and
+one is available. Otherwise it draws desktop-style client decoration: on GNOME,
+a taller header, small symbolic controls on circular buttons, and desktop font.
+On GNOME, symbolic SVG window icons are loaded from the active icon theme and
+its parents, then installed fallback themes. Missing or invalid icons use the
+existing Splitty symbols. Icon-theme changes reload the four cached symbols;
+no Adwaita artwork is bundled. Geometry and bold title styling follow an explicit
+Adwaita profile, independently of the icon theme and title-bar palette.
+Splitty decoration uses a compact header, app typography and rectangular button
+hover backgrounds. Both have rounded client frames; the renderer clips all
+content, including terminal backgrounds, to that shape. Tiled edges and maximized
+windows lose the relevant rounded corners and shadows.
+
+Match app theme takes colors from the currently shown interface. Changing it
+does not change decoration geometry. All three is the default client button
+policy and places all controls on the right. System layout reads the desktop
+arrangement at startup and follows changes live, including left/right placement
+and hiding minimize or maximize; it can show only Close.
+Unavailable platform actions are disabled. Native OS-owned frames retain their
+own buttons and may retain system colors.
+
+The settings are `appearance.interfaceStyle` (`system` / `theme`, default
+`theme`), `appearance.windowDecoration` (`system` / `splitty`, default `system`),
+`appearance.titleBarStyle` (`system` / `theme`, default `theme`; colors only), and
+`appearance.windowButtons` (`system` / `all`, default `all`). Existing theme
+preferences and legacy web-shell `window` settings keep their meanings.
+
+Linux client decoration updates live. macOS and Windows select native versus
+custom decoration at startup, so changing decoration or title-bar colors requires
+restarting Splitty. macOS retains native traffic lights in custom headers.
+
 ## Adding themes
 
 Put files into `themes/` in the configuration directory

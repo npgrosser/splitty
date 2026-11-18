@@ -197,6 +197,15 @@ pub struct XtermSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppearanceSettings {
+    /// Native client title-bar colors, independent of decoration geometry.
+    #[serde(default = "default_interface_style")]
+    pub interface_style: String,
+    #[serde(default = "default_window_decoration")]
+    pub window_decoration: String,
+    #[serde(default = "default_window_buttons")]
+    pub window_buttons: String,
+    #[serde(default = "default_title_bar_style")]
+    pub title_bar_style: String,
     pub theme: String,
     pub theme_mode: String,
     pub theme_dark: String,
@@ -405,9 +414,27 @@ impl Default for XtermSettings {
     }
 }
 
+fn default_interface_style() -> String {
+    "theme".into()
+}
+fn default_window_decoration() -> String {
+    "system".into()
+}
+fn default_window_buttons() -> String {
+    "all".into()
+}
+
+fn default_title_bar_style() -> String {
+    "theme".into()
+}
+
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
+            interface_style: default_interface_style(),
+            window_decoration: default_window_decoration(),
+            window_buttons: default_window_buttons(),
+            title_bar_style: default_title_bar_style(),
             theme: "splitty-dark".into(),
             theme_mode: "fixed".into(),
             theme_dark: "splitty-dark".into(),
@@ -651,6 +678,10 @@ pub fn settings_metadata() -> Value {
     });
     limits.as_object_mut().expect("limit map").extend(serde_json::json!({
             "appearance.themeMode": {"values": ["fixed", "auto"]},
+            "appearance.interfaceStyle": {"values": ["system", "theme"]},
+            "appearance.windowDecoration": {"values": ["system", "splitty"]},
+            "appearance.windowButtons": {"values": ["system", "all"]},
+            "appearance.titleBarStyle": {"values": ["system", "theme"]},
             "appearance.borderRadius": {"min": 0, "max": 20, "step": 1},
             "appearance.fontSize": {"min": 0, "max": 24, "step": 1, "values": [0, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]},
             "appearance.zoom": {"min": ZOOM_LEVELS[0], "max": ZOOM_LEVELS[ZOOM_LEVELS.len() - 1], "values": ZOOM_LEVELS},
@@ -1435,6 +1466,61 @@ mod tests {
         assert_eq!(updated.terminal.renderer, "xterm");
         assert_eq!(updated.appearance.theme, "splitty-dark");
         assert_eq!(updated.tabs.min_width, 12);
+    }
+
+    #[test]
+    fn native_chrome_is_independent_and_validated_atomically() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "[appearance]\ntheme = \"adwaita-dark\"\n").unwrap();
+        let before = load_from(&path);
+        assert_eq!(before.appearance.title_bar_style, "theme");
+        let changed = update_at(
+            &path,
+            serde_json::json!({"appearance": {"titleBarStyle": "system", "interfaceStyle": "system", "windowDecoration": "splitty", "windowButtons": "system"}}),
+        )
+        .unwrap();
+        assert_eq!(load_from(&path).appearance.title_bar_style, "system");
+        assert_eq!(changed.appearance.interface_style, "system");
+        assert_eq!(changed.appearance.window_decoration, "splitty");
+        assert_eq!(changed.appearance.window_buttons, "system");
+        assert_eq!(changed.appearance.theme, before.appearance.theme);
+        assert_eq!(changed.terminal, before.terminal);
+        assert_eq!(changed.window, before.window);
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(update_at(
+            &path,
+            serde_json::json!({"appearance": {"titleBarStyle": "invalid", "theme": "other"}})
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        for key in ["interfaceStyle", "windowDecoration", "windowButtons"] {
+            assert!(update_at(
+                &path,
+                serde_json::json!({"appearance": {key: "invalid", "theme": "other"}})
+            )
+            .is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), saved);
+        }
+        assert_eq!(
+            settings_metadata()["limits"]["appearance.titleBarStyle"]["values"],
+            serde_json::json!(["system", "theme"])
+        );
+        let mut old = serde_json::to_value(before.appearance).unwrap();
+        old.as_object_mut().unwrap().remove("titleBarStyle");
+        for key in ["interfaceStyle", "windowDecoration", "windowButtons"] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let restored: AppearanceSettings = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(restored.interface_style, "theme");
+        assert_eq!(restored.window_decoration, "system");
+        assert_eq!(restored.window_buttons, "all");
+        assert_eq!(
+            serde_json::from_value::<AppearanceSettings>(old)
+                .unwrap()
+                .title_bar_style,
+            "theme"
+        );
     }
 
     #[test]

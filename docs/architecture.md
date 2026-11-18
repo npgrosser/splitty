@@ -1553,3 +1553,32 @@ theme when a terminal palette setting changes. Palette names stay per client.
 The native window has a command palette and a shortcut list (`workspace/palette.rs`): every command is a `Shortcut` or one of a few palette-only actions, run through the same `run_shortcut` as its key. Viewer panes (`workspace/viewer.rs`) ask the worker for a document with `ReadViewer`; `native_workspace/viewers.rs` reads it over the pane's own connection through `document.rs`, which now carries `ifVersion` and reports `viewer.unchanged` and `viewer.failed`. The window asks only for shown panes: at first, for a newer record, and every two seconds for a file. Terminal images come from the engine's render state (`Frame::images`, `Frame::image_pixels`) and are kept as textures per image generation; only the in-stream medium is enabled. `remote.autoForwardPorts` is the hub's (`hub::auto_forward`); the window only shows its forwards. `hub/shares.rs` is the client of the local service's reverse forwards; its stream is opened on first use. `NotificationCenter::take_fresh` hands newly admitted, unwatched facts to the window for notices and system notifications. The change `native-feature-gaps` lists what is still missing.
 
 Viewer annotations live in two places. `splitty-client-core::annotations` describes a selected passage as a target, turns the server's anchors into passages of the shown text (`Anchor::from_wire`; documents are decoded with the core's `viewer_source_text`, so the server's byte ranges index the window's text directly) and holds the hand-over policy (`review_delivery`). `workspace/viewer/notes.rs` holds the list beside the document, the field and the marks, and sends `Annotate`, `AnchorViewer`, `ReviewViewer` and `AnswerReview` commands; the worker turns them into screen operations, `viewer.anchor`, `viewer.review` and `viewer.review_answer`, and reports `viewer.anchored` and `viewer.reviewed` as `Update::ViewerAnchors` and `Update::ViewerReview`. The window asks for anchors when the version shown or the targets change and lists the annotations in the answer's order; copying, sending and answering ask for the review and continue with it under a token. On a host without `viewer-reviews-v1` the notes say the host needs an update. A snapshot's `reviewWait` is read from its JSON into `ScreenModel::review_wait`, because the typed record never reads a wait back. A viewer pane has no session, so drags and group actions identify it by `identity_for`, the session or the pane itself.
+
+### Native window chrome
+
+The local service independently stores interface style, window decoration,
+client title-bar colors and window-button policy. The startup appearance cache
+remembers all four. Desktop typography and button arrangement are local inputs,
+never theme-file or remote-host authority. System interface styling selects a
+built-in desktop profile without rewriting saved theme/font choices.
+
+`appearance/titlebar.rs` resolves frame geometry, title typography and its color
+source. `chrome.rs` consumes the resolved values and delegates close intent to
+the workspace. macOS/Windows choose native versus custom decoration at startup;
+Linux requests the selected decoration and renders a fallback when the compositor
+requires client decoration.
+
+The decoration profile owns control metrics, title weight and inactive styling.
+The local SVG icon adapter reads the desktop's icon-theme selection, resolves
+four window symbols through theme inheritance and installed fallbacks, and
+retains validated bytes for the renderer. Desktop setting changes refresh that
+cache off the UI thread. Its file reads and inheritance traversal are bounded;
+missing icons use the existing toolkit symbols. Artwork is loaded locally, not
+copied into the application, and never supplies title-bar color policy.
+
+The component wrapper owns per-window frame/shadow radii, independent of the
+application theme's component radii. A pinned WGPU renderer patch clips content
+primitives to the complete client silhouette, while preserving external shadows.
+The Linux platform supplies scaled frame bounds and radii every draw, including
+tiling and maximize transitions. This keeps terminal, settings and overlay
+backgrounds inside the same window shape without per-view corner workarounds.
