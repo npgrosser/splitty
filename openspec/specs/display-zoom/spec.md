@@ -29,7 +29,7 @@ The client SHALL zoom in with Cmd (macOS) or Ctrl (Linux, Windows) and `+` or `=
 - **THEN** the keys step through the levels from 50 to 300 % as before
 
 ### Requirement: Zoom Settings
-The level SHALL be the setting `appearance.zoom` (default 1.0) and its scope `appearance.zoom_scope` (`window`, the default, or `terminals`), stored with the other settings of the server that serves the window. The server SHALL accept an update of the level only to one of the levels its metadata lists, and SHALL refuse any other with status 400 and the field `appearance.zoom`; a stored level outside the listed range falls back to the default. A window SHALL offer the listed levels as its zoom setting's choices, and SHALL show any level within them, without a range of its own. With `window`, a desktop shell SHALL scale its whole application surface, using native page zoom for web-based shells and matching layout/text scaling for the native workspace. With `terminals`, chrome SHALL stay at 100 % and each terminal's font size SHALL be its configured or native default size times the level, rounded to whole pixels, in every client. OS-owned dialogs follow platform scaling.
+The level SHALL be the setting `appearance.zoom` (default 1.0) and its scope `appearance.zoom_scope` (`window`, the default, or `terminals`), stored with the other settings of the server that serves the window. The server SHALL accept an update of the level only to one of the levels its metadata lists, and SHALL refuse any other with status 400 and the field `appearance.zoom`; a stored level outside the listed range falls back to the default. A window SHALL offer the listed levels as its zoom setting's choices, and SHALL show any level within them, without a range of its own. With `window`, the desktop app SHALL scale its whole window, with layout and text scaled together. With `terminals`, chrome SHALL stay at 100 % and each terminal's font size SHALL be its configured or native default size times the level, rounded to whole pixels. OS-owned dialogs follow platform scaling.
 
 #### Scenario: Level survives a restart
 - **WHEN** the user zooms to 125 % in the desktop app and restarts it
@@ -41,7 +41,7 @@ The level SHALL be the setting `appearance.zoom` (default 1.0) and its scope `ap
 
 #### Scenario: Rounded terminal font size
 - **WHEN** `appearance.zoom_scope` is `terminals`, a terminal's font size is 14 and the level is 110 %
-- **THEN** the terminal uses font size 15 in the web and in the native client
+- **THEN** the terminal uses font size 15
 
 #### Scenario: Level outside the list
 - **WHEN** a client sends `appearance.zoom` 1.3 to a server that lists the levels from 50 to 300 %

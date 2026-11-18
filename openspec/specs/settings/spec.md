@@ -21,21 +21,6 @@ The server SHALL return its current settings at `GET /api/home/settings` and def
 - **WHEN** a server's metadata allows font sizes up to 32 and lists an editor the window's built-in limits do not know
 - **THEN** the window offers and sends a font size of 30 and that editor, and refuses 33
 
-### Requirement: Atomic Settings Validation
-`PATCH /api/home/settings` SHALL validate all submitted fields, including `editors`, before changing persisted or running settings. Invalid input MUST receive status 400 with `error` and a dotted `field` path. A valid update SHALL return the complete effective settings. Fractional `terminal.xterm.scrollSensitivity` and `fastScrollSensitivity` SHALL be accepted within published bounds.
-
-#### Scenario: Invalid editor rule
-- **WHEN** a client submits an invalid `editors.extensions` or `editors.projects` rule
-- **THEN** it receives status 400 with the failing field and no settings change is persisted or applied
-
-#### Scenario: Invalid numeric or enum field
-- **WHEN** a client submits an out-of-range number or unsupported allowed value
-- **THEN** it receives status 400 with the failing field and the prior settings remain effective
-
-#### Scenario: Fractional scroll setting
-- **WHEN** a client submits a fractional scroll sensitivity on a published step
-- **THEN** the server persists and returns that fractional value
-
 ### Requirement: Settings Change Propagation
 After a successful settings change, the server SHALL send `settings.changed` with the complete effective settings to every connected window, including the writer, over its native connection. A window SHALL apply that event, and SHALL restore its prior value after a failed update.
 
@@ -48,11 +33,15 @@ After a successful settings change, the server SHALL send `settings.changed` wit
 - **THEN** it restores its previous settings and exposes the failure
 
 ### Requirement: Removed Terminal Fields
-`linkTarget` and `webviewMode` SHALL NOT be validated or returned as current terminal settings. Existing stored values SHALL be ignored when loading settings.
+`linkTarget` and `webviewMode` SHALL NOT be validated or returned as current terminal settings. Existing stored values SHALL be ignored when loading settings. An update naming them SHALL be refused like any unknown setting.
 
 #### Scenario: Legacy stored fields
 - **WHEN** a stored configuration contains `link_target` or `webview_mode`
 - **THEN** the effective settings omit them and all other valid fields remain usable
+
+#### Scenario: Legacy field in an update
+- **WHEN** a client sends `PATCH /api/home/settings` with `{"terminal":{"linkTarget":"tab"}}`
+- **THEN** it receives status 400 with the field `terminal.linkTarget` and no setting changes
 
 ### Requirement: Experimental Native Local Appearance
 The experimental native workspace SHALL read local appearance settings through `home.get` and resolve the UI theme they name in its own theme catalog, applying appearance font overrides and the theme's colors to workspace chrome without writing settings during reads. It SHALL NOT request `theme.get` or `theme.list`. Terminal colors SHALL follow the selected native terminal palette. Unset chrome font overrides SHALL use the UI theme's defaults. Automatic mode SHALL select the saved light or dark UI theme using the local OS preference. A UI theme name the catalog does not have SHALL show the default theme of the OS preference and a notice, and SHALL NOT change the stored setting. Remote settings SHALL NOT select application appearance.
@@ -341,3 +330,29 @@ The native app SHALL support `appearance.windowButtons` (`system` or `all`, defa
 #### Scenario: Complete client controls
 - **WHEN** the user selects all window buttons on a client-decorated window
 - **THEN** minimize, maximize/restore and close are available independently of the desktop's button arrangement, subject to platform capabilities
+
+### Requirement: Settings Update Validation
+`PATCH /api/home/settings` SHALL validate all submitted fields, including `editors`, before changing persisted or running settings. Invalid input MUST receive status 400 with `error` and a dotted `field` path. A valid update SHALL return the complete effective settings. Fractional values SHALL be accepted where the metadata publishes them, such as the listed zoom levels.
+
+#### Scenario: Invalid editor rule
+- **WHEN** a client submits an invalid `editors.extensions` or `editors.projects` rule
+- **THEN** it receives status 400 with the failing field and no settings change is persisted or applied
+
+#### Scenario: Invalid numeric or enum field
+- **WHEN** a client submits an out-of-range number or unsupported allowed value
+- **THEN** it receives status 400 with the failing field and the prior settings remain effective
+
+#### Scenario: Fractional setting
+- **WHEN** a client submits `appearance.zoom` 1.25, a level the metadata lists
+- **THEN** the server persists and returns that fractional value
+
+### Requirement: Removed Setting Groups And Fields
+The settings SHALL NOT contain, validate, describe in their metadata or return `terminal.renderer`, `terminal.ligatures`, `terminal.windowPaddingBalance`, the group `terminal.xterm`, the groups `tabs`, `window` and `experimental`, or `drawer.resizable`. A stored `config.toml` holding them SHALL load without error, with every other valid value kept; the removed keys SHALL be ignored and SHALL be absent from the file the server writes next. An update naming one of them SHALL be refused with status 400 and that field as an unknown setting.
+
+#### Scenario: Older configuration file
+- **WHEN** `config.toml` holds `[terminal] renderer`, `[terminal.xterm]`, `[tabs]`, `[window]`, `[experimental]` and `[drawer] resizable` next to a valid `[appearance] font_size = 15`
+- **THEN** the server starts with font size 15, the effective settings contain none of the removed keys, and the file the server writes next holds none of them
+
+#### Scenario: Update naming a removed setting
+- **WHEN** a client sends `PATCH /api/home/settings` with `{"terminal":{"xterm":{"cursorBlink":true}}}`
+- **THEN** it receives status 400 with the field `terminal.xterm` and no setting changes

@@ -78,23 +78,6 @@ Before it starts the bridge, the server SHALL require a supported native transpo
 - **WHEN** the host daemon is incompatible and runs two screens
 - **THEN** the `remote.error` lists both screens with their numbers of panes
 
-### Requirement: Known Hosts API
-`GET /api/remote/hosts` SHALL return the known hosts of the user the server runs as (see `remote-hosts`, Known Hosts) as a JSON array of `{ "target", "source", "lastConnected"?, "alias"? }`, available only as the equivalent native operations of a local main connection (see `client-connections`, Enumerated Native Requests); no listener serves these paths, and the control socket answers 404 for them.
-
-#### Scenario: Hosts for the picker
-- **WHEN** the UI requests `/api/remote/hosts` and `vm1` is a recent host
-- **THEN** the response lists `vm1` first with source `recent`
-
-`GET /api/remote/host-preferences` SHALL return `{version:1,hosts:[{target,alias?,hidden?}]}`. `PUT` SHALL accept `{target,alias?:string|null,hidden?:false}`, require at least one field besides target, preserve omitted fields and return the stored row. `DELETE /api/remote/hosts` SHALL accept `{target}`, forget that host as described in `remote-hosts`, and return 204. These operations are available only as the equivalent native operations of a local main connection (see `client-connections`, Enumerated Native Requests); no listener serves these paths, and the control socket answers 404 for them. Reading or changing these metadata endpoints SHALL NOT connect to a host.
-
-#### Scenario: Invalid preference update
-- **WHEN** an update contains an invalid target, overlong alias, controls or unknown fields
-- **THEN** it is rejected without modifying saved metadata
-
-#### Scenario: Unauthorized metadata change
-- **WHEN** a preference or removal request is made over the control socket, a grant socket or a connection that is not a local main connection
-- **THEN** it is rejected without changing host metadata or contacting a host
-
 ### Requirement: Remote Screens In The Window
 A client SHALL show local screens and remote screens grouped by their host in the screen list. Local screens SHALL come first; the host groups SHALL follow in the order the user arranged them (see `remote-hosts`, Host Group Order), and hosts the user did not arrange SHALL follow the arranged ones in the order their screens first appear. The user SHALL be able to move a host group, with its screens, above or below another host group by dragging its caption; the local screens SHALL NOT be movable as a group, and a screen SHALL NOT move to another host's group. It SHALL hold one hub connection per host with open screens or an explicit request to browse that host, and SHALL speak the mux and session protocols over it with that host's daemon. A remote screen SHALL be a reference to a screen of a host. Its layout and sessions are the host's, and every op on it SHALL go to that host. Local settings (theme, font, keybindings) SHALL apply to remote screens. A new tab or split in a remote screen SHALL send no local shell profile. A remote screen's group SHALL identify the host and its connection state. Screen switching and shortcut numbering SHALL follow the grouped display order.
 
@@ -389,11 +372,11 @@ A new screen SHALL get its default name `Screen N` from the server that holds it
 - **THEN** the window sends `create_screen` named with the smallest `Screen N` that neither the host's screens it knows nor the window's screens of that host use at that moment, and does not rename the screen later
 
 ### Requirement: Host Group Order API
-`GET /api/remote/host-order` SHALL return `{version:1,order:[target,…]}`. `PUT` SHALL accept `{order:[target,…]}`, replace the stored order and return it, storing a repeated target once; an invalid target, a value that is not a list of strings, more than 256 targets or an unknown field SHALL be rejected without a change. Both are available only as the equivalent native operations of a local main connection (see `client-connections`, Enumerated Native Requests); no listener serves these paths, and the control socket answers 404 for them, and neither SHALL connect to a host.
+`PUT /api/remote/host-order` SHALL accept `{order:[target,…]}`, replace the stored order and return it as `{version:1,order:[target,…]}`, storing a repeated target once; an invalid target, a value that is not a list of strings, more than 256 targets or an unknown field SHALL be rejected without a change. Windows read the stored order through `remote.directory.get` (see Merged Host Directory). The update is available only as the equivalent native operation of a local main connection (see `client-connections`, Enumerated Native Requests); no listener serves this path, the control socket answers 404 for it, and it SHALL NOT connect to a host.
 
 #### Scenario: Order replaced
 - **WHEN** the UI sends `PUT /api/remote/host-order` with `{"order":["vm2","vm1","vm2"]}`
-- **THEN** the response and a later `GET` return `{"version":1,"order":["vm2","vm1"]}`
+- **THEN** the response is `{"version":1,"order":["vm2","vm1"]}` and a later `remote.directory.get` carries the order `vm2`, `vm1`
 
 #### Scenario: Invalid order
 - **WHEN** the UI sends an order containing ` vm1` with surrounding whitespace
@@ -735,36 +718,36 @@ Native desktop opening SHALL reuse the validated HTTP(S) opener and confirmed lo
 - **AND** the authoritative mapping remains visible and an explicit alternate-port action retains the service's conflict semantics
 
 ### Requirement: Host Screen Directories
-The local server SHALL persist the last observed screen directory per host separately from the remembered open-screen list. `GET /api/remote/catalog` SHALL return `{version:1,hosts:[{target,lastSeen,screens:[{id,name?,panes}]}]}`. `PUT /api/remote/catalog` SHALL accept `{target,screens}`, replace only that host's directory and return its stored entry with `lastSeen` in Unix seconds. A successful empty list SHALL replace a previous nonempty one. The catalog routes remain for older clients; current clients report through `hub.catalog.observe` and read `remote.directory.get`. These APIs SHALL neither connect nor send commands to a remote host.
+The local server SHALL persist the last observed screen directory per host separately from the remembered open-screen list, as `{version:1,hosts:[{target,lastSeen,screens:[{id,name?,panes}]}]}` with `lastSeen` in Unix seconds. An observation SHALL replace only that host's directory; a successful empty list SHALL replace a previous nonempty one. Clients report observations through `hub.catalog.observe` and read the directory with `remote.directory.get` (see Merged Host Directory); no operation reads or writes the stored directory as such. Neither SHALL connect or send commands to a remote host.
 
-Hidden hosts SHALL be excluded from catalog reads. An update for a hidden host SHALL return 409 without storing its observation.
+Hidden hosts SHALL be excluded from directory reads. An observation for a hidden host SHALL be refused without storing it.
 
-The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the private configuration directory. It SHALL keep at most 20 host entries, each with at most 200 screens. Targets SHALL be valid and canonical, screen ids unique per host with 1–256 characters, names at most 200 characters, and pane counts nonnegative integers. Invalid writes and unknown fields SHALL be rejected without modifying the saved directory. Missing or corrupt files SHALL read as empty. The routes are available only as the equivalent native operations of a local main connection (see `client-connections`, Enumerated Native Requests); no listener serves these paths, and the control socket answers 404 for them.
+The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the private configuration directory. It SHALL keep at most 20 host entries, each with at most 200 screens. Targets SHALL be valid and canonical, screen ids unique per host with 1–256 characters, names at most 200 characters, and pane counts nonnegative integers. Invalid observations and unknown fields SHALL be rejected without modifying the saved directory. Missing or corrupt files SHALL read as empty. Observations are accepted only from a local main connection (see `client-connections`, Enumerated Native Requests).
 
-After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub; legacy PUT remains available and follows the same rule.
+After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub.
 
 An observation lists the host's screens as they are now. A hub announcing `hub-host-state-v1` SHALL accept a screen without `panes`: it SHALL keep the pane count it has stored for that screen, and SHALL leave a screen it has stored no count for out of the directory until an observation gives one. A client that knows pane counts SHALL send them.
 
 While a host is connected and its live catalog of the current connection is complete, the native workspace SHALL report that catalog, without pane counts, whenever it differs from the last report for the connection: new screens, renames and screens that left the host, such as a screen terminated from the window once the host confirmed it, or one that closed with its last pane. A later connection to the host SHALL therefore not list such a screen while it is being established. A terminate the host has not confirmed or has refused, and a detached screen, SHALL leave the stored directory unchanged. Without `hub-host-state-v1` the native workspace SHALL report nothing.
 
 #### Scenario: Host directories survive a local restart
-- **WHEN** directories for `vm1` and `vm2` are saved and `vm1` is updated
-- **THEN** a subsequent read after server reconstruction returns the updated `vm1` directory and the unchanged `vm2` directory
+- **WHEN** directories for `vm1` and `vm2` are observed and `vm1` is observed again with other screens
+- **THEN** `remote.directory.get` after server reconstruction returns the updated `vm1` directory and the unchanged `vm2` directory
 
 #### Scenario: Empty directory
 - **WHEN** the host reports no screens after previously reporting two
 - **THEN** the next saved directory for that host is empty
 
 #### Scenario: Invalid or unauthorized update
-- **WHEN** a request is made over the control socket or a connection that is not a local main connection, or contains duplicate screen ids
-- **THEN** the update is rejected and no saved directory or remote host is changed
+- **WHEN** an observation arrives over the control socket or a connection that is not a local main connection, or contains duplicate screen ids
+- **THEN** the observation is rejected and no saved directory or remote host is changed
 
 #### Scenario: Late observation after removal
 - **WHEN** an already attached host publishes its screen list after that host was forgotten
 - **THEN** it remains hidden and no cached directory is recreated
 
 #### Scenario: Catalog without a window writer
-- **WHEN** host readiness lists screens and the window sends no catalog PUT
+- **WHEN** host readiness lists screens and the window sends no observation
 - **THEN** the local cache stores those screens, including a successful empty directory
 
 #### Scenario: Ordered observations
@@ -800,3 +783,18 @@ Servers SHALL advertise `port-catalog-v1` and durably store port numbers and nam
 #### Scenario: Older host
 - **WHEN** a host lacks `port-catalog-v1`
 - **THEN** shared mutations are refused with an update message and local forwarding remains available
+
+### Requirement: Host Metadata API
+`PUT /api/remote/host-preferences` SHALL accept `{target,alias?:string|null,hidden?:false}`, require at least one field besides target, preserve omitted fields and return the stored row. `DELETE /api/remote/hosts` SHALL accept `{target}`, forget that host as described in `remote-hosts`, and return 204. Windows read the known hosts with their aliases and hidden state through `remote.directory.get` (see Merged Host Directory). These operations are available only as the equivalent native operations of a local main connection (see `client-connections`, Enumerated Native Requests); no listener serves these paths, and the control socket answers 404 for them. Reading or changing host metadata SHALL NOT connect to a host.
+
+#### Scenario: Invalid preference update
+- **WHEN** an update contains an invalid target, overlong alias, controls or unknown fields
+- **THEN** it is rejected without modifying saved metadata
+
+#### Scenario: Unauthorized metadata change
+- **WHEN** a preference or removal request is made over the control socket, a grant socket or a connection that is not a local main connection
+- **THEN** it is rejected without changing host metadata or contacting a host
+
+#### Scenario: Removed host reads
+- **WHEN** a native main client requests `host.list`, `hostPreferences.get` or `hostOrder.get`
+- **THEN** the request is refused as an unsupported operation and the connection stays open

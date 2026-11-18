@@ -49,30 +49,12 @@ The server MUST NOT close a connection because of a malformed or unknown message
 - **WHEN** a client sends `{"type": "mux.attach", "screenId": "s1"}`
 - **THEN** the server SHALL ignore the message without a response
 
-### Requirement: Welcome on Connect
-Immediately after a completed native service negotiation, without waiting for any client message, the server SHALL send `mux.welcome` containing the connection's `clientId`, the list of screens in workspace order (each with `id` and optional `name`), and `serverMode` set to `embedded` or `daemon` (see `server-modes`).
-
-#### Scenario: Welcome lists existing screens
-- **WHEN** a client connects to a server whose workspace holds screens `C`, `A`, `B` in that order
-- **THEN** `mux.welcome.screens` SHALL list `C`, `A`, `B` in that order
-
-#### Scenario: Empty workspace
-- **WHEN** a client connects to a server with no screens
-- **THEN** `mux.welcome.screens` SHALL be an empty list
-
-### Requirement: Per-Connection Client Identity
-The server SHALL assign each connection a fresh random `clientId` of 32 hexadecimal characters. A `clientId` MUST NOT be reused for a later connection, and the protocol SHALL offer no way to resume a previous `clientId`.
-
-#### Scenario: Reconnect gets a new identity
-- **WHEN** a client disconnects and connects again
-- **THEN** the second `mux.welcome` SHALL carry a `clientId` different from the first
-
 ### Requirement: Concurrent Clients Without Screen Ownership
 The server SHALL accept multiple simultaneous connections and MUST NOT grant any connection exclusive access to a screen. There are no `mux.connect`, `mux.attach`, `mux.detach`, or `mux.busy` messages; every connected client can read and modify every screen.
 
 #### Scenario: Second client connects
 - **WHEN** a second client connects while a first client is connected
-- **THEN** both clients SHALL receive their own `mux.welcome` listing all screens
+- **THEN** both clients SHALL receive their own `mux.welcome` and the same workspace catalog
 - **AND** ops from either client SHALL be applied to the shared workspace
 
 ### Requirement: Screen Snapshots on Resync
@@ -87,10 +69,10 @@ On `mux.resync` with a `screenId`, the server SHALL send `mux.screen_snapshot` w
 - **THEN** the server SHALL send no response
 
 ### Requirement: Client Resynchronization
-A client MUST treat the server's workspace state as authoritative after connecting: on `mux.welcome` it SHALL create any listed screen it does not have locally and SHALL send `mux.resync` for every listed screen. A client SHALL build every screen listed in `mux.welcome` from its `mux.screen_snapshot`, also when it has prepared the screen locally before the snapshot arrives, and MUST NOT send `create_screen` for such a screen in its place. (Re-creating a screen that later ran empty stays allowed, see `workspace-model`.) Before the first `mux.welcome` of a connection a client MUST NOT send `create_screen`. It SHALL create an initial screen of its own only when the welcome lists no screens, with `onlyIfEmpty: true` (see `workspace-model`, First Screen of an Empty Workspace), and SHALL show only the listed screens when the welcome lists any. When the server refuses that initial screen, the client SHALL drop it and show the screens the server has instead. On a `mux.nudge` that carries a `screenId`, a client SHALL send `mux.resync` for that screen.
+A client MUST treat the server's workspace state as authoritative after connecting: after `mux.welcome` it SHALL request the workspace catalog with `mux.workspace_resync`, SHALL create any screen the `mux.workspace_snapshot` lists that it does not have locally, and SHALL send `mux.resync` for every listed screen. A client SHALL build every listed screen from its `mux.screen_snapshot`, also when it has prepared the screen locally before the snapshot arrives, and MUST NOT send `create_screen` for such a screen in its place. (Re-creating a screen that later ran empty stays allowed, see `workspace-model`.) Before the first workspace snapshot of a connection a client MUST NOT send `create_screen`. It SHALL create an initial screen of its own only when the catalog lists no screens, with `onlyIfEmpty: true` (see `workspace-model`, First Screen of an Empty Workspace), and SHALL show only the listed screens when the catalog lists any. When the server refuses that initial screen, the client SHALL drop it and show the screens the server has instead. On a `mux.nudge` that carries a `screenId`, a client SHALL send `mux.resync` for that screen.
 
 #### Scenario: Reconnect restores state
-- **WHEN** a client reconnects and receives `mux.welcome` listing screens `s1` and `s2`
+- **WHEN** a client reconnects and the workspace snapshot lists screens `s1` and `s2`
 - **THEN** the client SHALL send `mux.resync` for `s1` and for `s2`
 
 #### Scenario: Nudge triggers resync
@@ -98,16 +80,16 @@ A client MUST treat the server's workspace state as authoritative after connecti
 - **THEN** the client SHALL send `mux.resync` for `s1`
 
 #### Scenario: Page reload against an existing workspace
-- **WHEN** a client starts while the server's workspace holds screen `s1` whose panes run sessions
-- **THEN** the client SHALL send `mux.resync` for `s1` and no `create_screen`
+- **WHEN** a window starts while the server's workspace holds screen `s1` whose panes run sessions
+- **THEN** the window SHALL send `mux.resync` for `s1` and no `create_screen`
 - **AND** its view of `s1` SHALL show those panes connected to their existing sessions
 
 #### Scenario: First start against an empty workspace
-- **WHEN** a client starts and `mux.welcome` lists no screens
+- **WHEN** a client starts and the workspace snapshot lists no screens
 - **THEN** the client SHALL create one screen with `create_screen` and `onlyIfEmpty: true`
 
 #### Scenario: Two windows start against an empty workspace
-- **WHEN** two windows start together, both welcomes list no screens and both send their initial `create_screen` with `onlyIfEmpty: true`
+- **WHEN** two windows start together, both workspace snapshots list no screens and both send their initial `create_screen` with `onlyIfEmpty: true`
 - **THEN** the server holds exactly one screen
 - **AND** the window whose create was refused drops its own screen and shows the one the server holds
 
@@ -127,7 +109,7 @@ A client SHALL submit layout changes as `mux.op` messages carrying a `screenId` 
 - **THEN** the server SHALL apply them in the order sent
 
 ### Requirement: Pane Spawn Notification
-When an op submitted over a client connection successfully starts a session for a pane, the server SHALL send `mux.pane_spawned` with that `paneId` and the new `sessionId` to the originating client, and SHALL enqueue it before processing that client's next message. A failed spawn SHALL send `mux.op_failed` with the pane and actual screen identifiers instead, and SHALL never advertise the absent session as spawned. A client receiving `mux.pane_spawned` SHALL connect the pane to the given session through the session protocol (see `terminal-sessions`) instead of creating a session itself.
+When an op submitted over a client connection successfully starts a session for a pane, the server SHALL send `mux.pane_spawned` with that `paneId` and the new `sessionId` to the originating client, and SHALL enqueue it before processing that client's next message. A failed spawn SHALL send `mux.op_failed` with the pane and actual screen identifiers instead, and SHALL never advertise the absent session as spawned. A client receiving `mux.pane_spawned` SHALL connect the pane to the given session with `attach` (see `terminal-sessions`).
 
 #### Scenario: Split creates a session
 - **WHEN** a client sends a `mux.op` that creates pane `p2` with a new session
@@ -403,17 +385,6 @@ A window SHALL request extraction from its screen’s own connection using `mux.
 - **WHEN** the native window extracts a Screen of its local service
 - **THEN** it sends `mux.extract_template` on that service's connection and no `template.extract` operation
 
-### Requirement: Server Derived Pane State
-The server SHALL advertise serverDerivedPaneState. Session snapshots SHALL carry displayTitle and busy, and ordinary terminal pane titles SHALL match their session display title. Metadata SHALL refresh without attached clients. Clients SHALL use these values and leave automatic exit closure to the server; older servers retain legacy client behavior.
-
-#### Scenario: Reconnect to an unattended pane
-- **WHEN** a process changes while no window shows its pane and a client later resynchronizes
-- **THEN** the snapshot gives its current displayTitle and busy state and the pane title matches
-
-#### Scenario: Older host
-- **WHEN** a host does not advertise serverDerivedPaneState
-- **THEN** the client retains its legacy title, launch and close-on-exit handling
-
 ### Requirement: Ordered Workspace Catalog
 A service announcing `workspace-catalog-v1` SHALL answer `mux.workspace_resync` on the existing session stream with `mux.workspace_snapshot`. Its ordered `screens` and nullable `activeScreenId` hint SHALL describe one coherent catalog, without pane layouts. Duplicate IDs SHALL appear once at their first position; an active ID absent from the catalog SHALL be returned as null. The request SHALL be processed after preceding operations on that connection. Payloads are defined in `docs/protocol.ts`.
 
@@ -533,22 +504,22 @@ A server that classifies its notification events SHALL list `notification-notice
 - **THEN** the window adds no notification and no unread mark for it
 
 ### Requirement: Classified Notification Events
-The server SHALL attach `notice` to every `process.finished`, `process.idle` and `session.exited` event and to every `program_status.changed` event marked `notify`, and to no other `program_status.changed` (shapes in `docs/protocol.ts`). A notice SHALL carry `kind`, `severity` (`info`, `success`, `warning` or `error`), a plain-text `title`, `setting` when a `notifications.*` switch besides `enabled` governs it, and `suppressed` when no window should notify:
+The server SHALL attach `notice` to every `process.finished`, `process.idle` and `session.exited` event and to every `program_status.changed` event marked `notify`, and to no other `program_status.changed` (shapes in `docs/protocol.ts`). A notice SHALL carry `severity` (`info`, `success`, `warning` or `error`), a plain-text `title`, `setting` when a `notifications.*` switch besides `enabled` governs it, and `suppressed` when no window should notify:
 
-- `process.finished`: kind `process.finished`, `info`, `<process> finished`, setting `processFinished`.
-- `process.idle`: kind `process.idle`, `info`, `<process> is waiting` or `Command finished`; suppressed `program-status` while the session holds a root program status record.
-- `session.exited`: with exit code 0 kind `session.exited`, `info`, `<process> exited`, setting `processExited`; otherwise kind `session.crashed`, `error`, `<process> failed`, setting `processCrashed`, where `<process>` is `session` when none is known; suppressed `user-initiated` when `userInitiated` is true.
-- `program_status.changed`: kind `program-status`, `warning` for `blocked`, `success` for `done`, `error` for `error`, setting `programStatus`; the title names the screen (its name, else `Unnamed Screen`, never a label by its place) followed by the state in words and the record's `msg`, else its `title`.
+- `process.finished`: `info`, `<process> finished`, setting `processFinished`.
+- `process.idle`: `info`, `<process> is waiting` or `Command finished`; suppressed `program-status` while the session holds a root program status record.
+- `session.exited`: with exit code 0 `info`, `<process> exited`, setting `processExited`; otherwise `error`, `<process> failed`, setting `processCrashed`, where `<process>` is `session` when none is known; suppressed `user-initiated` when `userInitiated` is true.
+- `program_status.changed`: `warning` for `blocked`, `success` for `done`, `error` for `error`, setting `programStatus`; the title names the screen (its name, else `Unnamed Screen`, never a label by its place) followed by the state in words and the record's `msg`, else its `title`.
 
-A session SHALL exit user-initiated when the server closed it while its program was still running: on a connection's `close` or when its pane or screen was closed.
+A session SHALL exit user-initiated when the server closed it while its program was still running, when its pane or screen was closed.
 
 #### Scenario: Process finished
 - **WHEN** a streamed session's foreground program `cargo` ends and the shell is in the foreground again
-- **THEN** every connection receives `process.finished` with a notice of kind `process.finished`, severity `info`, title `cargo finished` and setting `processFinished`
+- **THEN** every connection receives `process.finished` with a notice of severity `info`, title `cargo finished` and setting `processFinished`
 
 #### Scenario: Session failed
 - **WHEN** a streamed session's program exits with code 1 by itself
-- **THEN** its `session.exited` carries a notice of kind `session.crashed`, severity `error`, setting `processCrashed` and no `suppressed`
+- **THEN** its `session.exited` carries a notice of severity `error`, setting `processCrashed` and no `suppressed`
 
 #### Scenario: Pane closed by the user
 - **WHEN** a pane is closed while a connection streams its session and the session's shell still runs
@@ -560,7 +531,7 @@ A session SHALL exit user-initiated when the server closed it while its program 
 
 #### Scenario: Blocked program
 - **WHEN** the root record of a session on the screen named `build` changes to `blocked` with the kind `permission` and the message `Run tests?`, and the change is marked `notify`
-- **THEN** the event carries a notice of kind `program-status`, severity `warning`, setting `programStatus` and title `build: Waiting for permission: Run tests?`
+- **THEN** the event carries a notice of severity `warning`, setting `programStatus` and title `build: Waiting for permission: Run tests?`
 
 #### Scenario: Unmarked status change
 - **WHEN** a `program_status.changed` is not marked `notify`
@@ -571,7 +542,7 @@ A session SHALL exit user-initiated when the server closed it while its program 
 - **THEN** its notice's title starts with `Unnamed Screen: `, not with `Screen 2: `
 
 ### Requirement: Notifications in the Window
-A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its kind, severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the focused pane of the shown screen, in a focused window) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back.
+A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the focused pane of the shown screen, in a focused window) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back.
 
 #### Scenario: Own pane closed
 - **WHEN** the user closes a pane whose shell still runs
@@ -699,8 +670,34 @@ When a connection ends by liveness, the server SHALL release it as on any other 
 - **WHEN** a native client or host of the previous release connects
 - **THEN** transport pings decide its liveness as before; no capability is involved, since session messages never carried a ping on a native connection
 
-### Requirement: Relative Screen Placement Capability
-A supporting service SHALL announce `screen-placement-v1` in `mux.welcome.capabilities`. A native client SHALL require that capability and `workspace-catalog-v1` before sending `move_screen`. The operation SHALL use the existing ordered session protocol, rejection reporting and workspace-change propagation. Existing `reorder_screens` SHALL remain compatible.
+### Requirement: Welcome Announces Capabilities
+Immediately after a completed native service negotiation, without waiting for any client message, the server SHALL send `mux.welcome` carrying its `capabilities` (shape in `docs/protocol.ts`). The welcome SHALL carry no screen list, no connection identity and no server mode: a client reads the workspace with `mux.workspace_resync` (see Ordered Workspace Catalog) and the mode with `GET /api/mux/status` (see `server-modes`).
+
+#### Scenario: Welcome before any request
+- **WHEN** a client completes the native service negotiation and sends nothing
+- **THEN** it receives `mux.welcome` with the server's `capabilities`
+
+#### Scenario: Workspace comes from the catalog
+- **WHEN** a client connects to a server whose workspace holds screens `C`, `A`, `B` in that order and sends `mux.workspace_resync`
+- **THEN** the welcome lists no screens, and the `mux.workspace_snapshot` lists `C`, `A`, `B` in that order
+
+### Requirement: Pane State From Session Snapshots
+Session snapshots SHALL carry `displayTitle` and `busy`, and an ordinary terminal pane's title SHALL match its session's display title. `busy` denotes a known foreground process other than the session's original shell, not agent thinking; exited sessions are not busy. `displayTitle` SHALL use the last title a program other than the original shell set with OSC 0 or OSC 2 when there is one, else the foreground process name; for known shell names it SHALL include the working directory, shortened under the server user's home. Display titles SHALL be plain text bounded to 500 characters. Process name and working directory SHALL be known on Linux and macOS; on other platforms they MAY be empty. The server SHALL refresh these values while no client is attached and SHALL close panes on exit itself (see `terminal-sessions`, Process Exit); clients SHALL use these values and leave automatic exit closure to the server.
+
+#### Scenario: Reconnect to an unattended pane
+- **WHEN** a process changes while no window shows its pane and a client later resynchronizes
+- **THEN** the snapshot gives its current `displayTitle` and `busy` state and the pane title matches
+
+#### Scenario: Foreground program changes
+- **WHEN** the user starts `vim` in a pane's shell
+- **THEN** within about a second the session's next snapshot gives `busy` true and `displayTitle` `vim`
+
+#### Scenario: Program sets a window title
+- **WHEN** a program other than the shell in a pane's session sets the OSC 2 title `build`
+- **THEN** the session's next snapshot gives `displayTitle` `build`
+
+### Requirement: Relative Screen Placement Announcement
+A supporting service SHALL announce `screen-placement-v1` in `mux.welcome.capabilities`. A native client SHALL require that capability and `workspace-catalog-v1` before sending `move_screen`. The operation SHALL use the existing ordered session protocol, rejection reporting and workspace-change propagation.
 
 #### Scenario: Supported relative placement
 - **WHEN** a client submits a valid `move_screen` to a supporting service followed by `mux.workspace_resync`
@@ -720,7 +717,3 @@ A supporting service SHALL announce `screen-placement-v1` in `mux.welcome.capabi
 #### Scenario: Invalid anchor representation
 - **WHEN** a recognized `move_screen` request supplies a non-string non-null insertion anchor
 - **THEN** it changes no workspace state and is not treated as an omitted anchor or end placement
-
-#### Scenario: Legacy full-list reorder
-- **WHEN** an existing client sends `reorder_screens` with a partial list containing an unknown ID
-- **THEN** the existing replacement semantics apply, filtering the unknown ID without appending omitted Screens

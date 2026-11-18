@@ -82,7 +82,7 @@ The server SHALL keep each session's records: a root record from reports without
 - **THEN** the child reported least recently is removed, the new one is kept and the root record remains
 
 ### Requirement: Status Record Lifetime
-`working`, `blocked` and `idle` records SHALL be removed at an OSC 133 `A` in the session's output, when the session of a pane stops being busy (see `terminal-sessions`, Session Metadata Updates), checked at least every 500 ms, and when the session's output ends; `done` and `error` records SHALL survive these. Changes SHALL apply in the order of the output. A full reset (`ESC c`) SHALL remove every record; a soft reset (`CSI ! p`), a switch between the normal and the alternate screen and a resize SHALL remove none. Closing or removing a session removes its records.
+`working`, `blocked` and `idle` records SHALL be removed at an OSC 133 `A` in the session's output, when the session of a pane stops being busy (see `mux-protocol`, Pane State From Session Snapshots), checked at least every 500 ms, and when the session's output ends; `done` and `error` records SHALL survive these. Changes SHALL apply in the order of the output. A full reset (`ESC c`) SHALL remove every record; a soft reset (`CSI ! p`), a switch between the normal and the alternate screen and a resize SHALL remove none. Closing or removing a session removes its records.
 
 #### Scenario: Agent killed without clearing
 - **WHEN** a program started from a pane's shell reports `blocked` and is killed, so the shell is the foreground process again

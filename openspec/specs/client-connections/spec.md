@@ -17,30 +17,6 @@ Authorized native clients and owner CLI requests over the control socket SHALL o
 - **WHEN** equivalent invalid requests arrive through native IPC and the owner control socket
 - **THEN** both reject them with equivalent error/status semantics and no effects
 
-### Requirement: Native Transport Negotiation
-A native connection SHALL negotiate transport version 1 independently of mux and verify the service instance/limits before application requests. Each framing/service handshake SHALL fail within 5 seconds if incomplete. A launcher MAY report preparation progress under its existing startup deadlines, but SHALL admit no application input until service negotiation completes. Unsupported versions, invalid framing and mismatched discovery SHALL fail before dispatch without a fallback listener.
-
-#### Scenario: Unsupported endpoint
-- **WHEN** a client reaches an endpoint with an unsupported native transport version
-- **THEN** it reports incompatibility and sends no application operation or TCP fallback request
-
-#### Scenario: Stale discovery
-- **WHEN** the endpoint's service instance differs from the instance in the discovery record
-- **THEN** the client rejects it and refreshes discovery without sending queued input
-
-#### Scenario: Helper still preparing its backend
-- **WHEN** a native helper has negotiated framing but is still starting WSL or preparing SSH
-- **THEN** it can report bounded progress, but no application request is dispatched before the verified service generation is ready
-
-#### Scenario: Owner host-open intent is pinned before preparation
-- **WHEN** an authorized main broker opens a separate host stream through a private owner endpoint
-- **THEN** the endpoint verifies the expected local service instance before preparing SSH and assigns the validated target for the lifetime of that stream
-- **AND** a stale local instance cannot initiate SSH work through a replacement hub
-
-#### Scenario: Remote carriers cannot open a local host stream
-- **WHEN** a peer sends host-open intent on an assigned direct or SSH remote carrier
-- **THEN** it is rejected before transport acceptance and causes no local host preparation
-
 ### Requirement: Fixed Backend And Connection Identity
 Each client connection SHALL bind to one backend and one connection generation. Request IDs, subscriptions and replies SHALL be resolved only within that generation. A peer-supplied target, path, handle or session identifier SHALL NOT select another backend or change the caller's authority.
 
@@ -461,3 +437,22 @@ Each application connection, direct or through an app-owned helper, SHALL retain
 - **THEN** only that connection is revoked, the service instance and local sessions remain available to the other and replacement connections
 - **AND** an invalid host-open or saturated data stream cannot terminate the other document connections
 - **AND** closing the app-owned outer pipe ends the embedded service and its local sessions/jobs
+
+### Requirement: Native Transport Version Negotiation
+A native connection SHALL negotiate transport version 1 independently of mux and verify the service instance/limits before application requests. Each framing/service handshake SHALL fail within 5 seconds if incomplete. A launcher MAY report preparation progress under its existing startup deadlines, but SHALL admit no application input until service negotiation completes. Unsupported versions, invalid framing and mismatched discovery SHALL fail before dispatch without a fallback listener. The transport hello SHALL carry no host-open intent: a hello with `openHost` SHALL be refused before transport acceptance on every carrier, and host streams SHALL be opened only through the owner helper's open command (see Remote Screen Hub Access in `access-control`).
+
+#### Scenario: Unsupported endpoint
+- **WHEN** a client reaches an endpoint with an unsupported native transport version
+- **THEN** it reports incompatibility and sends no application operation or TCP fallback request
+
+#### Scenario: Stale discovery
+- **WHEN** the endpoint's service instance differs from the instance in the discovery record
+- **THEN** the client rejects it and refreshes discovery without sending queued input
+
+#### Scenario: Helper still preparing its backend
+- **WHEN** a native helper has negotiated framing but is still starting WSL or preparing SSH
+- **THEN** it can report bounded progress, but no application request is dispatched before the verified service generation is ready
+
+#### Scenario: Host-open intent in the hello
+- **WHEN** a peer sends a hello with `openHost` to the daemon's native endpoint or on an assigned direct or SSH remote carrier
+- **THEN** the hello is refused before transport acceptance and no SSH preparation or host stream starts

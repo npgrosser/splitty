@@ -32,10 +32,10 @@ A screen's layout tree SHALL consist of two node kinds: a `slot`, which holds an
 - **THEN** both panes occupy the same area and only one of them is shown at a time
 
 ### Requirement: Layout Operations
-The server SHALL change the workspace only through operations: workspace-level `apply_template`, `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_screen`, `move_pane_to_screen`, `move_tab_group_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `move_tab`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`, `mark_sent`, plus `create_job`, `stop_job`, `forget_job`, trusted job lifecycle/ownership operations, and trusted viewer operations the server derives from control API requests: an agent's reply to an annotation, and the start and end of a wait for a review (see `viewer-annotations`). An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `apply_template`, `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` and `mark_sent`, which only `mux-protocol` accepts (see `templates`, `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state, and neither SHALL the trusted viewer operations over any transport.
+The server SHALL change the workspace only through operations: workspace-level `apply_template`, `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `move_screen`, `move_pane_to_screen`, `move_tab_group_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `move_tab`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`, `mark_sent`, plus `create_job`, `stop_job`, `forget_job`, trusted job lifecycle/ownership operations, and trusted viewer operations the server derives from control API requests: an agent's reply to an annotation, and the start and end of a wait for a review (see `viewer-annotations`). An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `apply_template`, `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` and `mark_sent`, which only `mux-protocol` accepts (see `templates`, `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state, and neither SHALL the trusted viewer operations over any transport.
 
 #### Scenario: Same op from two transports
-- **WHEN** an identical `split_pane` op is applied once via a native client and once via the HTTP control API against identical workspaces
+- **WHEN** an identical `split_pane` op is applied once over a client connection and once via the HTTP control API against identical workspaces
 - **THEN** both resulting workspaces have the same layout structure and both spawn one new session
 
 #### Scenario: Screen-level op on an unknown screen
@@ -51,7 +51,7 @@ The server SHALL change the workspace only through operations: workspace-level `
 - **THEN** the server refuses it, and the workspace stays unchanged
 
 #### Scenario: Viewer from both transports
-- **WHEN** an identical `open_viewer` op is applied once via a native client and once via the HTTP control API against identical workspaces
+- **WHEN** an identical `open_viewer` op is applied once over a client connection and once via the HTTP control API against identical workspaces
 - **THEN** both resulting workspaces hold the same viewer pane in the same place, and neither spawns a session
 
 #### Scenario: Annotations only through the window
@@ -59,7 +59,7 @@ The server SHALL change the workspace only through operations: workspace-level `
 - **THEN** the server refuses it, and the workspace stays unchanged
 
 #### Scenario: No client writes an agent's reply
-- **WHEN** a client submits an operation that would add an agent's reply or start a wait for a review, over a native connection or the control API
+- **WHEN** a client submits an operation that would add an agent's reply or start a wait for a review, over a client connection or the control API
 - **THEN** the server refuses it, and the workspace stays unchanged
 
 #### Scenario: Relative Screen placement through either interface
@@ -147,39 +147,6 @@ On `close_screen` the server SHALL remove the screen, end every session belongin
 #### Scenario: Closing an unknown screen
 - **WHEN** `close_screen` names a screen that does not exist
 - **THEN** the op is rejected and no session is ended
-
-### Requirement: Screen Rename, Activation and Order
-The server SHALL apply `rename_screen` and `set_active_screen` only to existing screens and SHALL reject them otherwise. On `reorder_screens` the server SHALL set the screen order to the given list of screen IDs, ignoring IDs that do not name an existing screen.
-
-On `move_screen`, the server SHALL place the named existing ordered Screen immediately before an existing ordered anchor, or at the current end when no anchor is given, using the payload in `docs/protocol.ts`. It SHALL apply the intent to current state, retaining every other order entry and all Screens omitted from the order as omitted. Repeated entries for the moved Screen SHALL become one entry; other duplicates SHALL remain unchanged. Missing or unordered moved/anchor Screens SHALL reject the operation atomically. A valid self-anchor SHALL be a no-op. No accepted placement SHALL change active Screen identity, Screen revisions, layouts, panes or sessions, or produce process effects. Legacy `reorder_screens` semantics SHALL remain unchanged.
-
-#### Scenario: Activate an unknown screen
-- **WHEN** `set_active_screen` names a screen that does not exist
-- **THEN** the op is rejected and the active screen is unchanged
-
-#### Scenario: Reorder with a stale ID
-- **WHEN** `reorder_screens` is applied with `[C, X, A, B]` where X does not exist
-- **THEN** the screen order becomes `[C, A, B]`
-
-#### Scenario: Relative placement preserves a concurrent Screen
-- **WHEN** a client observed `[A, B, C]`, another client appended D, and the first client then moves C before A
-- **THEN** the order becomes `[C, A, B, D]`, and the active Screen and all Screen content and sessions remain unchanged
-
-#### Scenario: Relative end uses current state
-- **WHEN** another client appended D before `move_screen` moves A to the end of `[A, B, C, D]`
-- **THEN** the order becomes `[B, C, D, A]` without replacing the other client's addition
-
-#### Scenario: Missing or unlisted placement identity
-- **WHEN** the moved Screen or its anchor was deleted or omitted from the current order before `move_screen` applies
-- **THEN** the operation is rejected with no workspace change, even if an omitted Screen still exists
-
-#### Scenario: Partial and duplicate order remains bounded to the moved Screen
-- **WHEN** X exists but is unlisted, the order is `[B, B, A, A, C]`, and A is moved before B
-- **THEN** the order becomes `[A, B, B, C]`, X remains unlisted, and all Screen records remain unchanged
-
-#### Scenario: Placement does not navigate
-- **WHEN** an already correctly placed Screen is moved to the same position or names itself as the anchor
-- **THEN** the effective order and active Screen stay unchanged and no session effect occurs
 
 ### Requirement: Splitting a Pane
 On `split_pane` the server SHALL require that the source pane exists and lies in the screen's root layout; panes in floating entries cannot be split. The server SHALL add a new `terminal` pane with a new session in a new slot next to the source pane's slot, after it by default or before it when `newPaneIndex` is 0. If the source slot's parent split has the requested axis, the new slot SHALL be inserted as a sibling and the parent's sizes SHALL be set to `resultingSizes` or to equal fractions. Otherwise the source slot SHALL be replaced by a new split of the requested axis containing both slots, with sizes `resultingSizes` or `[0.5, 0.5]`. When given, `resultingSizes` MUST contain exactly one finite, non-negative value per child of the resulting split and sum to 1 within 0.01: one more than the existing parent child count when inserting a sibling, otherwise two. Invalid sizes SHALL leave the complete workspace, its revisions and sessions unchanged.
@@ -773,3 +740,32 @@ A native local Screen placement SHALL capture its connection, Screen and optiona
 #### Scenario: Failed or uncertain native placement
 - **WHEN** the service rejects a placement or its result cannot be observed after connection loss
 - **THEN** the native client retains or refreshes authoritative order without recreating Screens, claiming an unobserved success, or replaying the placement
+
+### Requirement: Screen Rename, Activation and Placement
+The server SHALL apply `rename_screen` and `set_active_screen` only to existing screens and SHALL reject them otherwise.
+
+On `move_screen`, the server SHALL place the named existing ordered Screen immediately before an existing ordered anchor, or at the current end when no anchor is given, using the payload in `docs/protocol.ts`. It SHALL apply the intent to current state, retaining every other order entry and all Screens omitted from the order as omitted. Repeated entries for the moved Screen SHALL become one entry; other duplicates SHALL remain unchanged. Missing or unordered moved/anchor Screens SHALL reject the operation atomically. A valid self-anchor SHALL be a no-op. No accepted placement SHALL change active Screen identity, Screen revisions, layouts, panes or sessions, or produce process effects.
+
+#### Scenario: Activate an unknown screen
+- **WHEN** `set_active_screen` names a screen that does not exist
+- **THEN** the op is rejected and the active screen is unchanged
+
+#### Scenario: Relative placement preserves a concurrent Screen
+- **WHEN** a client observed `[A, B, C]`, another client appended D, and the first client then moves C before A
+- **THEN** the order becomes `[C, A, B, D]`, and the active Screen and all Screen content and sessions remain unchanged
+
+#### Scenario: Relative end uses current state
+- **WHEN** another client appended D before `move_screen` moves A to the end of `[A, B, C, D]`
+- **THEN** the order becomes `[B, C, D, A]` without replacing the other client's addition
+
+#### Scenario: Missing or unlisted placement identity
+- **WHEN** the moved Screen or its anchor was deleted or omitted from the current order before `move_screen` applies
+- **THEN** the operation is rejected with no workspace change, even if an omitted Screen still exists
+
+#### Scenario: Partial and duplicate order remains bounded to the moved Screen
+- **WHEN** X exists but is unlisted, the order is `[B, B, A, A, C]`, and A is moved before B
+- **THEN** the order becomes `[A, B, B, C]`, X remains unlisted, and all Screen records remain unchanged
+
+#### Scenario: Placement does not navigate
+- **WHEN** an already correctly placed Screen is moved to the same position or names itself as the anchor
+- **THEN** the effective order and active Screen stay unchanged and no session effect occurs

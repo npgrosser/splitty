@@ -75,7 +75,7 @@ The control API SHALL read and modify the same workspace state that native clien
 - **THEN** `GET /api/mux/screens` returns an empty array with status 200
 
 ### Requirement: Server Status
-`GET /api/mux/status` SHALL return a JSON object with `serverMode` (`daemon` or `embedded`, see `server-modes`), `version`, `screens` (number of screens), `sessions` (number of sessions across all screens), `activeScreen` (the active screen id, or `null` when there is none) and `listenAddr` (always `null`, since the service has no TCP listener), plus `instance` and `transportVersion`.
+`GET /api/mux/status` SHALL return a JSON object with `serverMode` (`daemon` or `embedded`, see `server-modes`), `version`, `screens` (number of screens), `sessions` (number of sessions across all screens) and `activeScreen` (the active screen id, or `null` when there is none), plus `instance` and `transportVersion`. It SHALL carry no listener address, since the service has no TCP listener.
 
 #### Scenario: Status of a daemon
 - **WHEN** a client sends `GET /api/mux/status` to a server running as a daemon with two screens and three sessions
@@ -83,7 +83,7 @@ The control API SHALL read and modify the same workspace state that native clien
 
 #### Scenario: No listener address
 - **WHEN** a client sends `GET /api/mux/status` to a daemon or an embedded service
-- **THEN** `listenAddr` is `null`
+- **THEN** the response has no `listenAddr`
 
 ### Requirement: Submitting Layout Operations
 `POST /api/mux/op` SHALL accept a JSON body `{"screenId": string, "op": object}` and apply `op` to the workspace with the semantics defined in `workspace-model`. On success the server MUST respond with status 200 and `{"ok": true, "revision": n, "screenId": string, "created": array}`, where `screenId` is the actual affected screen, `n` is its post-op revision or zero if it was removed, and `created` lists the `paneId` and `sessionId` of successfully started sessions. For `open_viewer` the response SHALL also carry `paneId`, the viewer pane that shows the document, `reused`, true when that pane existed before (see `viewer-panes`, Reopening A File), and `viewerRevision`, the revision of that pane's viewer record after the operation. Managed-job operations SHALL use the same semantics, authorization and idempotency as the job endpoints. A session spawn failure MUST NOT be answered as `ok: true`. An op of type `apply_template`, `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` or `mark_sent` MUST be refused with status 400 and leave the workspace unchanged (see `session-scratchpad` and `viewer-annotations`).
@@ -393,9 +393,9 @@ Authenticated windows of earlier releases SHALL be able to extract a template wi
 Requirements that name an operation by an HTTP method and an `/api/...` path name its HTTP form in the operation catalog, which the native operation of the same catalog entry shares (validation, status and error object). No listener SHALL serve that form: the owner control socket routes only the paths of Control Socket Route Set (see `access-control`) and answers 404 for every other one, and every other operation is reached only as its native operation over an authorized client connection, within the role that connection has (see `client-connections`, Enumerated Native Requests).
 
 #### Scenario: Native operation with an HTTP name
-- **WHEN** a native main client requests `host.list`, which the catalog also names `GET /api/remote/hosts`
-- **THEN** it receives the known hosts
+- **WHEN** a native main client requests `remote.directory.get`, which the catalog also names `GET /api/remote/directory`
+- **THEN** it receives the merged host directory
 
 #### Scenario: The same path on the control socket
-- **WHEN** a pane process sends `GET /api/remote/hosts` or `GET /api/home/settings` over the owner control socket
+- **WHEN** a pane process sends `GET /api/remote/directory` or `GET /api/home/settings` over the owner control socket
 - **THEN** the server answers 404 and changes nothing

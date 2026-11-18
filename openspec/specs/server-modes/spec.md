@@ -5,17 +5,6 @@ Defines how the Splitty server runs and what outlives what: the embedded and dae
 
 ## Requirements
 
-### Requirement: Server Mode Reporting
-The server SHALL report its mode to clients as `serverMode` with the value `"daemon"` or `"embedded"` in every `mux.welcome` message (see `mux-protocol`) and in the response of `GET /api/mux/status` (see `control-api`).
-
-#### Scenario: Welcome from a daemon
-- **WHEN** a client connects to a server started with `splitty daemon start`
-- **THEN** the `mux.welcome` it receives carries `serverMode: "daemon"`
-
-#### Scenario: Status from an embedded server
-- **WHEN** a pane process of the desktop app's embedded service requests `GET /api/mux/status` through `SPLITTY_SOCK`
-- **THEN** the response contains `"serverMode": "embedded"`
-
 ### Requirement: Desktop App Hosting On macOS And Linux
 On macOS and Linux the desktop app SHALL always start an owned embedded local service without a UI TCP listener. Its local workspace and jobs SHALL end when the app exits. The app SHALL NOT automatically connect to, start, restart or stop an independent local daemon, adopt its keepers or modify its discovery/workspace files. Existing, incompatible, unreachable, stale or corrupt daemon discovery SHALL not change desktop startup. Persistent local access remains explicit through `splitty daemon start`.
 
@@ -327,3 +316,14 @@ The daemon launcher SHALL acquire the instance lock before starting its detached
 #### Scenario: Ready before success
 - **WHEN** `splitty daemon start` reports `SPLITTY_CLIENT_SOCKET=<path>`
 - **THEN** a native client can negotiate with the daemon at that path at once
+
+### Requirement: Server Mode In The Status
+The server SHALL report its mode to clients as `serverMode` with the value `"daemon"` or `"embedded"` in the response of `GET /api/mux/status` (see `control-api`). `mux.welcome` SHALL NOT carry it (see `mux-protocol`, Welcome Announces Capabilities).
+
+#### Scenario: Status from a daemon
+- **WHEN** a client sends `GET /api/mux/status` to a server started with `splitty daemon start`
+- **THEN** the response contains `"serverMode": "daemon"`
+
+#### Scenario: Status from an embedded server
+- **WHEN** a pane process of the desktop app's embedded service requests `GET /api/mux/status` through `SPLITTY_SOCK`
+- **THEN** the response contains `"serverMode": "embedded"`

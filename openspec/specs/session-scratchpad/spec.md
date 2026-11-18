@@ -65,13 +65,6 @@ A client SHALL replace the text it shows with a newer one from the server only w
 - **WHEN** a window saves a scratchpad of a host whose `mux.welcome` does not list `scratchpad-versions-v1`
 - **THEN** the save carries no `ifVersion`, and the window holds its saved text against snapshots for two seconds
 
-### Requirement: Scratchpad Capability
-The server SHALL announce `scratchpad-v1` in `mux.welcome.capabilities`. A client SHALL offer a server's scratchpads only when that server announced it, so that no text is typed into a scratchpad a server would not keep.
-
-#### Scenario: Host without scratchpads
-- **WHEN** a window connects to a host whose daemon does not announce `scratchpad-v1`
-- **THEN** the window offers no scratchpad for that host's panes
-
 ### Requirement: The Window Is The Only Channel
 Scratchpads SHALL be shown and changed only through a window's `mux-protocol` connection. The control API, and with it the CLI and the processes in panes, SHALL neither return a scratchpad's text nor change it (see `control-api`), so that text written for later does not reach an agent before the user sends it.
 
