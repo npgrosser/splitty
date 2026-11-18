@@ -6,8 +6,8 @@ mod reverse;
 mod supervisor;
 
 pub use forward::{
-    check_forward_address, parse_forwards, reserve, reserve_exact, reserve_free_at, Forward,
-    ForwardError, PortForward, PortTunnel, PortTunnelError,
+    check_forward_address, reserve, reserve_exact, reserve_free_at, Forward, PortForward,
+    PortTunnel, PortTunnelError,
 };
 pub use reverse::{
     parse_prepared, prepare_command, socket_path, ReverseTunnel, ReverseTunnelError, HEARTBEAT,
