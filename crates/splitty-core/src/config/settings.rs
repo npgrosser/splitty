@@ -1,8 +1,7 @@
 //! Settings structs, defaults, validation, and TOML persistence.
 //!
 //! Defines `HomeConfig` (the main user-facing configuration) along with all
-//! nested settings groups (terminal, appearance, tabs, drawer,
-//! window, notifications, remote). Includes TOML <-> JSON key transformation
+//! its settings groups. Includes TOML <-> JSON key transformation
 //! (snake_case on disk, camelCase on the wire) and deep-merge for partial updates.
 
 use std::fs;
@@ -112,11 +111,8 @@ pub struct HomeConfig {
     pub editors: EditorSettings,
     pub terminal: TerminalSettings,
     pub appearance: AppearanceSettings,
-    pub tabs: TabSettings,
     pub drawer: DrawerSettings,
-    pub window: WindowSettings,
     pub notifications: NotificationSettings,
-    pub experimental: ExperimentalSettings,
     #[serde(default)]
     pub remote: RemoteSettings,
     #[serde(default)]
@@ -134,11 +130,8 @@ impl Default for HomeConfig {
             editors: EditorSettings::default(),
             terminal: TerminalSettings::default(),
             appearance: AppearanceSettings::default(),
-            tabs: TabSettings::default(),
             drawer: DrawerSettings::default(),
-            window: WindowSettings::default(),
             notifications: NotificationSettings::default(),
-            experimental: ExperimentalSettings::default(),
             remote: RemoteSettings::default(),
             native_tabs: NativeTabSettings::default(),
             shells,
@@ -149,7 +142,6 @@ impl Default for HomeConfig {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSettings {
-    pub renderer: String,
     /// The terminal palette: a name, or `default` to use `theme_dark` and
     /// `theme_light` by the UI theme's mode.
     pub theme: String,
@@ -161,8 +153,6 @@ pub struct TerminalSettings {
     #[serde(default = "default_terminal_theme")]
     pub theme_light: String,
     pub close_on_exit: String,
-    pub ligatures: bool,
-    pub window_padding_balance: bool,
     pub scroll_to_bottom: Option<bool>,
     pub allow_osc52_write: bool,
     /// Which clients decide the PTY size of a session several clients show:
@@ -170,28 +160,6 @@ pub struct TerminalSettings {
     pub size_policy: String,
     /// How long after its user's last action a client still counts as active.
     pub size_idle_seconds: u32,
-    pub xterm: XtermSettings,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct XtermSettings {
-    pub gpu_acceleration: String,
-    pub scrollbar_width: i32,
-    pub scrollbar_overlay: bool,
-    pub scrollbar_fade: bool,
-    pub scroll_sensitivity: f64,
-    pub fast_scroll_sensitivity: f64,
-    pub line_height: f64,
-    pub letter_spacing: f64,
-    pub font_weight: String,
-    pub font_weight_bold: String,
-    pub draw_bold_text_in_bright_colors: bool,
-    pub minimum_contrast_ratio: f64,
-    pub custom_glyphs: bool,
-    pub rescale_overlapping_glyphs: bool,
-    pub allow_transparency: bool,
-    pub cursor_blink: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -216,33 +184,8 @@ pub struct AppearanceSettings {
     /// The zoom level of this computer's windows, within [`ZOOM_LEVELS`];
     /// an update sets one of them.
     pub zoom: f64,
-    /// What zooms: `window` (the whole page) or `terminals` (their font size).
+    /// What zooms: `window` (the whole window) or `terminals` (their font size).
     pub zoom_scope: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct TabSettings {
-    pub auto_hide: bool,
-    pub auto_hide_multi: bool,
-    pub sync_row: bool,
-    pub locked: bool,
-    pub close_button: String,
-    pub min_width: i32,
-    pub show_split: bool,
-    pub show_float: bool,
-    pub show_maximize: bool,
-    pub show_popout: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct WindowSettings {
-    pub native_title_bar: bool,
-    #[serde(default = "default_title_bar_color_mode")]
-    pub title_bar_color_mode: String,
-    pub title_bar_height: i32,
-    pub title_bar_scroll: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -252,8 +195,6 @@ pub struct DrawerSettings {
     pub pinned: bool,
     pub edge_reveal: bool,
     pub show_tips: bool,
-    #[serde(default)]
-    pub resizable: bool,
     pub sidebar_width: i32,
 }
 
@@ -278,13 +219,6 @@ pub struct NotificationSettings {
 
 fn default_program_status() -> bool {
     true
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ExperimentalSettings {
-    pub linked_sashes: bool,
-    pub resize_debounce: u32,
 }
 
 /// Local editor selection only; these preferences never authorize a launch.
@@ -318,9 +252,8 @@ pub struct EditorProject {
     pub editor: String,
 }
 
-/// The tab bars of the native app. They are its own: the native app shows
-/// every group action and a close button on every tab unless told otherwise,
-/// where `tabs` keeps what the web client shows.
+/// The desktop app's tab bars show every group action and a close button
+/// on every tab by default.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct NativeTabSettings {
@@ -364,10 +297,6 @@ pub struct RemoteSettings {
 // Default implementations
 // ---------------------------------------------------------------------------
 
-fn default_title_bar_color_mode() -> String {
-    "tabBar".into()
-}
-
 fn default_terminal_theme() -> String {
     "default".into()
 }
@@ -375,41 +304,14 @@ fn default_terminal_theme() -> String {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
-            renderer: "xterm".into(),
             theme: "default".into(),
             theme_dark: default_terminal_theme(),
             theme_light: default_terminal_theme(),
             close_on_exit: "always".into(),
-            ligatures: false,
-            window_padding_balance: true,
             scroll_to_bottom: Some(true),
             allow_osc52_write: true,
             size_policy: "active".into(),
             size_idle_seconds: 120,
-            xterm: XtermSettings::default(),
-        }
-    }
-}
-
-impl Default for XtermSettings {
-    fn default() -> Self {
-        Self {
-            gpu_acceleration: "on".into(),
-            scrollbar_width: 14,
-            scrollbar_overlay: true,
-            scrollbar_fade: true,
-            scroll_sensitivity: 1.0,
-            fast_scroll_sensitivity: 5.0,
-            line_height: 1.0,
-            letter_spacing: 0.0,
-            font_weight: "normal".into(),
-            font_weight_bold: "bold".into(),
-            draw_bold_text_in_bright_colors: true,
-            minimum_contrast_ratio: 1.0,
-            custom_glyphs: true,
-            rescale_overlapping_glyphs: false,
-            allow_transparency: false,
-            cursor_blink: false,
         }
     }
 }
@@ -448,41 +350,12 @@ impl Default for AppearanceSettings {
     }
 }
 
-impl Default for TabSettings {
-    fn default() -> Self {
-        Self {
-            auto_hide: false,
-            auto_hide_multi: false,
-            sync_row: false,
-            locked: false,
-            close_button: "active".into(),
-            min_width: 12,
-            show_split: true,
-            show_float: false,
-            show_maximize: false,
-            show_popout: false,
-        }
-    }
-}
-
-impl Default for WindowSettings {
-    fn default() -> Self {
-        Self {
-            native_title_bar: !cfg!(target_os = "linux"),
-            title_bar_color_mode: default_title_bar_color_mode(),
-            title_bar_height: 0,
-            title_bar_scroll: true,
-        }
-    }
-}
-
 impl Default for DrawerSettings {
     fn default() -> Self {
         Self {
             pinned: default_drawer_pinned(),
             edge_reveal: true,
             show_tips: true,
-            resizable: false,
             sidebar_width: 200,
         }
     }
@@ -502,15 +375,6 @@ impl Default for NotificationSettings {
     }
 }
 
-impl Default for ExperimentalSettings {
-    fn default() -> Self {
-        Self {
-            linked_sashes: false,
-            resize_debounce: 5,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
@@ -518,9 +382,6 @@ impl Default for ExperimentalSettings {
 impl HomeConfig {
     pub fn validate(&mut self) {
         // Terminal settings
-        if self.terminal.renderer != "xterm" && self.terminal.renderer != "ghostty" {
-            self.terminal.renderer = "xterm".into();
-        }
         for theme in [
             &mut self.terminal.theme,
             &mut self.terminal.theme_dark,
@@ -544,47 +405,6 @@ impl HomeConfig {
         }
         if !(10..=3600).contains(&self.terminal.size_idle_seconds) {
             self.terminal.size_idle_seconds = 120;
-        }
-
-        // Xterm settings
-        let xterm = &mut self.terminal.xterm;
-        if xterm.gpu_acceleration != "on" && xterm.gpu_acceleration != "off" {
-            xterm.gpu_acceleration = "on".into();
-        }
-        if !(1..=50).contains(&xterm.scrollbar_width) {
-            xterm.scrollbar_width = 14;
-        }
-        if !(0.1..=10.0).contains(&xterm.scroll_sensitivity) {
-            xterm.scroll_sensitivity = 1.0;
-        }
-        if !(1.0..=20.0).contains(&xterm.fast_scroll_sensitivity) {
-            xterm.fast_scroll_sensitivity = 5.0;
-        }
-        if !(0.5..=3.0).contains(&xterm.line_height) {
-            xterm.line_height = 1.0;
-        }
-        if !(-5.0..=10.0).contains(&xterm.letter_spacing) {
-            xterm.letter_spacing = 0.0;
-        }
-        let valid_weights = [
-            "normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900",
-        ];
-        if !valid_weights.contains(&xterm.font_weight.as_str()) {
-            xterm.font_weight = "normal".into();
-        }
-        if !valid_weights.contains(&xterm.font_weight_bold.as_str()) {
-            xterm.font_weight_bold = "bold".into();
-        }
-        if !(1.0..=21.0).contains(&xterm.minimum_contrast_ratio) {
-            xterm.minimum_contrast_ratio = 1.0;
-        }
-
-        // Tab settings
-        if !matches!(self.tabs.close_button.as_str(), "always" | "active") {
-            self.tabs.close_button = "active".into();
-        }
-        if !(0..=40).contains(&self.tabs.min_width) {
-            self.tabs.min_width = 12;
         }
 
         if !matches!(self.native_tabs.close_button.as_str(), "always" | "active") {
@@ -619,22 +439,6 @@ impl HomeConfig {
             self.drawer.sidebar_width = 200;
         }
 
-        // Window settings
-        if !matches!(
-            self.window.title_bar_color_mode.as_str(),
-            "tabBar" | "native" | "terminal" | "activeTab"
-        ) {
-            self.window.title_bar_color_mode = default_title_bar_color_mode();
-        }
-        if self.window.title_bar_height != 0 && !(28..=60).contains(&self.window.title_bar_height) {
-            self.window.title_bar_height = 0;
-        }
-
-        // Experimental settings
-        if self.experimental.resize_debounce > 200 {
-            self.experimental.resize_debounce = 5;
-        }
-
         // Remote settings: a bounded list of distinct plain targets.
         let mut hosts = Vec::new();
         for host in std::mem::take(&mut self.remote.reconnect_hosts) {
@@ -661,22 +465,10 @@ pub const ZOOM_LEVELS: [f64; 13] = [
 
 /// Server-owned control metadata; paths use the JSON wire spelling.
 pub fn settings_metadata() -> Value {
-    let mut limits = serde_json::json!({
-            "terminal.renderer": {"values": ["xterm", "ghostty"]},
+    let limits = serde_json::json!({
             "terminal.closeOnExit": {"values": ["always", "never", "graceful"]},
             "terminal.sizePolicy": {"values": ["active", "latest", "smallest"]},
             "terminal.sizeIdleSeconds": {"min": 10, "max": 3600, "step": 10},
-            "terminal.xterm.gpuAcceleration": {"values": ["on", "off"]},
-            "terminal.xterm.scrollbarWidth": {"min": 1, "max": 50, "step": 1},
-            "terminal.xterm.scrollSensitivity": {"min": 0.1, "max": 10, "step": 0.1},
-            "terminal.xterm.fastScrollSensitivity": {"min": 1, "max": 20, "step": 0.5},
-            "terminal.xterm.lineHeight": {"min": 0.5, "max": 3, "step": 0.05},
-            "terminal.xterm.letterSpacing": {"min": -5, "max": 10, "step": 0.5},
-            "terminal.xterm.fontWeight": {"values": ["normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"]},
-            "terminal.xterm.fontWeightBold": {"values": ["normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"]},
-            "terminal.xterm.minimumContrastRatio": {"min": 1, "max": 21, "step": 0.1},
-    });
-    limits.as_object_mut().expect("limit map").extend(serde_json::json!({
             "appearance.themeMode": {"values": ["fixed", "auto"]},
             "appearance.interfaceStyle": {"values": ["system", "theme"]},
             "appearance.windowDecoration": {"values": ["system", "splitty"]},
@@ -686,16 +478,11 @@ pub fn settings_metadata() -> Value {
             "appearance.fontSize": {"min": 0, "max": 24, "step": 1, "values": [0, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]},
             "appearance.zoom": {"min": ZOOM_LEVELS[0], "max": ZOOM_LEVELS[ZOOM_LEVELS.len() - 1], "values": ZOOM_LEVELS},
             "appearance.zoomScope": {"values": ["window", "terminals"]},
-            "tabs.closeButton": {"values": ["always", "active"]},
-            "tabs.minWidth": {"min": 0, "max": 40, "step": 1},
             "nativeTabs.closeButton": {"values": ["always", "active"]},
             "drawer.sidebarWidth": {"min": 150, "max": 400, "step": 10},
-            "window.titleBarColorMode": {"values": ["tabBar", "native", "terminal", "activeTab"]},
-            "window.titleBarHeight": {"min": 0, "max": 60, "step": 1, "values": [0, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]},
-            "experimental.resizeDebounce": {"min": 0, "max": 200, "step": 5},
             "editors.file": {"values": ["vscode", "zed"]},
             "editors.folder": {"values": ["vscode", "zed"]}
-    }).as_object().expect("limit map").clone());
+    });
     serde_json::json!({ "defaults": HomeConfig::default(), "limits": limits })
 }
 
@@ -721,9 +508,6 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
                 return Err(invalid(path, "expected a value"));
             };
             for (key, child) in object {
-                if path == "terminal" && matches!(key.as_str(), "linkTarget" | "webviewMode") {
-                    continue;
-                }
                 let field = if path.is_empty() {
                     key.to_owned()
                 } else {
@@ -768,15 +552,6 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
                 };
                 if !n.is_finite() || n < min || n > max {
                     return Err(invalid(path, "outside allowed range"));
-                }
-                if matches!(
-                    path,
-                    "terminal.xterm.scrollSensitivity" | "terminal.xterm.fastScrollSensitivity"
-                ) {
-                    let step = limit["step"].as_f64().unwrap_or(1.0);
-                    if ((n - min) / step - ((n - min) / step).round()).abs() > 1e-7 {
-                        return Err(invalid(path, "not on an allowed step"));
-                    }
                 }
             }
         }
@@ -1070,48 +845,14 @@ mod tests {
     #[test]
     fn test_defaults() {
         let cfg = HomeConfig::default();
-        assert_eq!(cfg.terminal.renderer, "xterm");
         assert_eq!(cfg.terminal.theme, "default");
         assert_eq!(cfg.terminal.close_on_exit, "always");
-        assert!(!cfg.terminal.ligatures);
-        assert!(cfg.terminal.window_padding_balance);
         assert_eq!(cfg.terminal.scroll_to_bottom, Some(true));
-        assert_eq!(cfg.terminal.xterm.gpu_acceleration, "on");
-        assert_eq!(cfg.terminal.xterm.scrollbar_width, 14);
-        assert!(cfg.terminal.xterm.scrollbar_overlay);
-        assert!(cfg.terminal.xterm.scrollbar_fade);
-        assert_eq!(cfg.terminal.xterm.scroll_sensitivity, 1.0);
-        assert_eq!(cfg.terminal.xterm.fast_scroll_sensitivity, 5.0);
-        assert!((cfg.terminal.xterm.line_height - 1.0).abs() < f64::EPSILON);
-        assert!((cfg.terminal.xterm.letter_spacing - 0.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.terminal.xterm.font_weight, "normal");
-        assert_eq!(cfg.terminal.xterm.font_weight_bold, "bold");
-        assert!(cfg.terminal.xterm.draw_bold_text_in_bright_colors);
-        assert!((cfg.terminal.xterm.minimum_contrast_ratio - 1.0).abs() < f64::EPSILON);
-        assert!(cfg.terminal.xterm.custom_glyphs);
-        assert!(!cfg.terminal.xterm.rescale_overlapping_glyphs);
-        assert!(!cfg.terminal.xterm.allow_transparency);
-        assert!(!cfg.terminal.xterm.cursor_blink);
         assert_eq!(cfg.appearance.theme, "splitty-dark");
         assert_eq!(cfg.appearance.border_radius, 1);
-        assert!(!cfg.tabs.auto_hide);
-        assert!(!cfg.tabs.auto_hide_multi);
-        assert!(!cfg.tabs.sync_row);
-        assert!(!cfg.tabs.locked);
-        assert_eq!(cfg.tabs.close_button, "active");
-        assert_eq!(cfg.tabs.min_width, 12);
-        assert!(cfg.tabs.show_split);
-        assert!(!cfg.tabs.show_float);
-        assert!(!cfg.tabs.show_maximize);
-        assert!(!cfg.tabs.show_popout);
         assert!(cfg.drawer.pinned);
         assert!(cfg.drawer.edge_reveal);
         assert!(cfg.drawer.show_tips);
-        assert!(!cfg.drawer.resizable);
-        assert_eq!(cfg.window.native_title_bar, !cfg!(target_os = "linux"));
-        assert_eq!(cfg.window.title_bar_color_mode, "tabBar");
-        assert_eq!(cfg.window.title_bar_height, 0);
-        assert!(cfg.window.title_bar_scroll);
         assert!(cfg.notifications.enabled);
         assert!(!cfg.notifications.toasts);
         assert!(!cfg.notifications.desktop);
@@ -1120,18 +861,6 @@ mod tests {
         assert!(cfg.notifications.process_crashed);
         assert!(cfg.notifications.program_status);
         assert!(!cfg.remote.auto_forward_ports);
-    }
-
-    #[test]
-    fn test_validate_renderer() {
-        let mut cfg = HomeConfig::default();
-        cfg.terminal.renderer = "invalid".into();
-        cfg.validate();
-        assert_eq!(cfg.terminal.renderer, "xterm");
-
-        cfg.terminal.renderer = "ghostty".into();
-        cfg.validate();
-        assert_eq!(cfg.terminal.renderer, "ghostty");
     }
 
     #[test]
@@ -1230,70 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_scrollbar_width_range() {
-        let mut cfg = HomeConfig::default();
-        cfg.terminal.xterm.scrollbar_width = 0;
-        cfg.validate();
-        assert_eq!(cfg.terminal.xterm.scrollbar_width, 14);
-
-        cfg.terminal.xterm.scrollbar_width = 51;
-        cfg.validate();
-        assert_eq!(cfg.terminal.xterm.scrollbar_width, 14);
-
-        cfg.terminal.xterm.scrollbar_width = 25;
-        cfg.validate();
-        assert_eq!(cfg.terminal.xterm.scrollbar_width, 25);
-    }
-
-    #[test]
-    fn test_validate_line_height_range() {
-        let mut cfg = HomeConfig::default();
-        cfg.terminal.xterm.line_height = 0.1;
-        cfg.validate();
-        assert!((cfg.terminal.xterm.line_height - 1.0).abs() < f64::EPSILON);
-
-        cfg.terminal.xterm.line_height = 4.0;
-        cfg.validate();
-        assert!((cfg.terminal.xterm.line_height - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_validate_font_weight() {
-        let mut cfg = HomeConfig::default();
-        cfg.terminal.xterm.font_weight = "invalid".into();
-        cfg.validate();
-        assert_eq!(cfg.terminal.xterm.font_weight, "normal");
-
-        cfg.terminal.xterm.font_weight = "400".into();
-        cfg.validate();
-        assert_eq!(cfg.terminal.xterm.font_weight, "400");
-    }
-
-    #[test]
-    fn test_validate_title_bar_height() {
-        let mut cfg = HomeConfig::default();
-        cfg.window.title_bar_height = 20;
-        cfg.validate();
-        assert_eq!(cfg.window.title_bar_height, 0);
-
-        cfg.window.title_bar_height = 35;
-        cfg.validate();
-        assert_eq!(cfg.window.title_bar_height, 35);
-    }
-
-    #[test]
-    fn test_validate_title_bar_color_mode() {
-        let mut cfg = HomeConfig::default();
-        cfg.window.title_bar_color_mode = "invalid".into();
-        cfg.validate();
-        assert_eq!(cfg.window.title_bar_color_mode, "tabBar");
-
-        cfg.window.title_bar_color_mode = "terminal".into();
-        cfg.validate();
-        assert_eq!(cfg.window.title_bar_color_mode, "terminal");
-    }
-
-    #[test]
     fn test_deep_merge_scalar() {
         let mut base = serde_json::json!({"a": 1, "b": 2});
         let patch = serde_json::json!({"b": 99});
@@ -1349,7 +1014,7 @@ mod tests {
     fn test_config_without_shell_section_migrates_to_system_profile() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "[terminal]\nrenderer = \"xterm\"\n").unwrap();
+        fs::write(&path, "[terminal]\ntheme = \"default\"\n").unwrap();
 
         let loaded = load_from(&path);
         assert!(!loaded.shells.profiles.is_empty());
@@ -1463,9 +1128,7 @@ mod tests {
 
         assert_eq!(updated.terminal.theme, "monokai");
         // Everything else stays at defaults.
-        assert_eq!(updated.terminal.renderer, "xterm");
         assert_eq!(updated.appearance.theme, "splitty-dark");
-        assert_eq!(updated.tabs.min_width, 12);
     }
 
     #[test]
@@ -1486,7 +1149,6 @@ mod tests {
         assert_eq!(changed.appearance.window_buttons, "system");
         assert_eq!(changed.appearance.theme, before.appearance.theme);
         assert_eq!(changed.terminal, before.terminal);
-        assert_eq!(changed.window, before.window);
         let saved = fs::read_to_string(&path).unwrap();
         assert!(update_at(
             &path,
@@ -1524,30 +1186,8 @@ mod tests {
     }
 
     #[test]
-    fn native_title_bar_default_and_saved_preferences() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("config.toml");
-
-        // An older partial config takes the current platform default.
-        fs::write(&path, "[window]\ntitle_bar_height = 40\n").unwrap();
-        assert_eq!(
-            load_from(&path).window.native_title_bar,
-            !cfg!(target_os = "linux")
-        );
-
-        for saved in [true, false] {
-            fs::write(&path, format!("[window]\nnative_title_bar = {saved}\n")).unwrap();
-            assert_eq!(load_from(&path).window.native_title_bar, saved);
-            let updated = update_at(&path, serde_json::json!({"tabs": {"minWidth": 18}})).unwrap();
-            assert_eq!(updated.window.native_title_bar, saved);
-            assert_eq!(load_from(&path).window.native_title_bar, saved);
-        }
-    }
-
-    #[test]
     fn test_notification_settings_roundtrip() {
-        // Simulate exactly what the frontend does: PATCH with camelCase JSON,
-        // then reload from disk (simulating page refresh / server restart).
+        // Update the settings with camelCase JSON and reload from disk.
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
 
@@ -1574,7 +1214,7 @@ mod tests {
         assert!(!reloaded.notifications.process_exited);
         assert!(reloaded.notifications.process_crashed);
 
-        // Also verify the GET response format (what frontend receives)
+        // Also verify the wire format.
         let json_response = serde_json::to_value(&reloaded).unwrap();
         let notifs = json_response.get("notifications").unwrap();
         assert_eq!(notifs.get("toasts").unwrap(), true);
@@ -1641,7 +1281,7 @@ mod tests {
         fs::write(&path, "[terminal]\ntheme = \"dark\"\n").unwrap();
         assert!(!load_from(&path).remote.auto_forward_ports);
 
-        // The frontend's camelCase update survives a reload, snake_case on disk.
+        // A camelCase update survives a reload, with snake_case on disk.
         let partial = serde_json::json!({"remote": {"autoForwardPorts": true}});
         assert!(update_at(&path, partial).unwrap().remote.auto_forward_ports);
         assert!(load_from(&path).remote.reconnect_hosts.is_empty());
@@ -1686,11 +1326,9 @@ mod tests {
         let cfg = load_from(&path);
         assert_eq!(cfg.terminal.theme, "dark");
         // Other terminal fields should be defaults.
-        assert_eq!(cfg.terminal.renderer, "xterm");
         assert_eq!(cfg.terminal.close_on_exit, "always");
         // Other sections should be defaults.
         assert_eq!(cfg.appearance.theme, "splitty-dark");
-        assert_eq!(cfg.tabs.min_width, 12);
     }
 
     #[test]
@@ -1724,27 +1362,19 @@ mod tests {
         assert_eq!(restored.editors.projects[0].connection, "host:Me@vm1");
     }
     #[test]
-    fn metadata_and_fractional_scroll_are_server_owned() {
+    fn metadata_and_fractional_zoom_are_server_owned() {
         let metadata = settings_metadata();
         assert_eq!(metadata["defaults"]["drawer"]["pinned"], true);
         assert_eq!(metadata["defaults"]["drawer"]["sidebarWidth"], 200);
-        assert_eq!(
-            metadata["limits"]["terminal.xterm.scrollSensitivity"]["step"],
-            0.1
-        );
+        assert!(metadata["limits"]["appearance.zoom"]["values"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(1.25)));
         let dir = TempDir::new().unwrap();
-        let cfg = update_at(
-            &dir.path().join("config.toml"),
-            serde_json::json!({
-                "terminal": { "xterm": { "scrollSensitivity": 1.3, "fastScrollSensitivity": 2.5 } }
-            }),
-        )
-        .unwrap();
-        assert_eq!(cfg.terminal.xterm.scroll_sensitivity, 1.3);
-        assert_eq!(cfg.terminal.xterm.fast_scroll_sensitivity, 2.5);
-        let restored = load_from(&dir.path().join("config.toml"));
-        assert_eq!(restored.terminal.xterm.scroll_sensitivity, 1.3);
-        assert_eq!(restored.terminal.xterm.fast_scroll_sensitivity, 2.5);
+        let path = dir.path().join("config.toml");
+        let config = update_at(&path, serde_json::json!({"appearance":{"zoom":1.25}})).unwrap();
+        assert_eq!(config.appearance.zoom, 1.25);
+        assert_eq!(load_from(&path).appearance.zoom, 1.25);
     }
 
     #[test]
@@ -1752,10 +1382,15 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         let before = update_at(&path, serde_json::json!({"drawer":{"sidebarWidth":280}})).unwrap();
+        let saved = fs::read(&path).unwrap();
         for (patch, field) in [
             (
-                serde_json::json!({"terminal":{"xterm":{"scrollSensitivity":0.15}}}),
-                "terminal.xterm.scrollSensitivity",
+                serde_json::json!({"terminal":{"xterm":{"cursorBlink":true}}}),
+                "terminal.xterm",
+            ),
+            (
+                serde_json::json!({"terminal":{"linkTarget":"tab"}}),
+                "terminal.linkTarget",
             ),
             (
                 serde_json::json!({"appearance":{"fontSize":7}}),
@@ -1775,29 +1410,77 @@ mod tests {
                 matches!(err, ConfigError::InvalidField { field: actual, .. } if actual == field)
             );
             assert_eq!(load_from(&path), before);
+            assert_eq!(fs::read(&path).unwrap(), saved);
         }
     }
 
     #[test]
-    fn removed_terminal_fields_do_not_survive_load() {
+    fn removed_settings_are_ignored_in_old_files_and_dropped_on_save() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
         fs::write(
             &path,
-            "[terminal]\nlink_target = \"webview\"\nwebview_mode = \"proxy\"\n",
+            r#"
+[appearance]
+font_size = 15
+[terminal]
+renderer = "xterm"
+ligatures = true
+window_padding_balance = false
+link_target = "webview"
+webview_mode = "proxy"
+[terminal.xterm]
+cursor_blink = true
+[tabs]
+min_width = 24
+[window]
+title_bar_scroll = true
+[experimental]
+linked_sashes = true
+resize_debounce = 10
+[drawer]
+resizable = true
+"#,
         )
         .unwrap();
+
         let loaded = load_from(&path);
-        let json = serde_json::to_value(loaded).unwrap();
-        assert!(json["terminal"].get("linkTarget").is_none());
-        assert!(json["terminal"].get("webviewMode").is_none());
-        let updated = update_at(
-            &path,
-            serde_json::json!({"terminal":{"linkTarget":"webview","webviewMode":"direct"}}),
-        )
-        .unwrap();
-        assert!(serde_json::to_value(updated).unwrap()["terminal"]
-            .get("linkTarget")
-            .is_none());
+        assert_eq!(loaded.appearance.font_size, 15);
+        let effective = serde_json::to_value(&loaded).unwrap();
+        let defaults = settings_metadata();
+        for settings in [&effective, &defaults["defaults"]] {
+            for group in ["tabs", "window", "experimental"] {
+                assert!(settings.get(group).is_none(), "{group}");
+            }
+            for key in [
+                "renderer",
+                "ligatures",
+                "windowPaddingBalance",
+                "xterm",
+                "linkTarget",
+                "webviewMode",
+            ] {
+                assert!(settings["terminal"].get(key).is_none(), "{key}");
+            }
+            assert!(settings["drawer"].get("resizable").is_none());
+        }
+
+        save_to(&loaded, &path).unwrap();
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["appearance"]["font_size"].as_integer(), Some(15));
+        for group in ["tabs", "window", "experimental"] {
+            assert!(saved.get(group).is_none(), "{group}");
+        }
+        for key in [
+            "renderer",
+            "ligatures",
+            "window_padding_balance",
+            "xterm",
+            "link_target",
+            "webview_mode",
+        ] {
+            assert!(saved["terminal"].get(key).is_none(), "{key}");
+        }
+        assert!(saved["drawer"].get("resizable").is_none());
     }
 }

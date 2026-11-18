@@ -4,7 +4,6 @@ use super::*;
 use crate::service::catalog::{Operation, Request as NativeRequest, Role};
 use axum::response::IntoResponse;
 use serde_json::Value;
-use splitty_core::daemon::DaemonInfo;
 use splitty_core::ids::{PaneId, ScreenId};
 use splitty_core::mux::{Op, ScreenOp};
 use splitty_core::native_api::directory::Directory;
@@ -45,7 +44,7 @@ async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_in
         .unwrap();
 }
 
-async fn framed(
+pub(super) async fn framed(
     state: &TestState,
     role: Role,
 ) -> (
@@ -114,7 +113,7 @@ async fn framed_reply(peer: &mut splitty_transport::peer::Peer) -> splitty_trans
 }
 
 /// The next text frame of `kind` on `peer`, skipping others.
-async fn next_text(peer: &mut splitty_transport::peer::Peer, kind: &str) -> Value {
+pub(super) async fn next_text(peer: &mut splitty_transport::peer::Peer, kind: &str) -> Value {
     tokio::time::timeout(WAIT, async {
         loop {
             let frame = peer.recv().await.expect("open connection");
@@ -274,7 +273,6 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
             json!([{"id":"s1","name":"Again"},{"id":"s2"}]),
             json!([{"id":"s1","name":"Again","panes":2}]),
         ),
-        (json!([]), json!([])),
     ]
     .into_iter()
     .enumerate()
@@ -322,6 +320,14 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
             "passive reads must not open a host"
         );
     }
+    let restored = router(&state, hub(&host, dir.path()));
+    let (status, directory) = exchange(&restored, api("GET", "/api/remote/directory", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(directory["hosts"][0]["target"], "vm1");
+    assert_eq!(
+        directory["hosts"][0]["screens"],
+        json!([{"id":"s1","name":"Again","panes":2}])
+    );
     let (mut remote, remote_task) = framed(&state, Role::Remote).await;
     let remote_welcome = remote
         .recv()
@@ -363,7 +369,34 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         .await
         .unwrap();
     assert!(remote_task.await.unwrap().is_err());
-    assert!(state.hub.directory().hosts[0].screens.is_empty());
+    assert_eq!(state.hub.directory().hosts[0].screens[0].id, "s1");
+    state.hub.forget_host(json!({"target":"vm1"})).unwrap();
+    let observation =
+        json!({"type":"hub.catalog.observe","target":"vm1","screens":[{"id":"hidden","panes":1}]});
+    observer.sender.json(Kind::Text, &observation).unwrap();
+    // A resync fences the observation on the same stream.
+    let mut observer = observer;
+    observer
+        .sender
+        .json(Kind::Text, &json!({"type":"mux.workspace_resync"}))
+        .unwrap();
+    next_text(&mut observer, "mux.workspace_snapshot").await;
+    assert!(!state
+        .hub
+        .directory()
+        .hosts
+        .iter()
+        .any(|host| host.target == "vm1"));
+    let control = crate::control::build_control_router(state.service.clone());
+    assert_eq!(
+        exchange(
+            &control,
+            api("PUT", "/api/remote/catalog", Some(&observation))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
     assert!(host.asked().is_empty());
     remote.shutdown().await;
     observer.shutdown().await;
@@ -447,11 +480,105 @@ async fn framed_maximum_image_survives_parser_and_worker_admission() {
 }
 
 #[tokio::test]
+async fn removed_operations_answer_errors_without_ending_the_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let (mut peer, task) = framed(&state, Role::Main).await;
+    next_text(&mut peer, "mux.welcome").await;
+    for (index, name) in [
+        "shellProfiles.update",
+        "host.list",
+        "hostPreferences.get",
+        "hostOrder.get",
+        "catalog.get",
+        "catalog.update",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = u32::try_from(index).unwrap() * 2 + 1;
+        framed_call(&peer, id, name, json!({}));
+        let reply = framed_reply(&mut peer).await;
+        assert_eq!(reply.status, 400, "{name}: {}", reply.body);
+        assert_eq!(reply.id, id);
+        framed_call(&peer, id + 1, "remote.directory.get", json!({}));
+        let directory = framed_reply(&mut peer).await;
+        assert_eq!(directory.status, 200);
+        assert_eq!(directory.id, id + 1);
+    }
+    peer.shutdown().await;
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn native_welcome_leaves_screen_order_to_the_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    for id in ["second", "first"] {
+        state
+            .mux_store
+            .dispatch(splitty_core::mux::Op::CreateScreen {
+                name: None,
+                screen_id: Some(id.into()),
+                new_pane_id: None,
+                shell_profile_id: None,
+            })
+            .unwrap();
+    }
+    let (mut peer, task) = framed(&state, Role::Main).await;
+    let welcome = next_text(&mut peer, "mux.welcome").await;
+    assert!(welcome.get("screens").is_none());
+    peer.sender
+        .json(
+            splitty_transport::wire::Kind::Text,
+            &json!({"type":"mux.workspace_resync"}),
+        )
+        .unwrap();
+    let catalog = next_text(&mut peer, "mux.workspace_snapshot").await;
+    assert_eq!(catalog["screens"][0]["id"], "second");
+    assert_eq!(catalog["screens"][1]["id"], "first");
+    peer.shutdown().await;
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn standalone_session_creation_is_refused_after_welcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let (mut peer, task) = framed(&state, Role::Main).await;
+    next_text(&mut peer, "mux.welcome").await;
+    peer.sender
+        .json(
+            splitty_transport::wire::Kind::Text,
+            &json!({"type":"create"}),
+        )
+        .unwrap();
+    assert!(
+        tokio::time::timeout(WAIT, async { while peer.recv().await.is_some() {} })
+            .await
+            .is_ok(),
+        "the invalid session stream should end"
+    );
+    peer.shutdown().await;
+    let _ = task.await.unwrap();
+    assert!(state
+        .client_state
+        .dispatcher
+        .backend()
+        .sessions()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let host = ScriptedHost::new(dir.path());
     let mut state = state(ADDR, dir.path());
     Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
+    state
+        .hub
+        .update_catalog(json!({"target":"vm1","screens":[{"id":"original","panes":1}]}))
+        .unwrap();
     // Seed visible local management state so forbidden Forget/Stop/Update
     // operations cannot pass unnoticed merely because their targets are absent.
     for (operation, body) in [
@@ -463,10 +590,6 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
         (
             Operation::RemoteScreensUpdate,
             json!({"version":1,"screens":[{"target":"vm1","screenId":"original"}]}),
-        ),
-        (
-            Operation::CatalogUpdate,
-            json!({"target":"vm1","screens":[{"id":"original","panes":1}]}),
         ),
         (
             Operation::ForwardPreferencesSave,
@@ -516,7 +639,8 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     assert_eq!(reply.status, 200);
     let status: Value = serde_json::from_str(&reply.body).unwrap();
     assert_eq!(status["instance"], state.instance);
-    assert!(status["listenAddr"].is_null());
+    assert!(status.get("listenAddr").is_none());
+    assert_eq!(status["serverMode"], "embedded");
     let mut id = 1;
     for operation in crate::service::catalog::OPERATIONS
         .iter()
@@ -535,9 +659,6 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
                 }
                 Operation::RemoteScreensUpdateHost => {
                     json!({"target":"vm2","screens":[{"screenId":"forbidden"}]})
-                }
-                Operation::CatalogUpdate => {
-                    json!({"target":"vm1","screens":[{"id":"forbidden","panes":2}]})
                 }
                 Operation::ForwardOpen => json!({"target":"vm1","port":5173,"local":5175}),
                 Operation::ForwardPreferencesSave => {
@@ -682,7 +803,7 @@ async fn stale_discovery_and_early_requests_create_no_service_client() {
             let frame = codec::Frame::data(
                 wire::Kind::Text,
                 wire::Delivery::new(1),
-                br#"{"type":"create","id":"forbidden"}"#,
+                br#"{"type":"attach","id":"forbidden"}"#,
             )
             .unwrap();
             codec::write(&mut write, &frame).await.unwrap();
@@ -864,6 +985,18 @@ pub(super) async fn native(
     )
 }
 
+pub(super) async fn framed_mux_op(state: &TestState, body: Value) -> (StatusCode, Value) {
+    let (mut peer, task) = framed(state, Role::Main).await;
+    framed_call(&peer, 1, "mux.op", json!({"body":body}));
+    let reply = framed_reply(&mut peer).await;
+    peer.shutdown().await;
+    task.await.unwrap().unwrap();
+    (
+        StatusCode::from_u16(reply.status).expect("mux op status"),
+        serde_json::from_str(&reply.body).expect("mux op JSON"),
+    )
+}
+
 #[tokio::test]
 async fn settings_metadata_and_rejection_match_http_and_native() {
     let dir = tempfile::tempdir().expect("dir");
@@ -873,10 +1006,10 @@ async fn settings_metadata_and_rejection_match_http_and_native() {
         exchange(&service, api("GET", "/api/home/settings/metadata", None)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(metadata["defaults"]["drawer"]["sidebarWidth"], 200);
-    assert_eq!(
-        metadata["limits"]["terminal.xterm.scrollSensitivity"]["step"],
-        0.1
-    );
+    assert!(metadata["limits"]
+        .get("terminal.xterm.scrollSensitivity")
+        .is_none());
+    assert_eq!(metadata["defaults"]["appearance"]["zoom"], 1.0);
     assert_eq!(
         native(&state, Operation::HomeMetadata, json!({})).await,
         (status, metadata)
@@ -1029,7 +1162,7 @@ async fn queries_errors_and_service_identity_match_control_and_native() {
         );
     }
     let (_, status) = native(&state, Operation::MuxStatus, json!({})).await;
-    assert_eq!(status["listenAddr"], Value::Null);
+    assert!(status.get("listenAddr").is_none());
     assert_eq!(status["instance"], state.instance);
     assert_eq!(status["transportVersion"], 1);
     assert!(
@@ -1124,6 +1257,105 @@ async fn native_mutations_are_visible_to_cli_without_exposing_scratchpads() {
 }
 
 #[tokio::test]
+async fn session_and_control_layout_ops_create_the_same_split_and_viewer() {
+    use splitty_core::mux::LayoutNode;
+    use splitty_core::pty::testing::pty_available;
+    use splitty_transport::wire::Kind;
+
+    if !pty_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let native = state(ADDR, dir.path());
+    let owner = state(ADDR, dir.path());
+    for state in [&native, &owner] {
+        state
+            .mux_store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some("shared".into()),
+                new_pane_id: Some("anchor".into()),
+                shell_profile_id: None,
+            })
+            .unwrap();
+        use_test_shell(state);
+    }
+    let control = crate::control::build_control_router(owner.service.clone());
+    let (mut peer, task) = framed(&native, Role::Main).await;
+    next_text(&mut peer, "mux.welcome").await;
+    for (op, expected_spawns) in [
+        (
+            json!({"type":"split_pane","paneId":"anchor","axis":"horizontal","newPaneId":"shell"}),
+            1,
+        ),
+        (
+            json!({"type":"open_viewer","paneId":"shell","placement":"tab","newPaneId":"viewer",
+            "source":{"kind":"file","path":"/tmp/plan.md"}}),
+            0,
+        ),
+    ] {
+        peer.sender
+            .json(
+                Kind::Text,
+                &json!({"type":"mux.op","screenId":"shared","op":op}),
+            )
+            .unwrap();
+        let (status, reply) = exchange(
+            &control,
+            api(
+                "POST",
+                "/api/mux/op",
+                Some(&json!({"screenId":"shared","op":op})),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["created"].as_array().unwrap().len(), expected_spawns);
+        if expected_spawns == 1 {
+            let spawned = next_text(&mut peer, "mux.pane_spawned").await;
+            assert_eq!(spawned["paneId"], "shell");
+        }
+    }
+    peer.sender
+        .json(
+            Kind::Text,
+            &json!({"type":"mux.resync","screenId":"shared"}),
+        )
+        .unwrap();
+    next_text(&mut peer, "mux.screen_snapshot").await;
+
+    let layout = |state: &TestState| {
+        let workspace = state.mux_store.get_screen(&"shared".into()).unwrap();
+        let LayoutNode::Split { axis, children, .. } = &workspace.root else {
+            panic!("split pane must produce a split");
+        };
+        let slots = children
+            .iter()
+            .map(LayoutNode::collect_pane_ids)
+            .collect::<Vec<_>>();
+        let viewer = workspace.panes[&PaneId::from("viewer")]
+            .viewer
+            .clone()
+            .unwrap();
+        let backend = state.client_state.dispatcher.backend();
+        assert_eq!(backend.sessions().len(), 1);
+        backend.close_all();
+        (axis.clone(), slots, viewer.source, viewer.origin_pane_id)
+    };
+    let native_layout = layout(&native);
+    assert_eq!(
+        native_layout.1,
+        vec![
+            vec![PaneId::from("anchor")],
+            vec![PaneId::from("shell"), PaneId::from("viewer")]
+        ]
+    );
+    assert_eq!(native_layout, layout(&owner));
+    peer.shutdown().await;
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn relative_screen_placement_matches_native_and_control_decoders() {
     let native_dir = tempfile::tempdir().expect("native dir");
     let control_dir = tempfile::tempdir().expect("control dir");
@@ -1157,13 +1389,7 @@ async fn relative_screen_placement_matches_native_and_control_decoders() {
 
     let request = json!({"screenId":"C","op":{"type":"move_screen","beforeScreenId":"A"}});
     assert_eq!(
-        native(
-            &native_state,
-            Operation::MuxOp,
-            json!({"body":request.clone()})
-        )
-        .await
-        .0,
+        framed_mux_op(&native_state, request.clone()).await.0,
         StatusCode::OK
     );
     let control = crate::control::build_control_router(control_state.service.clone());
@@ -1184,6 +1410,16 @@ async fn relative_screen_placement_matches_native_and_control_decoders() {
     };
     assert_eq!(order(&native_state), vec!["C", "A", "B"]);
     assert_eq!(order(&native_state), order(&control_state));
+    let removed =
+        json!({"screenId":"C","op":{"type":"reorder_screens","screenOrder":["A","B","C"]}});
+    assert_eq!(
+        framed_mux_op(&native_state, removed.clone()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        status(&control, api("POST", "/api/mux/op", Some(&removed))).await,
+        StatusCode::BAD_REQUEST
+    );
     async fn next_kind(observer: &mut crate::client_session::Connection, kind: &str) -> Value {
         loop {
             let event = tokio::time::timeout(WAIT, observer.output.recv())
@@ -1321,7 +1557,9 @@ async fn immediate_native_drop_and_independent_closes_release_only_their_client(
     let b_welcome: Value = serde_json::from_str(&second).expect("JSON");
     assert_eq!(a_welcome["type"], "mux.welcome");
     assert_eq!(b_welcome["type"], "mux.welcome");
-    assert_ne!(a_welcome["clientId"], b_welcome["clientId"]);
+    assert!(a_welcome.get("clientId").is_none());
+    assert!(b_welcome.get("clientId").is_none());
+    assert_eq!(state.client_state.clients.lock().expect("clients").len(), 2);
     a.shutdown().await;
     assert_eq!(state.client_state.clients.lock().expect("clients").len(), 1);
     b.input
@@ -1428,10 +1666,6 @@ async fn framed_host_catalog_and_saved_forward_intents_preserve_passive_and_stop
             json!({"target":"vm2","screens":[{"screenId":"s2"}],"closed":true}),
         ),
         (
-            "catalog.update",
-            json!({"target":"vm1","screens":[{"id":"s1","panes":1}]}),
-        ),
-        (
             "forwardPreferences.save",
             json!({"target":"vm1","port":5173,"local":forward_local,"label":"Frontend"}),
         ),
@@ -1452,11 +1686,8 @@ async fn framed_host_catalog_and_saved_forward_intents_preserve_passive_and_stop
         assert_eq!(reply.status, 200, "{operation}: {}", reply.body);
     }
     for operation in [
-        "host.list",
-        "hostPreferences.get",
-        "hostOrder.get",
+        "remote.directory.get",
         "remoteScreens.get",
-        "catalog.get",
         "forward.list",
         "forwardPreferences.get",
         "reverse.list",
@@ -2144,107 +2375,37 @@ async fn native_arguments_and_bodies_are_decoded_in_the_operations_error_style()
 }
 
 #[tokio::test]
-async fn native_host_open_pins_the_local_hub_before_any_ssh_and_keeps_remote_authority() {
-    use crate::{
-        hub::{testing::ScriptedHost, Hub},
-        native::client::Connector,
+async fn daemon_endpoint_rejects_host_intent_in_the_hello_without_starting_ssh() {
+    use splitty_transport::{
+        codec::{self, Frame},
+        wire::{self, Kind},
     };
-    use splitty_transport::wire::{self, Kind};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     let dir = tempfile::tempdir().unwrap();
     let mut state = state(ADDR, dir.path());
-    let host = ScriptedHost::new(dir.path()).with_keeping_daemon("0.0.1", 1);
-    Arc::make_mut(&mut state.service).hub = Arc::new(Hub::new(
-        Box::new(host.clone()),
-        dir.path().join("hub"),
-        None,
-    ));
-    let native = Native::start(&state, &dir.path().join("client.sock")).await;
-    let connector = Connector::default();
-    let mut stale = native.info.clone();
-    stale.instance = Some("0".repeat(32));
-    let denied = connector
-        .endpoint_host_fixture(
-            &stale,
-            splitty_remote::ssh::SshTarget::parse("vm1").unwrap(),
-            false,
-        )
-        .await;
-    assert_eq!(
-        denied.err().unwrap().kind(),
-        std::io::ErrorKind::ConnectionAborted
-    );
-    assert!(
-        host.asked().is_empty(),
-        "stale discovery cannot start host preparation"
-    );
-    for embedded in [false, true] {
-        let target = if embedded { "vm2" } else { "vm1" };
-        let target = splitty_remote::ssh::SshTarget::parse(target).unwrap();
-        let expected = wire::Purpose::Host {
-            target: target.as_str().into(),
-        };
-        let mut client = if embedded {
-            connector.host(state.service.clone(), target, false).await
-        } else {
-            connector
-                .endpoint_host_fixture(&native.info, target, true)
-                .await
-        }
+    let host = ScriptedHost::new(dir.path());
+    Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
+    let endpoint = dir.path().join("client.sock");
+    let native = Native::start(&state, &endpoint).await;
+    let mut stream = crate::native::endpoint::connect(&endpoint).await.unwrap();
+    stream.write_all(wire::MAGIC).await.unwrap();
+    let hello = Frame::json(
+        Kind::Hello,
+        &json!({
+            "transportVersion": wire::VERSION,
+            "openHost": {"ownerInstance":state.instance,"target":"vm1","update":false}
+        }),
+    )
+    .unwrap();
+    codec::write(&mut stream, &hello).await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(WAIT, stream.read_to_end(&mut response))
+        .await
+        .unwrap()
         .unwrap();
-        assert_eq!(client.ready.purpose, expected);
-        // remote-screens, Progress on a native host stream: progress went out
-        // as transport reports; the first application message is ready.
-        let message = tokio::time::timeout(WAIT, client.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        let body: Value = message.frame.decode().unwrap();
-        assert_eq!(body["type"], "remote.ready");
-        drop(message);
-        let welcome = tokio::time::timeout(WAIT, client.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            welcome.frame.decode::<Value>().unwrap()["type"],
-            "mux.welcome"
-        );
-        drop(welcome);
-        client
-            .sender()
-            .json(
-                Kind::Request,
-                &wire::Request {
-                    id: 1,
-                    operation: "host.list".into(),
-                    args: serde_json::Map::new(),
-                },
-            )
-            .unwrap();
-        assert!(
-            tokio::time::timeout(WAIT, client.recv())
-                .await
-                .unwrap()
-                .is_none(),
-            "host streams cannot gain local hub authority"
-        );
-        client.shutdown().await;
-    }
-    assert_eq!(
-        host.asked()
-            .iter()
-            .filter(|call| call.starts_with("prepare "))
-            .count(),
-        2
-    );
-    assert_eq!(
-        host.asked()
-            .iter()
-            .filter(|call| call.as_str() == "stop")
-            .count(),
-        1,
-        "only the explicitly requested keeper-safe update replaces a daemon"
-    );
+    assert!(response.is_empty(), "no acceptance frame");
+    assert!(host.asked().is_empty(), "no SSH preparation");
     native.stop().await;
 }
 
@@ -2280,7 +2441,6 @@ async fn transport_worker_exhaustion_is_busy_in_both_control_and_native_reply_sh
 }
 
 pub(super) struct Native {
-    pub(super) info: DaemonInfo,
     stop: tokio::sync::oneshot::Sender<()>,
     task: tokio::task::JoinHandle<std::io::Result<()>>,
 }
@@ -2293,33 +2453,16 @@ impl Native {
         .unwrap();
         let listener = tokio::net::UnixListener::bind(path).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let info = discovery(state, path);
         let (stop, stopped) = tokio::sync::oneshot::channel();
         let service = state.service.clone();
         let task = tokio::spawn(crate::native::listen(listener, service, async {
             let _ = stopped.await;
         }));
-        Self { info, stop, task }
+        Self { stop, task }
     }
     pub(super) async fn stop(self) {
         self.stop.send(()).unwrap();
         self.task.await.unwrap().unwrap();
-    }
-}
-
-pub(super) fn discovery(state: &TestState, path: &Path) -> DaemonInfo {
-    DaemonInfo {
-        pid: std::process::id(),
-        format: Some(2),
-        port: None,
-        client_socket: Some(path.to_string_lossy().into()),
-        instance: Some(state.instance.clone()),
-        transport_version: Some(1),
-        socket: String::new(),
-        started_at: "1".into(),
-        version: env!("CARGO_PKG_VERSION").into(),
-        protocol: 1,
-        keeps_sessions: true,
     }
 }
 
@@ -2340,10 +2483,10 @@ async fn native_build_hosts_and_commands_keep_their_response_and_delivery_contra
         &splitty_remote::ssh::SshTarget::parse("vm1").unwrap(),
     )
     .expect("recent host");
-    let (status, hosts) = native(&state, Operation::HostList, json!({})).await;
+    let (status, hosts) = native(&state, Operation::HostDirectory, json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
-        hosts
+        hosts["hosts"]
             .as_array()
             .expect("hosts")
             .iter()
@@ -2387,5 +2530,5 @@ async fn native_build_hosts_and_commands_keep_their_response_and_delivery_contra
         serde_json::to_value(state.mux_store.get_workspace_state()).unwrap(),
         serde_json::to_value(before).unwrap()
     );
-    client.close(None).await.expect("close");
+    client.close().await.expect("close");
 }

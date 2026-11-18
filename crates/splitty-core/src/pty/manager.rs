@@ -185,10 +185,7 @@ impl Backend for Manager {
             opts.id = super::session::generate_id();
         }
         let _creation = self.creation_lane(&opts.id).lock_owned().await;
-        // Get-or-create: if a session with this ID already exists, return it.
-        // This happens when the mux effect runner spawns the PTY and the frontend
-        // also sends a `create` message for the same pane — both resolve to the
-        // same session_id.  Returning the existing session makes the duplicate harmless.
+        // Concurrent spawns for the same ID share the first session.
         if !opts.id.is_empty() {
             let sessions = self.sessions.lock().unwrap();
             if let Some(existing) = sessions.get(&opts.id) {
@@ -316,12 +313,76 @@ mod tests {
             ..ShellProfilesState::default()
         };
         let manager = Manager::with_shell_profiles(Arc::new(RwLock::new(profiles)));
-        let mut opts = sh_opts("fallback-session", "");
-        opts.shell_profile_id = "unavailable".into();
-        let session = manager.create(opts).await.unwrap();
-        assert_eq!(session.shell_profile_id(), Some("default"));
-        assert_eq!(session.shell_profile_fallback_reason(), Some("unavailable"));
+        for (id, reason) in [("unavailable", "unavailable"), ("unknown", "missing")] {
+            let mut opts = sh_opts(id, "");
+            opts.shell_profile_id = id.into();
+            let session = manager.create(opts).await.unwrap();
+            assert_eq!(session.shell_profile_id(), Some("default"));
+            assert_eq!(session.shell_profile_fallback_reason(), Some(reason));
+        }
         manager.close_all();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_options_control_startup_and_keep_the_shell_as_requested() {
+        use std::os::unix::fs::symlink;
+        use std::time::Duration;
+
+        use crate::pty::testing::{pty_available, sh_opts, wait_until};
+        if !pty_available() {
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let fallback = temp.path().join("other-shell");
+        symlink("/bin/sh", &fallback).unwrap();
+        let manager = Manager::new();
+        let marker = temp.path().join("ran");
+        let command = "printf ran > \"$MARKER\"";
+        for (id, shell, mode, script, exits) in [
+            ("replay", "/bin/sh", "replay", command, false),
+            ("shell", "/bin/sh", "shell", command, false),
+            ("close", "/bin/sh", "close", command, true),
+            (
+                "fallback",
+                fallback.to_str().unwrap(),
+                "close",
+                command,
+                false,
+            ),
+            ("blank", "/bin/sh", "close", " \t ", false),
+        ] {
+            let mut opts = sh_opts(id, "");
+            opts.shell = shell.into();
+            opts.command = script.into();
+            opts.restore_mode = mode.into();
+            opts.extra_env = vec![format!("MARKER={}", marker.display())];
+            let session = manager.create(opts).await.expect("start terminal");
+            if script == command {
+                assert!(
+                    wait_until(Duration::from_secs(6), || marker.is_file()).await,
+                    "{id}"
+                );
+                std::fs::remove_file(&marker).unwrap();
+            }
+            if exits {
+                assert!(wait_until(Duration::from_secs(6), || *session.done().borrow()).await);
+                assert_eq!(session.exit_code(), 0);
+            } else {
+                // A subsequent command must still run in the same shell.
+                session
+                    .write(format!("{command}\n").as_bytes())
+                    .await
+                    .unwrap();
+                assert!(
+                    wait_until(Duration::from_secs(6), || marker.is_file()).await,
+                    "{id}"
+                );
+                assert!(!*session.done().borrow(), "{id}");
+                std::fs::remove_file(&marker).unwrap();
+            }
+            manager.close(id).unwrap();
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]

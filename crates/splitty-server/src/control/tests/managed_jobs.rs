@@ -16,7 +16,6 @@ fn job_state(dir: &Path) -> TestState {
             control_socket: dir.join("run/owner.sock").to_string_lossy().into_owned(),
         },
         events,
-        "embedded".into(),
     );
     Arc::make_mut(&mut state.service).client_state = Arc::new(ws);
     *state.shell_profiles.write().expect("profiles") =
@@ -281,7 +280,7 @@ async fn managed_grant_socket_is_private_resumable_and_never_promotes_to_owner()
         0o700
     );
     let server = crate::cli::ServerInfo {
-        transport: crate::cli::Transport::LocalSocket(path.into()),
+        socket: path.into(),
         source: "agent",
     };
     assert_eq!(
@@ -749,11 +748,11 @@ async fn disconnected_router_reads_release_quota_without_stopping_the_job() {
 }
 
 #[tokio::test]
-async fn websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
-    run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids().await;
+async fn native_session_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
+    run_native_session_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids().await;
 }
 
-async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
+async fn run_native_session_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
     if !pty_available() {
         return;
     }
@@ -781,24 +780,20 @@ async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allo
     request["type"] = json!("create_job");
     socket
         .send(Message::Text(
-            json!({"type":"mux.op","screenId":"","op":request})
-                .to_string()
-                .into(),
+            json!({"type":"mux.op","screenId":"","op":request}).to_string(),
         ))
         .await
         .expect("launch");
     socket
         .send(Message::Text(
-            json!({"type":"mux.resync","screenId":"ordered-job-screen"})
-                .to_string()
-                .into(),
+            json!({"type":"mux.resync","screenId":"ordered-job-screen"}).to_string(),
         ))
         .await
         .expect("immediate resync");
     let mut kinds = Vec::new();
     loop {
         let message = next(&mut socket).await;
-        if !message.is_text() {
+        if !matches!(message, Message::Text(_)) {
             continue;
         }
         let event = json_of(message);
@@ -821,15 +816,13 @@ async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allo
     failed["type"] = json!("create_job");
     socket
         .send(Message::Text(
-            json!({"type":"mux.op","screenId":"","op":failed})
-                .to_string()
-                .into(),
+            json!({"type":"mux.op","screenId":"","op":failed}).to_string(),
         ))
         .await
         .expect("failed start");
     loop {
         let message = next(&mut socket).await;
-        if !message.is_text() {
+        if !matches!(message, Message::Text(_)) {
             continue;
         }
         let event = json_of(message);
@@ -851,7 +844,7 @@ async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allo
     assert_eq!(ordinary["revision"], 1);
     let first = loop {
         let message = next(&mut socket).await;
-        if message.is_text() {
+        if matches!(message, Message::Text(_)) {
             break json_of(message);
         }
     };
@@ -901,5 +894,5 @@ async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allo
     assert_eq!(json_of(next(&mut socket).await)["type"], "mux.nudge");
     served.state.client_state.jobs.shutdown().await;
     served.state.client_state.dispatcher.backend().close_all();
-    let _ = socket.close(None).await;
+    let _ = socket.close().await;
 }

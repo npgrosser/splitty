@@ -30,8 +30,6 @@ pub struct MuxHandler {
     hub_decisions: bool,
     store: Arc<Store>,
     sender: Arc<ClientSender>,
-    client_id: String,
-    server_mode: String,
     effect_runner: Arc<EffectRunner>,
     shell_profiles: Arc<RwLock<splitty_core::shell_profiles::ShellProfilesState>>,
     env: EnvContext,
@@ -63,8 +61,6 @@ impl MuxHandler {
     pub fn new(
         store: Arc<Store>,
         sender: Arc<ClientSender>,
-        client_id: String,
-        server_mode: String,
         effect_runner: Arc<EffectRunner>,
         shell_profiles: Arc<RwLock<splitty_core::shell_profiles::ShellProfilesState>>,
         env: EnvContext,
@@ -76,8 +72,6 @@ impl MuxHandler {
             hub_decisions: false,
             store,
             sender,
-            client_id,
-            server_mode,
             effect_runner,
             shell_profiles,
             env,
@@ -92,17 +86,10 @@ impl MuxHandler {
         self
     }
 
-    /// Send the welcome message with screen list on connect.
+    /// Greet the connection with the capabilities available to it.
     pub async fn send_welcome(&self) {
-        let screens = self.store.list_screen_infos();
-
-        let event = ServerEvent::mux_welcome(
-            self.client_id.clone(),
-            screens,
-            Some(self.server_mode.clone()),
-            self.hub_decisions,
-        );
-        self.send_event(&event).await;
+        self.send_event(&ServerEvent::mux_welcome(self.hub_decisions))
+            .await;
     }
 
     /// Consume the already admitted session DOM; do not parse or clone its
@@ -392,21 +379,6 @@ impl MuxHandler {
             "set_active_screen" => dispatch(Op::SetActiveScreen {
                 screen_id: screen_id.clone(),
             }),
-            "reorder_screens" => {
-                let order: Vec<ScreenId> = msg
-                    .op
-                    .get("screenOrder")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(ScreenId::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                dispatch(Op::ReorderScreens {
-                    screen_order: order,
-                })
-            }
             "move_screen" => {
                 let before_screen_id = match msg.op.get("beforeScreenId") {
                     None | Some(Value::Null) => Ok(None),
@@ -666,7 +638,6 @@ mod tests {
     async fn the_welcome_lists_its_capabilities_in_a_fixed_order() {
         let base = [
             "managed-jobs-v1",
-            "scratchpad-v1",
             "layout-arrange-v1",
             "tab-select-v1",
             "tab-placement-v1",
@@ -683,7 +654,6 @@ mod tests {
             "hub-host-state-v1",
         ];
         let rest = [
-            "serverDerivedPaneState",
             "editor-open-v1",
             "file-offer-v1",
             "pty-size-v1",
@@ -711,7 +681,11 @@ mod tests {
                 expected.extend(hub);
             }
             expected.extend(rest);
+            assert_eq!(welcome["type"], "mux.welcome");
             assert_eq!(welcome["capabilities"], serde_json::json!(expected));
+            for field in ["clientId", "screens", "serverMode"] {
+                assert!(welcome.get(field).is_none(), "{field}");
+            }
         }
     }
 
@@ -806,8 +780,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            "client".into(),
-            "daemon".into(),
             runner,
             Arc::new(RwLock::new(Default::default())),
             EnvContext::default(),
@@ -1130,8 +1102,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            "client".to_string(),
-            "daemon".to_string(),
             runner,
             Arc::new(RwLock::new(shell_profiles)),
             EnvContext::default(),
@@ -1264,11 +1234,6 @@ mod tests {
         let others = Default::default();
         let (handler, mut sent) = window(&store, "sender", &others);
         for (screen, op, nudge_screen) in [
-            (
-                "_",
-                serde_json::json!({"type":"reorder_screens", "screenOrder":["screen-2","screen-1"]}),
-                None,
-            ),
             (
                 "screen-2",
                 serde_json::json!({"type":"set_active_screen"}),
@@ -1687,8 +1652,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            "client".to_string(),
-            "daemon".to_string(),
             runner,
             Arc::new(RwLock::new(shell_profiles)),
             EnvContext::default(),
@@ -1839,8 +1802,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            "client".to_string(),
-            "daemon".to_string(),
             runner,
             Arc::new(RwLock::new(shell_profiles)),
             EnvContext::default(),
@@ -1927,24 +1888,11 @@ mod tests {
 
     /// session-scratchpad, Saving Through The Window and Scratchpad Capability,
     /// and mux-protocol, Change Propagation to Other Clients (Scratchpad saved
-    /// by a client): the server announces scratchpads, stores a save in the
+    /// by a client): the server stores a save in the
     /// session record, nudges the others for its screen and not the saver, and
     /// the snapshot of the next resync carries the text.
     #[tokio::test]
     async fn a_saved_scratchpad_nudges_the_other_clients_and_reaches_their_snapshot() {
-        let welcome = serde_json::to_value(ServerEvent::mux_welcome(
-            "client".to_string(),
-            Vec::new(),
-            None,
-            false,
-        ))
-        .unwrap();
-        assert!(
-            welcome["capabilities"]
-                .as_array()
-                .is_some_and(|all| all.iter().any(|c| c == "scratchpad-v1")),
-            "{welcome}"
-        );
         let store = Arc::new(Store::new());
         store
             .dispatch(Op::CreateScreen {
@@ -1973,8 +1921,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            "client".to_string(),
-            "daemon".to_string(),
             runner,
             Arc::new(RwLock::new(shell_profiles)),
             EnvContext::default(),
@@ -2055,8 +2001,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            "client".to_string(),
-            "daemon".to_string(),
             runner,
             Arc::new(RwLock::new(shell_profiles)),
             EnvContext::default(),
@@ -2151,16 +2095,16 @@ mod tests {
     /// other clients land in `others`.
     fn window(
         store: &Arc<Store>,
-        client_id: &str,
+        _client_id: &str,
         others: &Arc<std::sync::Mutex<Vec<Value>>>,
     ) -> (MuxHandler, splitty_transport::queue::Receiver<Message>) {
-        window_with(store, client_id, others, &Default::default())
+        window_with(store, _client_id, others, &Default::default())
     }
 
     /// [`window`], answering the waits of `reviews`.
     fn window_with(
         store: &Arc<Store>,
-        client_id: &str,
+        _client_id: &str,
         others: &Arc<std::sync::Mutex<Vec<Value>>>,
         reviews: &Arc<super::super::reviews::Reviews>,
     ) -> (MuxHandler, splitty_transport::queue::Receiver<Message>) {
@@ -2179,8 +2123,6 @@ mod tests {
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
-            client_id.to_string(),
-            "daemon".to_string(),
             runner,
             Arc::new(RwLock::new(shell_profiles)),
             EnvContext::default(),

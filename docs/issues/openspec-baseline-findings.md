@@ -75,11 +75,16 @@ Line numbers refer to the tree at commit `b495e1c`.
   `client_session` and native transport use bounded delivery and ordered welcome/batches;
   removing the gateway does not remove those guarantees.
 - `mux.welcome` does not include the active screen.
+- **Unknown session message types end the native connection** (RWS-6).
+  Transport validation closes the connection before dispatch. The Malformed and
+  Unknown Messages requirement calls for an `error` event and an open connection.
 
 ### control-api
 
 - **Fixed in `cli-control`: generated screen IDs and spawn results.** HTTP creation returns the actual screen ID, revision and successful pane/session mappings; nudges use that ID. Failed starts return errors and never emit successful spawn events.
-- `reorder_screens` cannot be sent over HTTP; it falls through to the screen-op parser and returns 400.
+- **`home.update` does not validate the shell profiles in a `shells` patch.**
+  The update path accepts the settings object without applying shell profile
+  validation.
 - Panes get `SPLITTY_SOCK` even when the socket could not be created (`main.rs:391-394`).
 - **`terminal.allowOsc52Write` is never saved** (found on 2026-10-13 while adding `remote.autoForwardPorts`).
   The server's settings have no such field (`config/settings.rs`, `TerminalSettings`), so `PATCH

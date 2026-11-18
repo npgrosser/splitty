@@ -87,18 +87,6 @@ impl TryFrom<u8> for Kind {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Hello {
     pub transport_version: u16,
-    /// Explicit host-open intent is accepted only by the local owner endpoint.
-    /// A remote bridge/direct embedded carrier rejects it before preparation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub open_host: Option<OpenHost>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct OpenHost {
-    pub owner_instance: String,
-    pub target: String,
-    pub update: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -302,7 +290,7 @@ macro_rules! control_messages {
     )+ };
 }
 control_messages! {
-    Hello => Hello, |self| self.open_host.as_ref().map_or(0, |host| host.owner_instance.capacity() + host.target.capacity());
+    Hello => Hello, |self| 0;
     Ready => Ready, |self| self.instance.capacity() + match &self.purpose { Purpose::Host { target } => target.capacity(), _ => 0 };
     ReadyAccept => ReadyAccept, |self| self.instance.capacity();
     Cancel => Cancel, |self| 0;

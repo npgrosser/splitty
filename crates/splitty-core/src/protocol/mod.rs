@@ -1,4 +1,4 @@
-//! WebSocket protocol layer: message types, request dispatching, and notifications.
+//! Session and mux protocol: message types, request dispatching, and notifications.
 //!
 //! The capabilities a server announces in `mux.welcome` are named in
 //! `capability`; the messages for one connection that are not events
@@ -27,7 +27,7 @@ pub mod upload;
 
 pub use messages::*;
 
-/// The version of the WebSocket protocols (session and mux). It changes only
+/// The version of the session and mux protocols. It changes only
 /// when a client of the previous version could no longer talk to this server;
 /// a client that relays the protocol supports its own version and the one
 /// before (see the `remote-hosts` spec). Recorded in `daemon.json`.

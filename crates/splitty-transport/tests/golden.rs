@@ -1,4 +1,4 @@
-//! The same checked-in byte transcripts are decoded by the TypeScript carrier.
+//! Round-trip the published native transport byte transcripts.
 use serde::Deserialize;
 use splitty_transport::{
     budget::ConnectionBudget,

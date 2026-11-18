@@ -1,7 +1,7 @@
 //! Theme resolution: derives semantic UI and terminal color tokens from a palette.
 //!
 //! Takes a `ThemeFile` (palette + variant + optional overrides) and produces a
-//! `ResolvedTheme` ready to be sent to the frontend as JSON. Falls back to
+//! `ResolvedTheme` ready to be returned as JSON. Falls back to
 //! `splitty-dark` if a requested theme cannot be found or parsed.
 
 use super::bundled;
@@ -239,8 +239,7 @@ pub fn resolve_theme_file(theme: &ThemeFile) -> ResolvedTheme {
         ui,
         terminal,
         terminal_palette: None,
-        effects: theme.effects.clone(),
-        layout: theme.layout.clone(),
+        layout: LayoutTokens::default(),
     }
 }
 
@@ -477,19 +476,25 @@ mod tests {
     }
 
     #[test]
-    fn test_effects_pass_through() {
-        let theme = resolve_theme_file(&bundled::splitty_aurora());
-        assert_eq!(theme.effects.get("glow").map(|s| s.as_str()), Some("true"));
-        assert_eq!(
-            theme.effects.get("glow-color").map(|s| s.as_str()),
-            Some("#a78bfa")
-        );
-    }
+    fn legacy_theme_fields_load_but_are_not_returned() {
+        let source = concat!(
+            include_str!("bundled/splitty-retro.toml"),
+            r#"
 
-    #[test]
-    fn test_no_effects_is_empty() {
-        let theme = resolve_theme_file(&bundled::splitty_dark());
-        assert!(theme.effects.is_empty());
+[effects]
+scanlines = "true"
+[layout]
+dnd-overlay-scope = "global"
+dnd-overlay-target = "group"
+"#,
+        );
+        let authored: ThemeFile = toml::from_str(source).unwrap();
+        let theme = resolve_theme_file(&authored);
+        assert_eq!(theme.name, bundled::splitty_retro().name);
+        assert_eq!(theme.ui.accent, authored.palette.accent);
+        let answer = serde_json::to_value(theme).unwrap();
+        assert!(answer.get("effects").is_none());
+        assert_eq!(answer["layout"], serde_json::json!({}));
     }
 
     #[test]
@@ -505,7 +510,6 @@ mod tests {
         let theme = resolve_theme_file(&bundled::splitty_neon());
         assert_eq!(theme.name, "Splitty Neon");
         assert_eq!(theme.ui.accent, "#ff2d95");
-        assert!(theme.effects.contains_key("scanlines"));
     }
 
     #[test]

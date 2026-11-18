@@ -10,17 +10,10 @@
 
 use splitty_core::daemon;
 
-/// How to reach a running Splitty server.
-#[derive(Clone, Debug)]
-pub enum Transport {
-    /// A Unix socket — local, authorised by filesystem permissions.
-    LocalSocket(String),
-}
-
 /// Connection info for a running Splitty server.
 #[derive(Clone, Debug)]
 pub struct ServerInfo {
-    pub transport: Transport,
+    pub socket: String,
     pub source: &'static str,
 }
 
@@ -50,7 +43,7 @@ fn discover_with(
     if let Some(socket) = agent {
         if !socket.is_empty() {
             return Ok(ServerInfo {
-                transport: Transport::LocalSocket(socket),
+                socket,
                 source: "agent",
             });
         }
@@ -59,7 +52,7 @@ fn discover_with(
     if let Some(socket) = owner {
         if !socket.is_empty() {
             return Ok(ServerInfo {
-                transport: Transport::LocalSocket(socket),
+                socket,
                 source: "env",
             });
         }
@@ -68,7 +61,7 @@ fn discover_with(
     // 3. Daemon info file.
     if let Some(socket) = daemon() {
         return Ok(ServerInfo {
-            transport: Transport::LocalSocket(socket),
+            socket,
             source: "daemon",
         });
     }
@@ -88,9 +81,7 @@ mod tests {
             no_file,
         )
         .expect("scoped route");
-        assert!(
-            matches!(scoped.transport,Transport::LocalSocket(path) if path=="unreachable-agent")
-        );
+        assert_eq!(scoped.socket, "unreachable-agent");
         assert_eq!(scoped.source, "agent");
         assert_eq!(
             discover_with(Some("".into()), Some("owner".into()), no_file)

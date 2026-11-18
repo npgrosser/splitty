@@ -11,7 +11,7 @@ use splitty_core::native_api::Operation;
 use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc, time::Duration};
 use tokio::time::Instant;
 
-/// At most this many questions are shown, as by the web client.
+/// The maximum number of questions shown at once.
 const MAX_SSH_PROMPTS: usize = 16;
 const MAX_TEXT: usize = 16 * 1024;
 const MAX_TARGET: usize = 4096;

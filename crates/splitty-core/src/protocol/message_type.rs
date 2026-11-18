@@ -15,16 +15,12 @@ pub enum MessageType {
     // -- Events (`super::ServerEvent`) --------------------------------------
     #[serde(rename = "settings.changed")]
     SettingsChanged,
-    #[serde(rename = "created")]
-    Created,
     #[serde(rename = "attached")]
     Attached,
     #[serde(rename = "closed")]
     Closed,
     #[serde(rename = "error")]
     Error,
-    #[serde(rename = "title")]
-    Title,
     #[serde(rename = "bell")]
     Bell,
     #[serde(rename = "size")]
@@ -151,11 +147,9 @@ mod tests {
         use MessageType::*;
         match kind {
             SettingsChanged => event(ServerEvent::settings_changed(json!({}))),
-            Created => event(ServerEvent::session_created("s1", None, None)),
-            Attached => event(ServerEvent::session_attached("s1", None, None, None, None)),
+            Attached => event(ServerEvent::session_attached("s1", None, None, None)),
             Closed => event(ServerEvent::session_closed("s1", Some(0))),
             Error => event(ServerEvent::error(Some("s1".into()), "gone")),
-            Title => json!({"type":"title","id":"e","timestamp":1,"sessionId":"s1"}),
             Bell => event(ServerEvent::bell("s1")),
             Size => event(ServerEvent::size("s1", 80, 24, "largest")),
             ProcessFinished => event(ServerEvent::process_finished("s1", "make".into(), None)),
@@ -167,7 +161,7 @@ mod tests {
             ProgramStatusChanged => {
                 event(ServerEvent::program_status_changed("s1", None, None, None))
             }
-            MuxWelcome => event(ServerEvent::mux_welcome("c1".into(), vec![], None, false)),
+            MuxWelcome => event(ServerEvent::mux_welcome(false)),
             MuxScreenSnapshot => json!({"type":"mux.screen_snapshot","id":"e","timestamp":1}),
             MuxWorkspaceSnapshot => event(ServerEvent::mux_workspace_snapshot(vec![], None)),
             MuxNudge => event(ServerEvent::mux_nudge("mux_op".into(), None)),
@@ -242,11 +236,9 @@ mod tests {
         use MessageType::*;
         let all = [
             SettingsChanged,
-            Created,
             Attached,
             Closed,
             Error,
-            Title,
             Bell,
             Size,
             ProcessFinished,
@@ -302,6 +294,8 @@ mod tests {
             json!({"type": null}),
             json!({"type": 7}),
             json!({"type": "Mux.Welcome"}),
+            json!({"type": "created"}),
+            json!({"type": "title"}),
             json!("mux.welcome"),
             json!(["mux.welcome"]),
         ] {

@@ -63,6 +63,8 @@ Ziel: Prozesse in Splitty überstehen Updates, Neustarts und Abstürze des Daemo
 
 `remove-tauri-shell` hat am 2026-11-15 die Tauri-Shell um den Web-Client entfernt (Crate `crates/splitty-tauri`, ihre Remote-Fenster, CI-Jobs, Make-Targets und Pakete); die native App ist die einzige Desktop-App. Windows ohne WSL hat damit bis [`native-windows-without-wsl`](../openspec/changes/native-windows-without-wsl/proposal.md) (123) keine Desktop-App, auch nicht aus dem Quellcode. Der Web-Client im Browser, das Browser-Gateway und `splitty serve` sind ebenfalls entfernt (`remove-browser-access`, 2026-11-15).
 
+`remove-web-only-surface` hat die nur vom Web-Client genutzten Teile des Protokolls, der Einstellungen und der Themes entfernt.
+
 Der Nachtrag `remote-forwards-persistence` (manuelle und gespeicherte Dev-Port-Weiterleitungen mit Labels, dauerhaftem Stop/Resume und Wiederherstellung beim Verbinden des Hosts) ist seit 2026-10-28 archiviert. SSH-Lab und Browser-Abnahme liefen dafür in einem Linux-Container, da der Lab nicht in CI läuft; die übrigen kleineren Testlücken stehen in `docs/issues/openspec-baseline-findings.md`.
 
 Aus einem Praxistest auf einem VPS folgten drei Nachträge, alle am 2026-10-14 archiviert: `remote-development-ux` räumt die Bedienung von Hosts und Ports auf; `remote-open-vscode` ergänzt „Open in VS Code“ für den aktuellen Ordner eines Remote-Terminals; `terminal-folder-actions` ergänzt „Copy SSH Path“ und „Open in VS Code“ für lokale Terminals im Browser. Live-Prüfungen auf Windows/macOS und mit installiertem Editor stehen aus.

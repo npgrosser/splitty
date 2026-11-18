@@ -67,7 +67,3 @@ bright-blue = "#8cbce0"
 bright-magenta = "#d8a8d8"
 bright-cyan = "#80d4c8"
 bright-white = "#f0e8df"
-
-[layout]
-dnd-overlay-scope = "global"
-dnd-overlay-target = "group"

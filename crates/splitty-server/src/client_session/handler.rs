@@ -1,7 +1,7 @@
 //! Per-connection service message loop, shared by every carrier.
 //!
-//! On admission, generates a client ID, sends a `mux.welcome` message with the
-//! screen list, the listening ports (`ports.changed`) and the sessions'
+//! On admission, generates a client ID, sends a `mux.welcome` message with its
+//! capabilities, then the listening ports (`ports.changed`) and the sessions'
 //! program status records (`program_status.changed`), then enters a
 //! `tokio::select!` loop reading both client frames and the notification
 //! broadcast channel. Text messages are dispatched first to the `MuxHandler`,
@@ -60,8 +60,6 @@ pub(super) async fn run(
         MuxHandler::new(
             client_state.mux_store.clone(),
             sender.clone(),
-            client_id.clone(),
-            client_state.server_mode.clone(),
             client_state.effect_runner.clone(),
             client_state.shell_profiles.clone(),
             client_state.env.clone(),
@@ -108,7 +106,7 @@ pub(super) async fn run(
         changes
     });
 
-    // Send welcome (replaces hello + mux.connect), then the listening ports
+    // Send the welcome before the port and program-status snapshots.
     // Subscribe before the first snapshot of the catalog: a concurrent launch
     // must not fall into a gap between welcome and event subscription.
     mux_handler.send_welcome().await;
@@ -218,7 +216,7 @@ pub(super) async fn run(
                                     }
                                     continue;
                                 }
-                            }else if value["type"]=="close"{client_state.jobs.close_jobs(None,None,value["id"].as_str()).await;}
+                            }
                         }
                         // Try mux handler first; it answers waits for a review too.
                         if value["type"].as_str().is_some_and(|kind| kind.starts_with("mux.") || kind == codec::MSG_VIEWER_REVIEW_ANSWER) {
@@ -231,7 +229,7 @@ pub(super) async fn run(
                         match codec::JsonRequest::from_value(value) {
                             Ok(jr) => {
                                 let req = codec::decode_request(jr);
-                                let changes_streams = matches!(req.msg_type.as_str(), "create" | "attach" | "detach" | "close");
+                                let changes_streams = matches!(req.msg_type.as_str(), "attach" | "detach");
                                 drop(text);
                                 drop(_incoming_bytes);
                                 connection.handle_charged(_decoded.charge(req)).await;

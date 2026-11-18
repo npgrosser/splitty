@@ -288,15 +288,6 @@ pub fn reduce_workspace(
             Ok((state, vec![]))
         }
 
-        Op::ReorderScreens { screen_order } => {
-            // Only keep IDs that actually exist
-            state.screen_order = screen_order
-                .into_iter()
-                .filter(|id| state.screens.contains_key(id))
-                .collect();
-            Ok((state, vec![]))
-        }
-
         Op::MoveScreen {
             screen_id,
             before_screen_id,

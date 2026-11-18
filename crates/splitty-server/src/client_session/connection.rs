@@ -6,6 +6,7 @@ use std::sync::Arc;
 /// A session message between a carrier and the session loop. Liveness is
 /// the carrier's own and has no message here.
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 pub enum Message {
     Text(String),
     Binary(Vec<u8>),

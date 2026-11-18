@@ -15,18 +15,14 @@ use crate::client_session::program_status::INTERVAL;
 /// A program that writes each line of its input as a status report.
 const REPORTER: &str = "while IFS= read -r line; do printf '\\033]7501;%s\\007' \"$line\"; done";
 
-/// The next `program_status.changed`, answering pings meanwhile.
+/// The next `program_status.changed`.
 async fn next_status(socket: &mut Socket) -> serde_json::Value {
     loop {
-        match next(socket).await {
-            Message::Text(text) => {
-                let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-                if value["type"] == "program_status.changed" {
-                    return value;
-                }
+        if let Message::Text(text) = next(socket).await {
+            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            if value["type"] == "program_status.changed" {
+                return value;
             }
-            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.expect("pong"),
-            _ => {}
         }
     }
 }
@@ -55,7 +51,7 @@ async fn after_greetings(socket: &mut Socket) -> serde_json::Value {
 
 async fn send(socket: &mut Socket, value: serde_json::Value) {
     socket
-        .send(Message::Text(value.to_string().into()))
+        .send(Message::Text(value.to_string()))
         .await
         .expect("send");
 }
@@ -228,7 +224,6 @@ async fn run_root_records_reach_every_connection() {
     assert_eq!(
         blocked["notice"],
         json!({
-            "kind": "program-status",
             "severity": "warning",
             "title": "build: Waiting for permission: Run tests?",
             "setting": "programStatus",

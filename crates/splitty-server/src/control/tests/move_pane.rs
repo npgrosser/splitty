@@ -6,18 +6,14 @@ use crate::jobs::{Actor, Anchor, Grant};
 use splitty_core::ids::{AgentId, JobId};
 use splitty_core::pty::testing::pty_available;
 
-/// The next text message of `expected` type, answering pings meanwhile.
+/// The next text message of `expected` type.
 async fn message_type(socket: &mut Socket, expected: &str) -> serde_json::Value {
     loop {
-        match next(socket).await {
-            Message::Text(text) => {
-                let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-                if value["type"] == expected {
-                    return value;
-                }
+        if let Message::Text(text) = next(socket).await {
+            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            if value["type"] == expected {
+                return value;
             }
-            Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.expect("pong"),
-            _ => {}
         }
     }
 }

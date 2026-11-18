@@ -325,7 +325,6 @@ impl Connector {
                 },
                 &mut service.capacity,
                 context,
-                None,
                 |_| {},
             )
             .await;
@@ -424,7 +423,6 @@ impl Connector {
                 },
                 &mut service.capacity,
                 context,
-                None,
                 progress,
             )
             .await;
@@ -433,30 +431,12 @@ impl Connector {
 
     #[cfg(unix)]
     pub async fn local(&self, info: &splitty_core::daemon::DaemonInfo) -> io::Result<Client> {
-        self.local_open(info, None, self.admit()?, |_| {}).await
+        self.local_open(info, self.admit()?, |_| {}).await
     }
-    /// Exercise the endpoint's host-open wire intent without a product launcher.
-    #[cfg(all(test, unix))]
-    pub(crate) async fn endpoint_host_fixture(
-        &self,
-        info: &splitty_core::daemon::DaemonInfo,
-        target: splitty_remote::ssh::SshTarget,
-        update: bool,
-    ) -> io::Result<Client> {
-        let intent = wire::OpenHost {
-            owner_instance: info.instance.clone().unwrap_or_default(),
-            target: target.as_str().into(),
-            update,
-        };
-        self.local_open(info, Some(intent), self.admit()?, |_| {})
-            .await
-    }
-
     #[cfg(unix)]
     async fn local_open(
         &self,
         info: &splitty_core::daemon::DaemonInfo,
-        open_host: Option<wire::OpenHost>,
         pending: Pending,
         progress: impl FnMut(Charged<wire::Progress>),
     ) -> io::Result<Client> {
@@ -484,36 +464,17 @@ impl Connector {
             .ok_or_else(|| io::Error::other("missing native endpoint"))?;
         let stream = super::endpoint::connect(std::path::Path::new(path)).await?;
         let (read, write) = stream.into_split();
-        let purpose =
-            open_host
-                .as_ref()
-                .map_or(wire::Purpose::Direct, |host| wire::Purpose::Host {
-                    target: host.target.clone(),
-                });
         let expected = negotiation::Expected {
-            instance: if open_host.is_some() {
-                None
-            } else {
-                info.instance.as_deref()
-            },
-            purpose: &purpose,
-            mux_protocol: if open_host.is_some() {
-                splitty_core::protocol::PROTOCOL_VERSION
-            } else {
-                info.protocol
-            },
-            preparation: if open_host.is_some() {
-                splitty_remote::tunnel::PREPARE_TIMEOUT
-            } else {
-                wire::HANDSHAKE_TIMEOUT
-            },
+            instance: info.instance.as_deref(),
+            purpose: &wire::Purpose::Direct,
+            mux_protocol: info.protocol,
+            preparation: wire::HANDSHAKE_TIMEOUT,
         };
         self.negotiate(
             (read, write),
             expected,
             &mut Some((carrier, opening)),
             context,
-            open_host,
             progress,
         )
         .await
@@ -525,7 +486,6 @@ impl Connector {
         expected: negotiation::Expected<'_>,
         capacity: &mut Option<(admission::Carrier, admission::Opening)>,
         context: queue::Context,
-        open_host: Option<wire::OpenHost>,
         progress: impl FnMut(Charged<wire::Progress>),
     ) -> io::Result<Client>
     where
@@ -538,7 +498,7 @@ impl Connector {
                 return Err(io::Error::new(io::ErrorKind::BrokenPipe, "native owner closed"));
             }
             ready = async {
-                negotiation::client_with_host(&mut read, &mut write, &context.budget, open_host).await?;
+                negotiation::client(&mut read, &mut write, &context.budget).await?;
                 negotiation::accept(&mut read, &mut write, &context.budget, expected, progress).await
             } => ready?,
         };
@@ -954,7 +914,6 @@ mod tests {
                     },
                     &mut service.capacity,
                     task_context,
-                    None,
                     |_| {},
                 )
                 .await;
@@ -1072,7 +1031,6 @@ mod tests {
                     },
                     &mut Some((carrier, opening)),
                     revoked,
-                    None,
                     |_| {},
                 )
                 .await
@@ -1162,7 +1120,6 @@ mod tests {
                 },
                 &mut Some((carrier, opening)),
                 context.clone(),
-                None,
                 |_| {
                     reported = true;
                     context.close();

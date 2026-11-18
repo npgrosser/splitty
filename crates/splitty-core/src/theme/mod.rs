@@ -2,8 +2,7 @@
 //!
 //! Themes are authored as TOML files with a ~15-color palette and a dark/light variant.
 //! The resolver derives semantic UI tokens and terminal ANSI colors from the palette,
-//! with optional per-token overrides. An `[effects]` section allows themes to enable
-//! visual effects (glow, scanlines) that the frontend applies via CSS. Six themes are
+//! with optional per-token overrides. Themes are
 //! bundled at compile time (dark, light, classic, retro, aurora, neon); custom themes
 //! are loaded from `~/.config/splitty/themes/`.
 

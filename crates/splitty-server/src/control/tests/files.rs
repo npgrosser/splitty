@@ -5,24 +5,18 @@ use base64::Engine as _;
 
 async fn message_type(socket: &mut Socket, expected: &str) -> serde_json::Value {
     loop {
-        match next(socket).await {
-            Message::Text(text) => {
-                let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-                if value["type"] == expected {
-                    return value;
-                }
+        if let Message::Text(text) = next(socket).await {
+            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            if value["type"] == expected {
+                return value;
             }
-            Message::Ping(bytes) => {
-                socket.send(Message::Pong(bytes)).await.expect("pong");
-            }
-            _ => {}
         }
     }
 }
 
 async fn send(socket: &mut Socket, value: serde_json::Value) {
     socket
-        .send(Message::Text(value.to_string().into()))
+        .send(Message::Text(value.to_string()))
         .await
         .expect("send");
 }
@@ -88,6 +82,7 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    use_test_shell(&served.state);
     let mut socket = served.open_local().await;
     let welcome = message_type(&mut socket, "mux.welcome").await;
     assert!(welcome["capabilities"]
@@ -99,13 +94,7 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
         .unwrap()
         .contains(&json!("upload-control-v1")));
     send(&mut socket, json!({"type":"file.register"})).await;
-    send(
-        &mut socket,
-        json!({"type":"create","shell":"/bin/sh","cols":80,"rows":24,"dir":dir.path()}),
-    )
-    .await;
-    let created = message_type(&mut socket, "created").await;
-    let session = created["sessionId"].as_str().expect("session").to_owned();
+    let session = spawn_test_pane(&mut socket, "test-screen", "test-pane", dir.path(), "").await;
     // A subsequent request/response is a fence after subscription routing updated.
     send(
         &mut socket,
@@ -176,9 +165,7 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
         async move { axum::serve(listener, control).await }
     });
     let server = crate::cli::ServerInfo {
-        transport: crate::cli::Transport::LocalSocket(
-            control_socket.to_string_lossy().into_owned(),
-        ),
+        socket: control_socket.to_string_lossy().into_owned(),
         source: "test",
     };
     let folder = dir.path().join("build");
@@ -250,17 +237,18 @@ async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: boo
     send(&mut socket, json!({"type":"detach","id":session})).await;
     send(
         &mut socket,
-        json!({"type":"create","shell":"/bin/sh","cols":80,"rows":24,"dir":dir.path()}),
+        json!({"type":"mux.resync","screenId":"test-screen"}),
     )
     .await;
-    let fence = message_type(&mut socket, "created").await;
+    message_type(&mut socket, "mux.screen_snapshot").await;
     let (status, body) = offer(control.clone(), input.clone()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "no_client");
 
-    let backend = served.state.client_state.dispatcher.backend();
-    backend.close(&session).expect("close");
-    backend
-        .close(fence["sessionId"].as_str().expect("session"))
-        .expect("close");
+    send(
+        &mut socket,
+        json!({"type":"mux.op","screenId":"test-screen",
+        "op":{"type":"close_pane","paneId":"test-pane"}}),
+    )
+    .await;
 }

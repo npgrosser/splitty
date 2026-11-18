@@ -70,8 +70,7 @@ impl TitleInfo {
             .filter(|c| {
                 !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
             })
-            // The web client's existing bound is in UTF-16 code units. Keeping
-            // whole characters within that bound gives every client the same text.
+            // Keep the wire limit of 500 UTF-16 code units without splitting characters.
             .take_while(|c| {
                 utf16_units += c.len_utf16();
                 utf16_units <= 500

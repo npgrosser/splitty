@@ -41,33 +41,6 @@ fn remembered_reply(result: Result<crate::hub::Remembered, crate::hub::RememberE
     }
 }
 
-/// A catalog update has the same error contract as remembered screens.
-pub(crate) fn update_catalog(hub: &Hub, document: Value) -> Reply {
-    use crate::hub::CatalogError;
-
-    match hub.update_catalog(document) {
-        Ok(host) => Payload(host).into_reply(),
-        Err(error @ CatalogError::Invalid(_)) => (
-            StatusCode::BAD_REQUEST,
-            Payload(json!({"error": error.to_string()})),
-        )
-            .into_reply(),
-        Err(error @ CatalogError::Hidden) => (
-            StatusCode::CONFLICT,
-            Payload(json!({"error": error.to_string()})),
-        )
-            .into_reply(),
-        Err(error @ CatalogError::Write(_)) => {
-            tracing::warn!("remote catalog: {error}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Payload(json!({"error": error.to_string()})),
-            )
-                .into_reply()
-        }
-    }
-}
-
 /// Host metadata replies are the shared reply types
 /// (`native_api::hosts`), not the hub's file records.
 pub(crate) fn host_order_reply(order: crate::hub::HostOrder) -> native_hosts::HostOrder {
@@ -82,15 +55,6 @@ fn host_preference_reply(row: crate::hub::HostPreference) -> native_hosts::HostP
         target: row.target,
         alias: row.alias,
         hidden: row.hidden,
-    }
-}
-
-pub(crate) fn host_preferences_reply(
-    all: splitty_remote::hosts::HostPreferences,
-) -> native_hosts::HostPreferences {
-    native_hosts::HostPreferences {
-        version: all.version,
-        hosts: all.hosts.into_iter().map(host_preference_reply).collect(),
     }
 }
 
@@ -487,48 +451,6 @@ pub(crate) fn apply_home_settings(state: &ServiceState, updated: splitty_core::c
 pub(crate) async fn get_shell_profiles(state: &ServiceState) -> Payload<Value> {
     let profiles = state.shell_profiles.read().unwrap();
     Payload(serde_json::to_value(&*profiles).unwrap_or(json!({})))
-}
-
-pub(crate) async fn put_shell_profiles(
-    state: &ServiceState,
-    update: splitty_core::shell_profiles::ShellProfilesState,
-) -> Reply {
-    let detection = splitty_core::shell_profiles::detect_shell_profiles(
-        &splitty_core::shell_profiles::DetectionEnvironment::current(),
-    );
-    let mut candidate = state.config.read().unwrap().clone();
-    let shell_state = match splitty_core::shell_profiles::apply_shell_profiles_update(
-        &mut candidate.shells,
-        update,
-        &detection,
-    ) {
-        Ok(profiles) => profiles,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Payload(json!({"error": e.to_string()})),
-            )
-                .into_reply();
-        }
-    };
-
-    if let Err(e) = splitty_core::config::save_to(&candidate, &state.config_path) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Payload(json!({"error": e.to_string()})),
-        )
-            .into_reply();
-    }
-
-    *state.config.write().unwrap() = candidate;
-    *state.shell_profiles.write().unwrap() = shell_state.clone();
-    state.client_state.broadcast_events(
-        &[splitty_core::protocol::ServerEvent::settings_changed(
-            serde_json::to_value(&*state.config.read().unwrap()).unwrap_or(json!({})),
-        )],
-        None,
-    );
-    Payload(serde_json::to_value(shell_state).unwrap_or(json!({}))).into_reply()
 }
 
 // ── Templates ───────────────────────────────────────────────────────────────
@@ -961,17 +883,6 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
         "set_active_screen" => state.mux_store.dispatch(mux::Op::SetActiveScreen {
             screen_id: screen_id.clone(),
         }),
-        "reorder_screens" => state.mux_store.dispatch(mux::Op::ReorderScreens {
-            screen_order: req.op["screenOrder"]
-                .as_array()
-                .map(|order| {
-                    order
-                        .iter()
-                        .filter_map(|id| id.as_str().map(ScreenId::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }),
         "move_screen" => {
             let before_screen_id = match req.op.get("beforeScreenId") {
                 None | Some(Value::Null) => Ok(None),
@@ -1223,7 +1134,6 @@ pub(crate) async fn get_mux_status(state: &ServiceState) -> Payload<Value> {
         "screens": ws.screens.len(),
         "sessions": total_sessions,
         "activeScreen": ws.active_screen_id.as_ref().map(|id| id.to_string()),
-        "listenAddr": null,
         "instance": state.instance,
         "transportVersion": 1,
     }))
@@ -1374,15 +1284,7 @@ mod tests {
         fn value(reply: &impl serde::Serialize) -> serde_json::Value {
             serde_json::to_value(reply).expect("serialize")
         }
-        let row = |row: HostPreference| {
-            value(&host_preferences_reply(
-                splitty_remote::hosts::HostPreferences {
-                    version: 1,
-                    hosts: vec![row],
-                },
-            ))["hosts"][0]
-                .clone()
-        };
+        let row = |row| value(&host_preference_reply(row));
         assert_eq!(
             value(&host_order_reply(HostOrder {
                 version: 1,

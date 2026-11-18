@@ -443,13 +443,6 @@ const DAEMON_ERROR: &str = "SPLITTY_DAEMON_ERROR";
 #[cfg(unix)]
 const DAEMON_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Human-readable description of how the CLI reached the server.
-fn describe_transport(transport: &cli::Transport) -> String {
-    match transport {
-        cli::Transport::LocalSocket(path) => path.clone(),
-    }
-}
-
 fn main() {
     if std::env::var_os("SPLITTY_BROWSER_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")) {
         std::process::exit(if splitty_remote::askpass::helper().is_ok() {
@@ -976,7 +969,7 @@ async fn async_main() {
                 if json {
                     println!("{}", serde_json::to_string_pretty(&status).unwrap());
                 } else {
-                    println!("Server:   {}", describe_transport(&server.transport));
+                    println!("Server:   {}", server.socket);
                     println!("Source:   {}", server.source);
                     println!(
                         "Mode:     {}",
@@ -1373,7 +1366,7 @@ async fn stop_daemon_instance(instance: &str) -> Result<bool, String> {
         );
     }
     let server = cli::ServerInfo {
-        transport: cli::Transport::LocalSocket(info.socket),
+        socket: info.socket,
         source: "verified daemon update",
     };
     let response = cli::request_within(

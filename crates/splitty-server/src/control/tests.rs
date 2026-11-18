@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::client_session::Message;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use nix::sys::signal::{kill, Signal};
@@ -13,7 +14,6 @@ use nix::unistd::Pid;
 use serde_json::json;
 use splitty_core::protocol::PROTOCOL_VERSION;
 use splitty_core::pty::ports::ListeningPort;
-use tokio_tungstenite::tungstenite::Message;
 use tower::ServiceExt;
 
 use crate::client_session::ports::{PortWatch, Scan};
@@ -96,7 +96,6 @@ fn state_on(
         Arc::new(EffectRunner::new(pty)),
         EnvContext::default(),
         notify_tx,
-        "embedded".to_owned(),
     );
     if let Some(ports) = ports {
         client_state = client_state.with_ports(ports);
@@ -137,6 +136,56 @@ fn command_opts(id: &str, script: &str) -> splitty_core::pty::CreateSessionOpts 
     opts.command = script.into();
     opts.restore_mode = "close".into();
     opts
+}
+
+/// Set up the shell profile used by native-stream pane fixtures.
+fn use_test_shell(state: &TestState) {
+    let config = splitty_core::shell_profiles::ShellSettings {
+        default_profile_id: "test-sh".into(),
+        profiles: vec![splitty_core::shell_profiles::StoredShellProfile {
+            id: "test-sh".into(),
+            name: "Test shell".into(),
+            command: "/bin/sh".into(),
+            args: vec!["-i".into()],
+            enabled: true,
+            target: Default::default(),
+            source: splitty_core::shell_profiles::ShellProfileSource::Custom,
+        }],
+    };
+    *state.shell_profiles.write().unwrap() =
+        splitty_core::shell_profiles::state_from_settings(&config);
+}
+
+/// Spawn a pane on a fresh screen through the session protocol.
+async fn spawn_test_pane(
+    socket: &mut Socket,
+    screen: &str,
+    pane: &str,
+    dir: &Path,
+    script: &str,
+) -> String {
+    socket
+        .send(Message::Text(
+            json!({"type":"mux.op","screenId":screen,"op":{
+                "type":"apply_template","createScreen":true,"paneIds":{"shell":pane},
+                "template":{"name":"Test screen","layout":{"slot":"shell"},
+                    "panes":{"shell":{"dir":dir,"command":script,"restore_mode":"close",
+                                      "shell_profile":"test-sh"}}}
+            }})
+            .to_string(),
+        ))
+        .await
+        .expect("spawn pane");
+    loop {
+        let message = json_of(next(socket).await);
+        match message["type"].as_str() {
+            Some("mux.pane_spawned") if message["paneId"] == pane => {
+                return message["sessionId"].as_str().expect("session").to_owned();
+            }
+            Some("mux.op_failed") => panic!("pane spawn failed: {message}"),
+            _ => {}
+        }
+    }
 }
 
 /// Control operations use the owner router; other catalog operations are
@@ -246,7 +295,7 @@ async fn the_hubs_routes_are_not_on_the_control_socket() {
     for (method, path) in [
         ("GET", "/ws/remote?target=vm1"),
         ("GET", "/ws/remote?target=vm1&update=1"),
-        ("GET", "/api/remote/hosts"),
+        ("GET", "/api/remote/directory"),
         ("GET", "/api/home/settings"),
         ("GET", "/api/build"),
         ("POST", "/api/command"),
@@ -257,15 +306,11 @@ async fn the_hubs_routes_are_not_on_the_control_socket() {
         ("DELETE", "/api/remote/hosts"),
         ("GET", "/api/remote/ssh-prompts"),
         ("POST", "/api/remote/ssh-prompts"),
-        ("GET", HOST_PREFERENCES),
         ("PUT", HOST_PREFERENCES),
-        ("GET", HOST_ORDER),
         ("PUT", HOST_ORDER),
         ("GET", SCREENS),
         ("PUT", SCREENS),
         ("PUT", SCREENS_HOST),
-        ("GET", CATALOG),
-        ("PUT", CATALOG),
         ("GET", PREFERENCES),
         ("PUT", PREFERENCES),
         ("DELETE", PREFERENCES),
@@ -300,7 +345,6 @@ const HOST_ORDER: &str = "/api/remote/host-order";
 
 const SCREENS: &str = "/api/remote/screens";
 const SCREENS_HOST: &str = "/api/remote/screens/host";
-const CATALOG: &str = "/api/remote/catalog";
 
 /// A credential-free request for the owner router or catalog decoder.
 fn api(method: &str, path: &str, body: Option<&serde_json::Value>) -> Request<Body> {
@@ -481,11 +525,12 @@ async fn remote_catalog_merges_hosts_and_survives_a_fresh_hub() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let state = state(ADDR, dir.path());
+    let catalog_hub = Arc::new(hub(&host, dir.path()));
     let app = router(&state, hub(&host, dir.path()));
     let file = dir.path().join("config/remote-catalog.json");
     assert_eq!(
-        exchange(&app, api("GET", CATALOG, None)).await,
-        (StatusCode::OK, json!({"version": 1, "hosts": []}))
+        serde_json::to_value(catalog_hub.catalog()).unwrap(),
+        json!({"version": 1, "hosts": []})
     );
     assert!(!file.exists(), "reading does not create the file");
     // The open-screen list and directory are independent.
@@ -509,8 +554,7 @@ async fn remote_catalog_merges_hosts_and_survives_a_fresh_hub() {
         {"id": "s1", "name": "api", "panes": 2},
         {"id": "s2", "panes": 0},
     ]});
-    let (status, first) = exchange(&app, api("PUT", CATALOG, Some(&vm1))).await;
-    assert_eq!(status, StatusCode::OK, "{first}");
+    let first = serde_json::to_value(catalog_hub.update_catalog(vm1.clone()).unwrap()).unwrap();
     let timestamp = first["lastSeen"].as_u64().expect("Unix seconds");
     assert!((before..=now()).contains(&timestamp));
     assert_eq!(
@@ -521,26 +565,29 @@ async fn remote_catalog_merges_hosts_and_survives_a_fresh_hub() {
     let vm2 = json!({"target": "user@vm2:2222", "screens": [
         {"id": "s1", "name": "same id, other host", "panes": 1},
     ]});
-    let (status, second) = exchange(&app, api("PUT", CATALOG, Some(&vm2))).await;
-    assert_eq!(status, StatusCode::OK, "{second}");
+    let second = serde_json::to_value(catalog_hub.update_catalog(vm2.clone()).unwrap()).unwrap();
     assert_eq!(
-        exchange(&app, api("GET", CATALOG, None)).await,
-        (
-            StatusCode::OK,
-            json!({"version": 1, "hosts": [second, first]})
-        )
+        serde_json::to_value(catalog_hub.catalog()).unwrap(),
+        json!({"version": 1, "hosts": [second, first]})
     );
     let empty = json!({"target": "vm1", "screens": []});
-    let (status, updated) = exchange(&app, api("PUT", CATALOG, Some(&empty))).await;
-    assert_eq!(status, StatusCode::OK, "{updated}");
+    let updated = serde_json::to_value(catalog_hub.update_catalog(empty.clone()).unwrap()).unwrap();
     assert_eq!(updated["screens"], json!([]));
     let expected = json!({"version": 1, "hosts": [updated, second]});
     drop(app);
-    let fresh = router(&state, hub(&host, dir.path()));
-    assert_eq!(
-        exchange(&fresh, api("GET", CATALOG, None)).await,
-        (StatusCode::OK, expected.clone())
-    );
+    let fresh_hub = hub(&host, dir.path());
+    let directory = serde_json::to_value(fresh_hub.directory()).unwrap();
+    for row in expected["hosts"].as_array().unwrap() {
+        let entry = directory["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["target"] == row["target"])
+            .expect("persisted host");
+        assert_eq!(entry["screens"], row["screens"]);
+        assert_eq!(entry["lastSeen"], row["lastSeen"]);
+    }
+    let fresh = router(&state, fresh_hub);
     let stored: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&file).expect("file")).expect("JSON");
     assert_eq!(stored, expected);
@@ -559,13 +606,9 @@ async fn remote_catalog_merges_hosts_and_survives_a_fresh_hub() {
 async fn remote_catalog_rejects_invalid_updates_without_writing() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
-    let state = state(ADDR, dir.path());
-    let app = router(&state, hub(&host, dir.path()));
+    let catalog_hub = Arc::new(hub(&host, dir.path()));
     let initial = json!({"target": "vm1", "screens": [{"id": "s1", "name": "api", "panes": 1}]});
-    assert_eq!(
-        exchange(&app, api("PUT", CATALOG, Some(&initial))).await.0,
-        StatusCode::OK
-    );
+    catalog_hub.update_catalog(initial).unwrap();
     let file = dir.path().join("config/remote-catalog.json");
     let saved = std::fs::read(&file).expect("file");
     let mut refused = vec![
@@ -616,35 +659,19 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
         .collect();
     refused.push(json!({"target": "vm1", "screens": too_many}));
     for document in refused {
-        let (code, body) = exchange(&app, api("PUT", CATALOG, Some(&document))).await;
-        assert_eq!(code, StatusCode::BAD_REQUEST, "{document}: {body}");
-        assert!(body["error"].is_string(), "{body}");
+        assert!(
+            matches!(
+                catalog_hub.update_catalog(document.clone()),
+                Err(crate::hub::CatalogError::Invalid(_))
+            ),
+            "{document}"
+        );
         assert_eq!(
             std::fs::read(&file).expect("file"),
             saved,
             "invalid writes change nothing"
         );
     }
-    let mut broken = api("PUT", CATALOG, None);
-    *broken.body_mut() = Body::from("{");
-    broken
-        .headers_mut()
-        .insert("content-type", "application/json".parse().expect("header"));
-    assert_eq!(status(&app, broken).await, StatusCode::UNPROCESSABLE_ENTITY);
-    let mut empty = api("PUT", CATALOG, None);
-    empty
-        .headers_mut()
-        .insert("content-type", "application/json".parse().expect("header"));
-    assert_eq!(
-        status(&app, empty).await,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "no body"
-    );
-    assert_eq!(
-        status(&app, api("PUT", CATALOG, None)).await,
-        StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        "no body and no JSON content type"
-    );
     assert_eq!(std::fs::read(&file).expect("file"), saved);
     assert!(host.asked().is_empty());
 }
@@ -655,25 +682,19 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
 async fn remote_catalog_enforces_limits_and_moves_updated_hosts_to_the_front() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
-    let state = state(ADDR, dir.path());
-    let app = router(&state, hub(&host, dir.path()));
+    let catalog_hub = Arc::new(hub(&host, dir.path()));
     let mut screens: Vec<_> = (0..199)
         .map(|n| json!({"id": format!("s{n}"), "name": "", "panes": 0}))
         .collect();
     screens.push(json!({"id": "界".repeat(256), "name": "名".repeat(200), "panes": 0}));
     let boundary = json!({"target": "vm0", "screens": screens});
-    let (code, body) = exchange(&app, api("PUT", CATALOG, Some(&boundary))).await;
-    assert_eq!(code, StatusCode::OK, "{body}");
+    let body = serde_json::to_value(catalog_hub.update_catalog(boundary.clone()).unwrap()).unwrap();
     assert_eq!(body["screens"], boundary["screens"]);
     for n in 1..21 {
         let body = json!({"target": format!("vm{n}"), "screens": []});
-        assert_eq!(
-            exchange(&app, api("PUT", CATALOG, Some(&body))).await.0,
-            StatusCode::OK
-        );
+        catalog_hub.update_catalog(body).unwrap();
     }
-    let (code, catalog) = exchange(&app, api("GET", CATALOG, None)).await;
-    assert_eq!(code, StatusCode::OK);
+    let catalog = serde_json::to_value(catalog_hub.catalog()).unwrap();
     let targets = |catalog: &serde_json::Value| {
         catalog["hosts"]
             .as_array()
@@ -687,11 +708,8 @@ async fn remote_catalog_enforces_limits_and_moves_updated_hosts_to_the_front() {
         (1..21).rev().map(|n| format!("vm{n}")).collect::<Vec<_>>()
     );
     let body = json!({"target": "vm1", "screens": []});
-    assert_eq!(
-        exchange(&app, api("PUT", CATALOG, Some(&body))).await.0,
-        StatusCode::OK
-    );
-    let (_, updated) = exchange(&app, api("GET", CATALOG, None)).await;
+    catalog_hub.update_catalog(body).unwrap();
+    let updated = serde_json::to_value(catalog_hub.catalog()).unwrap();
     let expected: Vec<_> = std::iter::once("vm1".to_owned())
         .chain((2..21).rev().map(|n| format!("vm{n}")))
         .collect();
@@ -705,21 +723,21 @@ async fn remote_catalog_enforces_limits_and_moves_updated_hosts_to_the_front() {
 async fn remote_catalog_concurrent_updates_keep_other_hosts() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
-    let state = state(ADDR, dir.path());
-    let app = router(&state, hub(&host, dir.path()));
+    let catalog_hub = Arc::new(hub(&host, dir.path()));
     for round in 0..3 {
         let barrier = Arc::new(tokio::sync::Barrier::new(20));
         let mut tasks = Vec::new();
         for n in 0..20 {
-            let app = app.clone();
+            let catalog_hub = catalog_hub.clone();
             let barrier = barrier.clone();
             tasks.push(tokio::spawn(async move {
                 let body = json!({"target": format!("vm{n}"), "screens": [
                     {"id": "s1", "name": format!("round-{round}"), "panes": n},
                 ]});
                 barrier.wait().await;
-                let (code, stored) = exchange(&app, api("PUT", CATALOG, Some(&body))).await;
-                assert_eq!(code, StatusCode::OK, "{stored}");
+                let stored =
+                    serde_json::to_value(catalog_hub.update_catalog(body.clone()).unwrap())
+                        .unwrap();
                 assert_eq!(stored["target"], body["target"]);
                 assert_eq!(stored["screens"], body["screens"]);
             }));
@@ -727,8 +745,7 @@ async fn remote_catalog_concurrent_updates_keep_other_hosts() {
         for task in tasks {
             task.await.expect("request task");
         }
-        let (code, catalog) = exchange(&app, api("GET", CATALOG, None)).await;
-        assert_eq!(code, StatusCode::OK);
+        let catalog = serde_json::to_value(catalog_hub.catalog()).unwrap();
         let hosts = catalog["hosts"].as_array().expect("hosts");
         assert_eq!(hosts.len(), 20);
         for n in 0..20 {
@@ -746,18 +763,17 @@ async fn remote_catalog_concurrent_updates_keep_other_hosts() {
 }
 
 #[tokio::test]
-async fn remote_catalog_corrupt_files_and_write_failures_use_the_api_contract() {
+async fn remote_catalog_ignores_corrupt_files_and_reports_write_failures() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
-    let state = state(ADDR, dir.path());
-    let app = router(&state, hub(&host, dir.path()));
+    let catalog_hub = Arc::new(hub(&host, dir.path()));
     let file = dir.path().join("config/remote-catalog.json");
     std::fs::create_dir_all(file.parent().expect("directory")).expect("directory");
     for text in ["not JSON", r#"{"version":2,"hosts":[]}"#] {
         std::fs::write(&file, text).expect("file");
         assert_eq!(
-            exchange(&app, api("GET", CATALOG, None)).await,
-            (StatusCode::OK, json!({"version": 1, "hosts": []}))
+            serde_json::to_value(catalog_hub.catalog()).unwrap(),
+            json!({"version": 1, "hosts": []})
         );
         assert_eq!(std::fs::read_to_string(&file).expect("file"), text);
     }
@@ -766,12 +782,11 @@ async fn remote_catalog_corrupt_files_and_write_failures_use_the_api_contract() 
     std::fs::remove_file(&file).expect("remove file");
     std::fs::create_dir(&file).expect("block replacement");
     let body = json!({"target": "vm1", "screens": []});
-    let (code, error) = exchange(&app, api("PUT", CATALOG, Some(&body))).await;
-    assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(error["error"]
-        .as_str()
-        .expect("error")
-        .contains("remote-catalog.json"));
+    let error = catalog_hub.update_catalog(body).unwrap_err();
+    assert!(
+        matches!(error, crate::hub::CatalogError::Write(_)),
+        "{error}"
+    );
     assert!(file.is_dir());
     assert!(host.asked().is_empty());
 }
@@ -798,7 +813,7 @@ async fn known_hosts_come_from_the_servers_user() {
 
     let response = router
         .clone()
-        .oneshot(api("GET", "/api/remote/hosts", None))
+        .oneshot(api("GET", "/api/remote/directory", None))
         .await
         .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
@@ -807,10 +822,10 @@ async fn known_hosts_come_from_the_servers_user() {
         .expect("body");
     let hosts: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
     assert_eq!(
-        hosts,
+        hosts["hosts"],
         json!([
-            {"target": "vm1", "source": "recent", "lastConnected": 1760000000},
-            {"target": "api.devpod", "source": "ssh-config"},
+            {"target":"vm1","source":"recent","lastConnected":1760000000,"screens":[]},
+            {"target":"api.devpod","source":"ssh-config","screens":[]},
         ])
     );
 }
@@ -825,8 +840,10 @@ async fn the_host_group_order_is_replaced_and_kept() {
     let state = state(ADDR, dir.path());
     let app = router(&state, hub(&host, dir.path()));
     assert_eq!(
-        exchange(&app, api("GET", HOST_ORDER, None)).await,
-        (StatusCode::OK, json!({"version":1,"order":[]}))
+        exchange(&app, api("GET", "/api/remote/directory", None))
+            .await
+            .1["order"],
+        json!([])
     );
     let order = json!({"order":["vm2","vm1","vm2"]});
     let stored = json!({"version":1,"order":["vm2","vm1"]});
@@ -847,8 +864,10 @@ async fn the_host_group_order_is_replaced_and_kept() {
     }
     let app = router(&state, hub(&host, dir.path()));
     assert_eq!(
-        exchange(&app, api("GET", HOST_ORDER, None)).await,
-        (StatusCode::OK, stored)
+        exchange(&app, api("GET", "/api/remote/directory", None))
+            .await
+            .1["order"],
+        stored["order"]
     );
     assert_eq!(host.asked(), Vec::<String>::new(), "no ssh");
 }
@@ -866,10 +885,7 @@ async fn remote_host_preferences_forget_and_explicit_readd() {
     let state = state(ADDR, dir.path());
     let make_hub = || Hub::new(Box::new(host.clone()), config.clone(), Some(ssh.clone()));
     let app = router(&state, make_hub());
-    assert_eq!(
-        exchange(&app, api("GET", HOST_PREFERENCES, None)).await,
-        (StatusCode::OK, json!({"version":1,"hosts":[]}))
-    );
+    assert!(make_hub().host_preferences().hosts.is_empty());
     let alias = json!({"target":"vm1", "alias":" Home Lab "});
     assert_eq!(
         exchange(&app, api("PUT", HOST_PREFERENCES, Some(&alias))).await,
@@ -881,38 +897,25 @@ async fn remote_host_preferences_forget_and_explicit_readd() {
     )
     .expect("recent fixture");
     let catalog = json!({"target":"vm1","screens":[{"id":"s1","panes":1}]});
-    assert_eq!(
-        status(&app, api("PUT", CATALOG, Some(&catalog))).await,
-        StatusCode::OK
-    );
+    make_hub().update_catalog(catalog.clone()).unwrap();
     let target = json!({"target":"vm1"});
     assert_eq!(
         status(&app, api("DELETE", "/api/remote/hosts", Some(&target))).await,
         StatusCode::NO_CONTENT
     );
     let app = router(&state, make_hub());
+    let (code, directory) = exchange(&app, api("GET", "/api/remote/directory", None)).await;
+    assert_eq!(code, StatusCode::OK);
     assert_eq!(
-        exchange(&app, api("GET", "/api/remote/hosts", None)).await,
-        (
-            StatusCode::OK,
-            json!([{"target":"vm2","source":"ssh-config"}])
-        )
+        directory["hosts"],
+        json!([{"target":"vm2","source":"ssh-config","screens":[]}])
     );
-    assert_eq!(
-        exchange(&app, api("GET", HOST_PREFERENCES, None)).await,
-        (
-            StatusCode::OK,
-            json!({"version":1,"hosts":[{"target":"vm1","hidden":true}]})
-        )
-    );
-    assert_eq!(
-        exchange(&app, api("GET", CATALOG, None)).await,
-        (StatusCode::OK, json!({"version":1,"hosts":[]}))
-    );
-    assert_eq!(
-        status(&app, api("PUT", CATALOG, Some(&catalog))).await,
-        StatusCode::CONFLICT
-    );
+    assert!(make_hub().host_preferences().hosts[0].hidden);
+    assert!(make_hub().catalog().hosts.is_empty());
+    assert!(matches!(
+        make_hub().update_catalog(catalog.clone()),
+        Err(crate::hub::CatalogError::Hidden)
+    ));
     let recent: serde_json::Value = serde_json::from_slice(
         &std::fs::read(config.join("recent-hosts.json")).expect("recent file"),
     )
@@ -923,10 +926,7 @@ async fn remote_host_preferences_forget_and_explicit_readd() {
         status(&app, api("PUT", HOST_PREFERENCES, Some(&reveal))).await,
         StatusCode::OK
     );
-    assert_eq!(
-        status(&app, api("PUT", CATALOG, Some(&catalog))).await,
-        StatusCode::OK
-    );
+    make_hub().update_catalog(catalog.clone()).unwrap();
     assert_eq!(
         std::fs::read_to_string(ssh.join("config")).expect("config"),
         "Host vm1 vm2\n"
@@ -1024,7 +1024,7 @@ impl HostSocket {
                     // Native preparation pulses repeat the latest phase.
                     if report.phase != last_phase && report.phase != "connecting" {
                         last_phase.clone_from(&report.phase);
-                        let _ = output.send(Message::text(json!({
+                        let _ = output.send(Message::Text(json!({
                         "type":"remote.progress", "step":report.phase, "message":report.message,
                     }).to_string()));
                     }
@@ -1038,16 +1038,14 @@ impl HostSocket {
                             input = incoming.recv() => match input {
                                 Some(Message::Text(text)) => client.sender().data(splitty_transport::wire::Kind::Text, text.as_bytes()).expect("native input"),
                                 Some(Message::Binary(bytes)) => client.sender().data(splitty_transport::wire::Kind::Binary, &bytes).expect("native input"),
-                                Some(Message::Ping(_) | Message::Pong(_)) => {},
-                                Some(Message::Close(_)) | None => break,
-                                Some(Message::Frame(_)) => panic!("raw frame is not a session message"),
+                                Some(Message::Close) | None => break,
                             },
                             message = client.recv() => {
                                 let Some(message) = message else { break; };
                                 let (_, bytes) = message.frame.application().expect("application frame");
                                 let message = match message.frame.kind {
-                                    splitty_transport::wire::Kind::Text => Message::text(std::str::from_utf8(bytes).expect("text")),
-                                    splitty_transport::wire::Kind::Binary => Message::binary(bytes.to_vec()),
+                                    splitty_transport::wire::Kind::Text => Message::Text(std::str::from_utf8(bytes).expect("text").to_owned()),
+                                    splitty_transport::wire::Kind::Binary => Message::Binary(bytes.to_vec()),
                                     other => panic!("unexpected host frame: {other:?}"),
                                 };
                                 if output.send(message).is_err() { break; }
@@ -1060,10 +1058,10 @@ impl HostSocket {
                     // Native Closed diagnostics retain the hub's typed error.
                     let error: serde_json::Value = serde_json::from_str(&error.to_string())
                         .expect("typed native host failure");
-                    let _ = output.send(Message::text(error.to_string()));
+                    let _ = output.send(Message::Text(error.to_string()));
                 }
             }
-            let _ = output.send(Message::Close(None));
+            let _ = output.send(Message::Close);
         });
         Self {
             input,
@@ -1086,62 +1084,32 @@ enum Socket {
 
 impl Socket {
     async fn send(&mut self, message: Message) -> Result<(), String> {
-        use crate::client_session::Message as Native;
         match self {
             Self::Host(socket) => socket
                 .input
                 .send(message)
                 .await
                 .map_err(|error| error.to_string()),
-            Self::Native(connection) => {
-                let message = match message {
-                    Message::Text(text) => Native::Text(text.to_string()),
-                    Message::Binary(bytes) => Native::Binary(bytes.to_vec()),
-                    // Liveness belongs to a carrier; this in-process session
-                    // has none, and its pings and pongs have no receiver.
-                    Message::Ping(_) | Message::Pong(_) => return Ok(()),
-                    Message::Close(_) => Native::Close,
-                    Message::Frame(_) => {
-                        return Err("raw WebSocket frame on native connection".into())
-                    }
-                };
-                connection
-                    .input
-                    .send(message)
-                    .map_err(|error| error.to_string())
-            }
+            Self::Native(connection) => connection
+                .input
+                .send(message)
+                .map_err(|error| error.to_string()),
         }
     }
 
     async fn next(&mut self) -> Option<Result<Message, String>> {
-        use crate::client_session::Message as Native;
         match self {
             Self::Host(socket) => socket.output.recv().await.map(Ok),
-            Self::Native(connection) => connection.output.recv().await.map(|message| {
-                Ok(match message.value {
-                    Native::Text(text) => Message::Text(text.into()),
-                    Native::Binary(bytes) => Message::Binary(bytes.into()),
-                    Native::Close => Message::Close(None),
-                })
-            }),
+            Self::Native(connection) => connection
+                .output
+                .recv()
+                .await
+                .map(|message| Ok(message.value)),
         }
     }
 
-    async fn close(
-        &mut self,
-        frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
-    ) -> Result<(), String> {
-        match self {
-            Self::Host(socket) => socket
-                .input
-                .send(Message::Close(frame))
-                .await
-                .map_err(|error| error.to_string()),
-            Self::Native(connection) => connection
-                .input
-                .send(crate::client_session::Message::Close)
-                .map_err(|error| error.to_string()),
-        }
+    async fn close(&mut self) -> Result<(), String> {
+        self.send(Message::Close).await
     }
 }
 
@@ -1303,7 +1271,10 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
 
     // Sent before `remote.ready`: relayed once the bridge is up.
     let early = r#"{"type":"mux.resync","screenId":"s1"}"#;
-    socket.send(Message::text(early)).await.expect("send");
+    socket
+        .send(Message::Text(early.into()))
+        .await
+        .expect("send");
 
     let (progress, ready) = until_outcome(&mut socket).await;
     assert_eq!(
@@ -1323,16 +1294,19 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
             "screens": [{"id": "s1", "name": "api", "panes": 3}],
         })
     );
-    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
-    assert_eq!(next(&mut socket).await, Message::text(early));
+    assert_eq!(next(&mut socket).await, Message::Text(WELCOME.into()));
+    assert_eq!(next(&mut socket).await, Message::Text(early.into()));
 
     let input = r#"{"type":"input","sessionId":"p1","data":"bytes"}"#;
-    socket.send(Message::text(input)).await.expect("send");
-    assert_eq!(next(&mut socket).await, Message::text(input));
-    assert_eq!(next(&mut socket).await, Message::binary(vec![0, 1, 2, 255]));
+    socket
+        .send(Message::Text(input.into()))
+        .await
+        .expect("send");
+    assert_eq!(next(&mut socket).await, Message::Text(input.into()));
+    assert_eq!(next(&mut socket).await, Message::Binary(vec![0, 1, 2, 255]));
     let text = r#"{"type":"mux.op","screenId":"s1","op":{"type":"close_pane"}}"#;
-    socket.send(Message::text(text)).await.expect("send");
-    assert_eq!(next(&mut socket).await, Message::text(text));
+    socket.send(Message::Text(text.into())).await.expect("send");
+    assert_eq!(next(&mut socket).await, Message::Text(text.into()));
 
     let asked = host.asked();
     assert_eq!(asked[0], "prepare user@vm1");
@@ -1353,7 +1327,7 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
     assert_eq!(recent["hosts"][0]["target"], "user@vm1", "{recent}");
 
     let bridge = host.bridge_pid().expect("a bridge");
-    socket.close(None).await.expect("close");
+    socket.close().await.expect("close");
     assert!(gone(bridge).await, "the bridge ends with the socket");
 }
 
@@ -1366,7 +1340,7 @@ async fn a_host_side_that_ends_closes_the_socket_with_4001() {
     let mut socket = served.open("vm1").await;
     let (_, ready) = until_outcome(&mut socket).await;
     assert_eq!(ready["type"], "remote.ready", "{ready}");
-    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
+    assert_eq!(next(&mut socket).await, Message::Text(WELCOME.into()));
 
     let bridge = host.bridge_pid().expect("a bridge");
     kill(
@@ -1374,7 +1348,7 @@ async fn a_host_side_that_ends_closes_the_socket_with_4001() {
         Signal::SIGKILL,
     )
     .expect("kill the bridge");
-    assert_eq!(next(&mut socket).await, Message::Close(None));
+    assert!(matches!(next(&mut socket).await, Message::Close));
 }
 
 /// remote-screens, Automatic Port Forwarding: a port that appears in a
@@ -1390,7 +1364,7 @@ async fn the_hub_forwards_a_port_that_appears_on_a_native_relay() {
     let mut socket = served.open("vm1").await;
     let (_, ready) = until_outcome(&mut socket).await;
     assert_eq!(ready["type"], "remote.ready", "{ready}");
-    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
+    assert_eq!(next(&mut socket).await, Message::Text(WELCOME.into()));
     let port = crate::hub::testing::free_port();
     for ports in [
         String::new(),
@@ -1400,10 +1374,10 @@ async fn the_hub_forwards_a_port_that_appears_on_a_native_relay() {
             format!(r#"{{"type":"ports.changed","id":"e1","timestamp":1,"ports":[{ports}]}}"#);
         let input = json!({"type":"input","id":"__emit__","data":event});
         socket
-            .send(Message::text(input.to_string()))
+            .send(Message::Text(input.to_string()))
             .await
             .expect("send");
-        assert_eq!(next(&mut socket).await, Message::text(event));
+        assert_eq!(next(&mut socket).await, Message::Text(event));
     }
     let forward = tokio::time::timeout(WAIT, async {
         loop {
@@ -1433,7 +1407,7 @@ async fn an_incompatible_daemon_is_reported_and_no_bridge_is_opened() {
     assert_eq!(error["code"], "incompatible", "{error}");
     assert_eq!(error["version"], VERSION, "{error}");
     assert_eq!(error["protocol"], PROTOCOL_VERSION + 1, "{error}");
-    assert_eq!(next(&mut socket).await, Message::Close(None));
+    assert!(matches!(next(&mut socket).await, Message::Close));
     assert!(
         !host.asked().iter().any(|asked| asked == "bridge"),
         "{:?}",
@@ -1458,7 +1432,7 @@ async fn a_failed_host_key_check_is_reported_with_its_hint() {
     assert_eq!(error["code"], "host_key", "{error}");
     let hint = error["hint"].as_str().expect("a hint");
     assert!(hint.contains("Run `ssh vm1` once"), "{hint}");
-    assert_eq!(next(&mut socket).await, Message::Close(None));
+    assert!(matches!(next(&mut socket).await, Message::Close));
     assert_eq!(host.asked(), ["prepare vm1"]);
 }
 
@@ -1528,7 +1502,7 @@ async fn update_replaces_a_daemon_of_another_version() {
         ready["daemon"],
         json!({"version": VERSION, "protocol": PROTOCOL_VERSION, "keepsSessions": true, "started": true})
     );
-    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
+    assert_eq!(next(&mut socket).await, Message::Text(WELCOME.into()));
     assert_eq!(
         calls(&host)[2..],
         ["prepare", "handshake", "stop", "handshake", "bridge"]
@@ -1634,7 +1608,7 @@ async fn an_update_without_this_version_on_the_host_stops_nothing() {
         .as_str()
         .unwrap()
         .contains("Updating it ends its sessions"));
-    assert_eq!(next(&mut socket).await, Message::Close(None));
+    assert!(matches!(next(&mut socket).await, Message::Close));
     assert_eq!(calls(&host), ["prepare", "handshake"]);
 }
 
@@ -1734,7 +1708,7 @@ async fn without_a_port_scan_no_ports_are_sent() {
     assert_eq!(json_of(next(&mut socket).await)["type"], "mux.welcome");
     assert_eq!(json_of(next(&mut socket).await)["type"], "ports.catalog");
     socket
-        .send(Message::text(
+        .send(Message::Text(
             json!({"type":"mux.workspace_resync"}).to_string(),
         ))
         .await
@@ -2653,8 +2627,8 @@ async fn successful_ready_restores_only_its_enabled_saved_forwards_without_block
         Message::Text(r#"{"type":"mux.resync"}"#.into()),
         "no hub error frame after ready"
     );
-    socket.close(None).await.expect("close");
-    other_window.close(None).await.expect("close");
+    socket.close().await.expect("close");
+    other_window.close().await.expect("close");
     assert_eq!(
         through(slow),
         "forwarded 5173",
@@ -2942,7 +2916,7 @@ async fn successful_ready_restores_saved_reverse_forwards() {
         .iter()
         .all(|call| !call.starts_with(&format!("reverse vm1 {paused} "))
             && !call.starts_with(&format!("reverse vm1 {own} "))));
-    socket.close(None).await.expect("close");
+    socket.close().await.expect("close");
 }
 
 #[tokio::test]
@@ -2988,7 +2962,7 @@ async fn host_port_catalog_is_shared_durable_and_independent_of_discovery() {
     let mut first = served.open_local().await;
     assert_eq!(until(&mut first, "ports.catalog").await["ports"], json!([]));
     first
-        .send(Message::text(
+        .send(Message::Text(
             json!({"type":"ports.save","requestId":"save","port":8080,"name":"API"}).to_string(),
         ))
         .await
@@ -3013,7 +2987,7 @@ async fn host_port_catalog_is_shared_durable_and_independent_of_discovery() {
         json!([{"port":8080,"name":"API"}])
     );
     second
-        .send(Message::text(
+        .send(Message::Text(
             json!({"type":"ports.save","requestId":"rename","port":8080,"name":"Backend"})
                 .to_string(),
         ))
@@ -3032,7 +3006,7 @@ async fn host_port_catalog_is_shared_durable_and_independent_of_discovery() {
         "metadata must not open SSH tunnels"
     );
     first
-        .send(Message::text(
+        .send(Message::Text(
             json!({"type":"ports.remove","requestId":"remove","port":8080}).to_string(),
         ))
         .await

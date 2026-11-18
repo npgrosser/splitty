@@ -1,7 +1,7 @@
 //! Configuration loading, saving, and validation.
 //!
 //! User settings live in `~/.config/splitty/config.toml` (snake_case keys)
-//! and are served to the frontend as camelCase JSON. This module handles the
+//! and are served to clients as camelCase JSON. This module handles the
 //! bidirectional key transformation, deep-merge partial updates, and value
 //! validation with safe fallbacks to defaults.
 

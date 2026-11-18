@@ -164,7 +164,7 @@ pub fn review_delivery(text: &str, form: ReviewForm, bracketed_paste: bool) -> R
 mod tests {
     use super::*;
 
-    /// As the web client does: a paste ends without Enter, and a review of
+    /// A paste ends without Enter, and a review of
     /// several lines goes to a program without bracketed paste as a file.
     #[test]
     fn a_review_reaches_a_terminal_without_running_its_lines() {

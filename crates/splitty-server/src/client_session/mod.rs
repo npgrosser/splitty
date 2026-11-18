@@ -67,8 +67,6 @@ pub struct ClientState {
     pub env: EnvContext,
     /// Broadcast channel for server-generated notifications (serialized JSON).
     pub notify_tx: NotificationBus,
-    /// Server mode: "embedded" or "daemon".
-    pub server_mode: String,
     /// The listening ports of the sessions, as the clients know them.
     pub ports: ports::PortWatch,
     /// The sessions' program status records, as the clients know them.
@@ -90,14 +88,7 @@ impl ClientState {
         effect_runner: Arc<EffectRunner>,
         env: EnvContext,
         notify_tx: NotificationBus,
-        server_mode: String,
     ) -> Self {
-        let job_store = Arc::clone(&mux_store);
-        dispatcher.set_job_resolver(Arc::new(move |pane_id| {
-            job_store
-                .job_for_pane(pane_id)
-                .map(|(id, state)| (id.to_string(), state))
-        }));
         let ports = ports::PortWatch::new(dispatcher.backend().clone());
         let jobs = crate::jobs::Jobs::new(
             mux_store.clone(),
@@ -120,7 +111,6 @@ impl ClientState {
             effect_runner,
             env,
             notify_tx,
-            server_mode,
             ports,
             program_status: program_status::StatusWatch::default(),
         }
@@ -206,7 +196,6 @@ mod tests {
             Arc::new(EffectRunner::new(backend)),
             EnvContext::default(),
             notifications.clone(),
-            "embedded".into(),
         );
         let context = splitty_transport::queue::Context::default();
         let (sender, mut output) = ClientSender::with_context(context.clone());

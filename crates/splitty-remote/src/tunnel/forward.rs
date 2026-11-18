@@ -2,10 +2,7 @@
 //!
 //! Each forward defaults to `127.0.0.1` here and reaches `localhost:<port>` on
 //! the host, a name `sshd` resolves there, so a dev server that listens only on
-//! IPv6 is reached as well. It is announced as `http://localhost:<port>`: the
-//! session cookie of a Splitty server belongs to the host `127.0.0.1`, whatever
-//! its port, so a browser never sends it to a forwarded server opened as
-//! `localhost`.
+//! IPv6 is reached as well. The local URL is `http://localhost:<port>`.
 
 use std::io;
 use std::net::{Ipv6Addr, TcpListener};

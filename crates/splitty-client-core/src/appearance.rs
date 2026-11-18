@@ -80,9 +80,8 @@ impl DrawerVisibilityResult {
 
 /// The terminal palette the settings `theme`, `dark` and `light`
 /// (`terminal.theme`, `terminal.themeDark`, `terminal.themeLight`) choose for
-/// a UI theme of `mode`, by the server's rule, which the web client gets in
-/// its theme answer; `None` for the UI theme's own palette. The name is looked
-/// up in the application's own catalog.
+/// a UI theme of `mode`. `None` selects the UI theme's own palette. The app
+/// resolves a name in its local catalog.
 pub fn terminal_palette_name<'a>(
     theme: &'a str,
     dark: &'a str,

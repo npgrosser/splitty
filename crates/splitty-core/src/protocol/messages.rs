@@ -29,7 +29,6 @@ impl CatalogPort {
 // ---------------------------------------------------------------------------
 // Client → Server message types (used for request dispatching)
 // ---------------------------------------------------------------------------
-pub const MSG_CREATE: &str = "create";
 pub const MSG_ATTACH: &str = "attach";
 pub const MSG_DETACH: &str = "detach";
 pub const MSG_INPUT: &str = "input";
@@ -38,7 +37,6 @@ pub const MSG_INPUT_BYTES: &str = "input_bytes";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_INPUT_ENCODED_BYTES: usize = MAX_INPUT_BYTES.div_ceil(3) * 4;
 pub const MSG_RESIZE: &str = "resize";
-pub const MSG_CLOSE: &str = "close";
 /// Store a pasted image on this server and answer with its path.
 pub const MSG_SAVE_IMAGE: &str = "save_image";
 /// One chunk of a file uploaded to this server (`protocol::upload`).
@@ -76,16 +74,9 @@ pub struct Request {
     pub msg_type: String,
     pub id: String,
     pub data: Vec<u8>,
-    pub shell: String,
-    pub shell_profile_id: String,
     pub cols: u16,
     pub rows: u16,
-    pub command: String,
     pub dir: String,
-    pub root: String,
-    pub restore_mode: String,
-    pub pane_id: String,
-    pub screen_id: String,
     /// The client's id of a request that is answered on its own
     /// (`save_image`, `upload`), echoed in the answer.
     pub request_id: String,
@@ -182,28 +173,11 @@ pub enum ServerEvent {
         settings: serde_json::Value,
     },
     // -- Session lifecycle --------------------------------------------------
-    #[serde(rename = "created", rename_all = "camelCase")]
-    SessionCreated {
-        id: String,
-        timestamp: i64,
-        session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        shell_profile_id: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        shell_profile_fallback_reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        home_dir: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        semantic_phase: Option<String>,
-    },
-
     #[serde(rename = "attached", rename_all = "camelCase")]
     SessionAttached {
         id: String,
         timestamp: i64,
         session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        home_dir: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         semantic_phase: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -233,22 +207,6 @@ pub enum ServerEvent {
     },
 
     // -- Session stream events (derived from PTY) ---------------------------
-    #[serde(rename = "title", rename_all = "camelCase")]
-    TitleChanged {
-        id: String,
-        timestamp: i64,
-        session_id: String,
-        title: String,
-        cwd: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        cmdline: Option<String>,
-        base_shell: bool,
-        display_title: String,
-        busy: bool,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        osc_title: Option<String>,
-    },
-
     #[serde(rename = "bell", rename_all = "camelCase")]
     Bell {
         id: String,
@@ -357,11 +315,7 @@ pub enum ServerEvent {
     MuxWelcome {
         id: String,
         timestamp: i64,
-        client_id: String,
-        screens: Vec<ScreenInfo>,
         capabilities: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        server_mode: Option<String>,
     },
 
     #[serde(rename = "mux.screen_snapshot", rename_all = "camelCase")]
@@ -486,50 +440,8 @@ impl ServerEvent {
             settings,
         }
     }
-    pub fn session_created(
-        session_id: impl Into<String>,
-        home_dir: Option<String>,
-        semantic_phase: Option<String>,
-    ) -> Self {
-        Self::session_created_with_profile(session_id, home_dir, semantic_phase, None)
-    }
-
-    pub fn session_created_with_profile(
-        session_id: impl Into<String>,
-        home_dir: Option<String>,
-        semantic_phase: Option<String>,
-        shell_profile_id: Option<String>,
-    ) -> Self {
-        Self::session_created_with_fallback(
-            session_id,
-            home_dir,
-            semantic_phase,
-            shell_profile_id,
-            None,
-        )
-    }
-
-    pub fn session_created_with_fallback(
-        session_id: impl Into<String>,
-        home_dir: Option<String>,
-        semantic_phase: Option<String>,
-        shell_profile_id: Option<String>,
-        shell_profile_fallback_reason: Option<String>,
-    ) -> Self {
-        Self::SessionCreated {
-            id: generate_event_id(),
-            timestamp: now_millis(),
-            session_id: session_id.into(),
-            shell_profile_id,
-            shell_profile_fallback_reason,
-            home_dir,
-            semantic_phase,
-        }
-    }
-
     pub fn session_attached(
         session_id: impl Into<String>,
-        home_dir: Option<String>,
         semantic_phase: Option<String>,
         semantic_exit_code: Option<i32>,
         semantic_command_count: Option<u32>,
@@ -538,7 +450,6 @@ impl ServerEvent {
             id: generate_event_id(),
             timestamp: now_millis(),
             session_id: session_id.into(),
-            home_dir,
             semantic_phase,
             semantic_exit_code,
             semantic_command_count,
@@ -569,39 +480,6 @@ impl ServerEvent {
             timestamp: now_millis(),
             session_id,
             error: error.into(),
-        }
-    }
-
-    pub fn title_changed(
-        session_id: impl Into<String>,
-        title: String,
-        cwd: String,
-        cmdline: Option<String>,
-        base_shell: bool,
-        osc_title: Option<String>,
-    ) -> Self {
-        let info = crate::pty::TitleInfo {
-            proc: title.clone(),
-            cwd: cwd.clone(),
-            cmdline: String::new(),
-            base_shell,
-        };
-        let home = dirs::home_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let display_title = info.display_title(osc_title.as_deref().unwrap_or_default(), &home);
-        let busy = info.busy();
-        Self::TitleChanged {
-            id: generate_event_id(),
-            timestamp: now_millis(),
-            session_id: session_id.into(),
-            title,
-            cwd,
-            cmdline,
-            base_shell,
-            display_title,
-            busy,
-            osc_title,
         }
     }
 
@@ -685,19 +563,11 @@ impl ServerEvent {
 
     /// `local_hub`: a local main connection to a service with a hub, which
     /// is told the hub's capabilities as well ([`super::capability::welcome`]).
-    pub fn mux_welcome(
-        client_id: String,
-        screens: Vec<ScreenInfo>,
-        server_mode: Option<String>,
-        local_hub: bool,
-    ) -> Self {
+    pub fn mux_welcome(local_hub: bool) -> Self {
         Self::MuxWelcome {
             id: generate_event_id(),
             timestamp: now_millis(),
-            client_id,
-            screens,
             capabilities: super::capability::welcome(local_hub),
-            server_mode,
         }
     }
 
@@ -870,21 +740,16 @@ mod tests {
 
     #[test]
     fn managed_job_capability_is_advertised_without_changing_the_welcome_envelope() {
-        let wire = serde_json::to_value(ServerEvent::mux_welcome(
-            "client".into(),
-            vec![],
-            Some("embedded".into()),
-            false,
-        ))
-        .expect("welcome");
+        let wire = serde_json::to_value(ServerEvent::mux_welcome(false)).expect("welcome");
         assert_eq!(wire["capabilities"][0], "managed-jobs-v1");
         assert_eq!(
             wire["capabilities"],
             serde_json::json!(super::super::capability::welcome(false))
         );
         assert_eq!(wire["type"], "mux.welcome");
-        assert_eq!(wire["clientId"], "client");
-        assert_eq!(wire["serverMode"], "embedded");
+        for field in ["clientId", "screens", "serverMode"] {
+            assert!(wire.get(field).is_none(), "{field}");
+        }
     }
 
     /// Events decode from their own JSON, and from a newer server's with
@@ -893,14 +758,7 @@ mod tests {
     fn events_decode_tolerating_unknown_fields() {
         let events = [
             ServerEvent::settings_changed(serde_json::json!({"drawer":{"pinned":true}})),
-            ServerEvent::session_created_with_fallback(
-                "s1",
-                Some("/home".into()),
-                Some("prompt".into()),
-                Some("zsh".into()),
-                Some("missing".into()),
-            ),
-            ServerEvent::session_attached("s1", None, None, Some(1), Some(2)),
+            ServerEvent::session_attached("s1", None, Some(1), Some(2)),
             ServerEvent::session_closed_result("s1", Some(1), Some("TERM".into())),
             ServerEvent::error(None, "gone"),
             ServerEvent::bell("s1"),
@@ -919,7 +777,7 @@ mod tests {
                 None,
                 None,
             ),
-            ServerEvent::mux_welcome("c1".into(), vec![], Some("daemon".into()), true),
+            ServerEvent::mux_welcome(true),
             ServerEvent::mux_workspace_snapshot(vec![], Some("sc1".into())),
             ServerEvent::mux_nudge("mux_op".into(), Some("sc1".into())),
             ServerEvent::mux_pane_spawned_with_profile("p1", "s1", Some("zsh".into()), None),
@@ -1021,15 +879,9 @@ mod tests {
         assert_eq!(r.msg_type, "");
         assert_eq!(r.id, "");
         assert!(r.data.is_empty());
-        assert_eq!(r.shell, "");
         assert_eq!(r.cols, 0);
         assert_eq!(r.rows, 0);
-        assert_eq!(r.command, "");
         assert_eq!(r.dir, "");
-        assert_eq!(r.root, "");
-        assert_eq!(r.restore_mode, "");
-        assert_eq!(r.pane_id, "");
-        assert_eq!(r.screen_id, "");
         assert_eq!(r.request_id, "");
     }
 
@@ -1074,7 +926,6 @@ mod tests {
                 updated_at: 1_700_000_000_000,
             }),
             Some(crate::protocol::notice::Notice {
-                kind: crate::protocol::notice::NoticeKind::ProgramStatus,
                 severity: crate::protocol::notice::Severity::Warning,
                 title: "Screen 1: Waiting for permission: Allow edit?".into(),
                 setting: Some(crate::protocol::notice::Setting::ProgramStatus),
@@ -1090,7 +941,6 @@ mod tests {
         assert_eq!(
             json["notice"],
             serde_json::json!({
-                "kind": "program-status",
                 "severity": "warning",
                 "title": "Screen 1: Waiting for permission: Allow edit?",
                 "setting": "programStatus",
@@ -1140,29 +990,6 @@ mod tests {
         assert_eq!(json["cols"], 100);
         assert_eq!(json["rows"], 30);
         assert_eq!(json["policy"], "active");
-    }
-
-    #[test]
-    fn server_event_title_changed_serialization() {
-        let event = ServerEvent::title_changed(
-            "sess-abc",
-            "vim".into(),
-            "/home".into(),
-            Some("vim main.rs".into()),
-            false,
-            Some("✳ vim".into()),
-        );
-        let json = serde_json::to_value(&event).unwrap();
-
-        assert_eq!(json["type"], "title");
-        assert_eq!(json["sessionId"], "sess-abc");
-        assert_eq!(json["title"], "vim");
-        assert_eq!(json["cwd"], "/home");
-        assert_eq!(json["cmdline"], "vim main.rs");
-        assert_eq!(json["baseShell"], false);
-        assert_eq!(json["oscTitle"], "✳ vim");
-        assert_eq!(json["displayTitle"], "✳ vim");
-        assert_eq!(json["busy"], true);
     }
 
     #[test]
@@ -1221,7 +1048,6 @@ mod tests {
         assert_eq!(json["process"], "node");
         assert_eq!(json["command"], "node server.js");
         assert_eq!(json["userInitiated"], false);
-        assert_eq!(json["notice"]["kind"], "session.crashed");
         assert_eq!(json["notice"]["title"], "node failed");
         assert!(json["notice"].get("suppressed").is_none());
     }
@@ -1273,22 +1099,12 @@ mod tests {
         assert_eq!(id.len(), 18, "id should be 18 chars: {}", id);
     }
     #[test]
-    fn settings_and_fallback_events_use_stable_wire_fields() {
+    fn settings_changed_uses_stable_wire_fields() {
         let changed = serde_json::to_value(ServerEvent::settings_changed(
             serde_json::json!({"drawer":{"sidebarWidth":280}}),
         ))
         .unwrap();
         assert_eq!(changed["type"], "settings.changed");
         assert_eq!(changed["settings"]["drawer"]["sidebarWidth"], 280);
-        let created = serde_json::to_value(ServerEvent::session_created_with_fallback(
-            "session",
-            None,
-            None,
-            Some("default".into()),
-            Some("unavailable".into()),
-        ))
-        .unwrap();
-        assert_eq!(created["shellProfileId"], "default");
-        assert_eq!(created["shellProfileFallbackReason"], "unavailable");
     }
 }

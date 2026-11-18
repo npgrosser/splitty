@@ -44,23 +44,29 @@ fn viewer_panes(state: &TestState) -> usize {
 }
 
 /// control-api, Submitting Layout Operations (Open a viewer, Open the same
-/// file again), on the HTTP listener and the owner control socket, with the
+/// file again), over native framing and the owner control socket, with the
 /// viewer's revision each opening showed.
 #[tokio::test]
 async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
     let dir = tempfile::tempdir().expect("dir");
-    let host = ScriptedHost::new(dir.path());
-    for channel in ["HTTP", "control socket"] {
+    async fn submit(
+        state: &TestState,
+        control: Option<&axum::Router>,
+        op: &serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        match control {
+            Some(app) => exchange(app, api("POST", "/api/mux/op", Some(op))).await,
+            None => conformance::framed_mux_op(state, op.clone()).await,
+        }
+    }
+    for channel in ["native", "control socket"] {
         let state = state(ADDR, dir.path());
         with_screen(&state);
-        let app = if channel == "HTTP" {
-            router(&state, hub(&host, dir.path()))
-        } else {
-            crate::control::build_control_router(state.service.clone())
-        };
+        let control = (channel == "control socket")
+            .then(|| crate::control::build_control_router(state.service.clone()));
         let op = json!({"screenId": "s1", "op": {"type": "open_viewer", "paneId": "p1", "source": {"kind": "file", "path": PLAN}}});
 
-        let (code, first) = exchange(&app, api("POST", "/api/mux/op", Some(&op))).await;
+        let (code, first) = submit(&state, control.as_ref(), &op).await;
         assert_eq!(code, StatusCode::OK, "{channel}: {first}");
         assert_eq!(first["ok"], true, "{channel}: {first}");
         assert_eq!(first["screenId"], "s1");
@@ -82,7 +88,7 @@ async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
             Some(ViewerSource::File { path: PLAN.into() })
         );
 
-        let (code, again) = exchange(&app, api("POST", "/api/mux/op", Some(&op))).await;
+        let (code, again) = submit(&state, control.as_ref(), &op).await;
         assert_eq!(code, StatusCode::OK, "{channel}: {again}");
         assert_eq!(again["paneId"], pane.as_str());
         assert_eq!(again["reused"], true);
@@ -93,7 +99,7 @@ async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
         assert_eq!(viewer_panes(&state), 1, "{channel}: no new pane");
 
         let relative = json!({"screenId": "s1", "op": {"type": "open_viewer", "paneId": "p1", "source": {"kind": "file", "path": "docs/plan.md"}}});
-        let (code, body) = exchange(&app, api("POST", "/api/mux/op", Some(&relative))).await;
+        let (code, body) = submit(&state, control.as_ref(), &relative).await;
         assert_eq!(code, StatusCode::BAD_REQUEST, "{channel}: {body}");
         assert_eq!(body["ok"], false);
         assert_eq!(viewer_panes(&state), 1);
@@ -166,7 +172,7 @@ async fn message_type(socket: &mut Socket, expected: &str) -> serde_json::Value 
 
 async fn read(socket: &mut Socket, read: serde_json::Value) -> serde_json::Value {
     socket
-        .send(Message::Text(read.to_string().into()))
+        .send(Message::Text(read.to_string()))
         .await
         .expect("send");
     loop {
@@ -282,7 +288,7 @@ fn control_socket(dir: &Path, app: axum::Router) -> crate::cli::ServerInfo {
     let listener = tokio::net::UnixListener::bind(&socket).expect("control socket");
     tokio::spawn(async move { axum::serve(listener, app).await });
     crate::cli::ServerInfo {
-        transport: crate::cli::Transport::LocalSocket(socket.to_string_lossy().into_owned()),
+        socket: socket.to_string_lossy().into_owned(),
         source: "test",
     }
 }

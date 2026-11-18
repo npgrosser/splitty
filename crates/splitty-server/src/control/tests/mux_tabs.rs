@@ -21,9 +21,7 @@ async fn next_mux(socket: &mut Socket) -> serde_json::Value {
 async fn snapshot(socket: &mut Socket) -> serde_json::Value {
     socket
         .send(Message::Text(
-            json!({"type":"mux.resync","screenId":"shared"})
-                .to_string()
-                .into(),
+            json!({"type":"mux.resync","screenId":"shared"}).to_string(),
         ))
         .await
         .expect("resync");
@@ -78,9 +76,7 @@ async fn new_tabs_sync_as_tabs_between_clients_and_after_reconnect() {
         op["cwd"] = json!(dir.path());
         origin
             .send(Message::Text(
-                json!({"type":"mux.op","screenId":"shared","op":op})
-                    .to_string()
-                    .into(),
+                json!({"type":"mux.op","screenId":"shared","op":op}).to_string(),
             ))
             .await
             .expect("layout op");
@@ -121,16 +117,14 @@ async fn new_tabs_sync_as_tabs_between_clients_and_after_reconnect() {
         }
     }
     let before = snapshot(&mut first).await;
-    second.close(None).await.expect("disconnect");
+    second.close().await.expect("disconnect");
     let mut second = served.open_local().await;
     assert_eq!(next_mux(&mut second).await["type"], "mux.welcome");
     assert_eq!(snapshot(&mut second).await["root"], before["root"]);
 
     first
         .send(Message::Text(
-            json!({"type":"mux.op","screenId":"shared","op":{"type":"close_screen"}})
-                .to_string()
-                .into(),
+            json!({"type":"mux.op","screenId":"shared","op":{"type":"close_screen"}}).to_string(),
         ))
         .await
         .expect("cleanup sessions");

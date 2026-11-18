@@ -102,8 +102,7 @@ pub enum FileUpdate {
 }
 
 /// The name a download is saved under: the last path component as plain
-/// text, without characters file systems refuse. As in the web client,
-/// controls and the bidirectional embeddings, overrides and isolates go: an
+/// text, without characters file systems refuse. Terminal controls and the bidirectional embeddings, overrides and isolates go: an
 /// offered name must not display in another order than it is saved in.
 /// Current servers offer no such name; an older or a hostile one may.
 fn download_name(name: &str) -> Option<String> {

@@ -8,6 +8,15 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`remove-web-only-surface` RWS-1 to RWS-7** (2026-11-15, provisional, tbd; recorded in the change's design):
+  - **RWS-1:** browser windows of older releases, served by the gateway of an older hub (0.5.0 and earlier `splitty serve`), are not supported clients of hosts of this version: their `create`, `close` and `reorder_screens` are refused, and a refused `create` ends that relayed stream. Alternative: keep the host-side handling of these messages until the releases with the gateway are out of support.
+  - **RWS-2:** `shellProfiles.update` is removed although a future desktop shell profile editor might use it; shell profiles are edited in `config.toml`. Alternative: keep the operation for that editor.
+  - **RWS-3:** the update tolerance for `terminal.linkTarget` and `terminal.webviewMode` goes; an update naming them is refused as an unknown setting. Stored values keep being ignored. Alternative: keep skipping them in updates.
+  - **RWS-4:** the theme answer keeps an empty `layout` object, since natives 0.3.0 and 0.3.1 require the key. Alternative: drop `layout` and accept that those releases no longer decode themes of this server, or keep the two drag-overlay tokens.
+  - **RWS-5:** `openHost` is removed from the transport hello type, so a hello with it fails as malformed on every carrier, instead of being kept and refused with its own error. Alternative: keep the field and refuse it with a specific error.
+  - **RWS-6:** removed session message types get today's handling of unknown session types (the native connection ends); the conflict with `mux-protocol`, Malformed and Unknown Messages, is recorded in `docs/issues/openspec-baseline-findings.md`. Alternative: answer `error` and keep the connection, as the spec says, in this change.
+  - **RWS-7:** `native-screen-reorder` is archived before this change is applied; this change's workspace-model deltas are based on its text. Alternative: fold its remaining task into this change.
+
 - **`remove-browser-access` RBA-1 to RBA-13** (2026-11-15, provisional, tbd; recorded in the change's design):
   - **RBA-1:** browser access is removed without replacement and without a build feature that keeps it for development; terminal access without the app stays `splitty attach`, also over SSH. Alternative: keep the gateway behind a non-default cargo feature for development.
   - **RBA-2:** `splitty connect` is removed, not turned into "open this host in the desktop app". Alternative: make it hand the target to a running desktop app.

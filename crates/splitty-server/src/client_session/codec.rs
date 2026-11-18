@@ -38,7 +38,7 @@ pub fn decode_binary_frame(data: &[u8]) -> Option<(&str, &[u8])> {
     Some((id, payload))
 }
 
-/// JSON wire request — matches the Go `jsonRequest` struct exactly.
+/// A terminal session request carried as JSON.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JsonRequest {
@@ -49,25 +49,11 @@ pub struct JsonRequest {
     #[serde(default)]
     pub data: String,
     #[serde(default)]
-    pub shell: String,
-    #[serde(default)]
-    pub shell_profile_id: String,
-    #[serde(default)]
     pub cols: u16,
     #[serde(default)]
     pub rows: u16,
     #[serde(default)]
-    pub command: String,
-    #[serde(default)]
     pub dir: String,
-    #[serde(default)]
-    pub root: String,
-    #[serde(default)]
-    pub restore_mode: String,
-    #[serde(default)]
-    pub pane_id: String,
-    #[serde(default)]
-    pub screen_id: String,
     #[serde(default)]
     pub request_id: String,
     #[serde(default)]
@@ -90,10 +76,7 @@ impl JsonRequest {
         let object = value.as_object().ok_or("expected a session object")?;
         for (name, value) in object {
             let valid = match name.as_str() {
-                "type" | "id" | "data" | "shell" | "shellProfileId" | "command" | "dir"
-                | "root" | "restoreMode" | "paneId" | "screenId" | "requestId" | "name" => {
-                    value.is_string()
-                }
+                "type" | "id" | "data" | "dir" | "requestId" | "name" => value.is_string(),
                 "cols" | "rows" => value
                     .as_u64()
                     .is_some_and(|number| u16::try_from(number).is_ok()),
@@ -121,16 +104,9 @@ pub fn decode_request(jr: JsonRequest) -> Request {
         msg_type: jr.msg_type,
         id: jr.id,
         data,
-        shell: jr.shell,
-        shell_profile_id: jr.shell_profile_id,
         cols: jr.cols,
         rows: jr.rows,
-        command: jr.command,
         dir: jr.dir,
-        root: jr.root,
-        restore_mode: jr.restore_mode,
-        pane_id: jr.pane_id,
-        screen_id: jr.screen_id,
         request_id: jr.request_id,
         name: jr.name,
         size: jr.size,
@@ -210,33 +186,6 @@ mod tests {
     fn test_decode_binary_frame_truncated() {
         // id_len says 10 but only 3 bytes follow
         assert!(decode_binary_frame(&[10, 0, 0, 0]).is_none());
-    }
-
-    #[test]
-    fn test_decode_request() {
-        let json_str = r#"{
-            "type": "create",
-            "shell": "/bin/zsh",
-            "cols": 80,
-            "rows": 24,
-            "command": "",
-            "dir": "/home/user",
-            "paneId": "pane-1",
-            "screenId": "screen-1"
-        }"#;
-
-        let jr: JsonRequest = serde_json::from_str(json_str).unwrap();
-        let req = decode_request(jr);
-
-        assert_eq!(req.msg_type, "create");
-        assert_eq!(req.shell, "/bin/zsh");
-        assert_eq!(req.cols, 80);
-        assert_eq!(req.rows, 24);
-        assert_eq!(req.dir, "/home/user");
-        assert_eq!(req.pane_id, "pane-1");
-        assert_eq!(req.screen_id, "screen-1");
-        assert_eq!(req.request_id, "");
-        assert!(!req.takeover && !req.redraw);
     }
 
     #[test]

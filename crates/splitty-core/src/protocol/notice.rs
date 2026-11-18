@@ -16,7 +16,6 @@ const STATUS_TEXT_CHARS: usize = 120;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Notice {
-    pub kind: NoticeKind,
     pub severity: Severity,
     /// Plain text, at most [`MAX_TITLE_CHARS`].
     pub title: String,
@@ -26,20 +25,6 @@ pub struct Notice {
     /// Why no window notifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suppressed: Option<Suppressed>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NoticeKind {
-    #[serde(rename = "process.finished")]
-    ProcessFinished,
-    #[serde(rename = "process.idle")]
-    ProcessIdle,
-    #[serde(rename = "session.exited")]
-    SessionExited,
-    #[serde(rename = "session.crashed")]
-    SessionCrashed,
-    #[serde(rename = "program-status")]
-    ProgramStatus,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,9 +56,8 @@ pub enum Suppressed {
 }
 
 impl Notice {
-    fn new(kind: NoticeKind, severity: Severity, title: String, setting: Option<Setting>) -> Self {
+    fn new(severity: Severity, title: String, setting: Option<Setting>) -> Self {
         Self {
-            kind,
             severity,
             title: plain_text(&title, MAX_TITLE_CHARS),
             setting,
@@ -91,7 +75,6 @@ impl Notice {
     /// `process` ended and the shell is in the foreground again.
     pub fn process_finished(process: &str) -> Self {
         Self::new(
-            NoticeKind::ProcessFinished,
             Severity::Info,
             format!("{process} finished"),
             Some(Setting::ProcessFinished),
@@ -106,7 +89,7 @@ impl Notice {
         } else {
             format!("{process} is waiting")
         };
-        Self::new(NoticeKind::ProcessIdle, Severity::Info, title, None)
+        Self::new(Severity::Info, title, None)
             .suppressed_by(Suppressed::ProgramStatus, reports_status)
     }
 
@@ -117,14 +100,12 @@ impl Notice {
             .unwrap_or("session");
         let notice = if exit_code == 0 {
             Self::new(
-                NoticeKind::SessionExited,
                 Severity::Info,
                 format!("{process} exited"),
                 Some(Setting::ProcessExited),
             )
         } else {
             Self::new(
-                NoticeKind::SessionCrashed,
                 Severity::Error,
                 format!("{process} failed"),
                 Some(Setting::ProcessCrashed),
@@ -147,12 +128,7 @@ impl Notice {
             Some(screen) => format!("{screen}: {summary}"),
             None => summary,
         };
-        Some(Self::new(
-            NoticeKind::ProgramStatus,
-            severity,
-            title,
-            Some(Setting::ProgramStatus),
-        ))
+        Some(Self::new(severity, title, Some(Setting::ProgramStatus)))
     }
 }
 
@@ -220,7 +196,6 @@ mod tests {
     #[test]
     fn process_events_are_classified_with_their_switch() {
         let finished = Notice::process_finished("cargo");
-        assert_eq!(finished.kind, NoticeKind::ProcessFinished);
         assert_eq!(finished.severity, Severity::Info);
         assert_eq!(finished.title, "cargo finished");
         assert_eq!(finished.setting, Some(Setting::ProcessFinished));
@@ -237,18 +212,14 @@ mod tests {
     fn exits_are_split_by_their_code_and_closing_suppresses_them() {
         let exited = Notice::session_exited(0, Some("vim"), false);
         assert_eq!(
-            (exited.kind, exited.severity, exited.title.as_str()),
-            (NoticeKind::SessionExited, Severity::Info, "vim exited")
+            (exited.severity, exited.title.as_str()),
+            (Severity::Info, "vim exited")
         );
         assert_eq!(exited.setting, Some(Setting::ProcessExited));
         let failed = Notice::session_exited(1, None, false);
         assert_eq!(
-            (failed.kind, failed.severity, failed.title.as_str()),
-            (
-                NoticeKind::SessionCrashed,
-                Severity::Error,
-                "session failed"
-            )
+            (failed.severity, failed.title.as_str()),
+            (Severity::Error, "session failed")
         );
         assert_eq!(failed.setting, Some(Setting::ProcessCrashed));
         assert_eq!(failed.suppressed, None);
@@ -266,7 +237,6 @@ mod tests {
             Some("Run tests?"),
         );
         let notice = Notice::program_status(Some("build"), &blocked).expect("notice");
-        assert_eq!(notice.kind, NoticeKind::ProgramStatus);
         assert_eq!(notice.severity, Severity::Warning);
         assert_eq!(notice.title, "build: Waiting for permission: Run tests?");
         assert_eq!(notice.setting, Some(Setting::ProgramStatus));
@@ -306,7 +276,6 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&notice).expect("JSON"),
             serde_json::json!({
-                "kind": "session.crashed",
                 "severity": "error",
                 "title": "node failed",
                 "setting": "processCrashed",
@@ -316,7 +285,7 @@ mod tests {
         let idle = serde_json::to_value(Notice::process_idle("", false)).expect("JSON");
         assert_eq!(
             idle,
-            serde_json::json!({"kind": "process.idle", "severity": "info", "title": "Command finished"})
+            serde_json::json!({"severity": "info", "title": "Command finished"})
         );
     }
 }

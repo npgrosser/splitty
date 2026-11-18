@@ -91,7 +91,6 @@ fn fixture_with_path(
             effects,
             EnvContext::default(),
             NotificationBus::default(),
-            "embedded".into(),
         )
         .with_hub(hub.clone()),
     );

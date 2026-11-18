@@ -223,20 +223,6 @@ impl Observer {
                     .effect_runner
                     .execute(effects, &state.client_state.env)
                     .await;
-                if exited {
-                    let mut event = ServerEvent::title_changed(
-                        entry.id.to_string(),
-                        info.proc,
-                        info.cwd,
-                        Some(info.cmdline),
-                        info.base_shell,
-                        Some(osc),
-                    );
-                    if let ServerEvent::TitleChanged { busy, .. } = &mut event {
-                        *busy = false;
-                    }
-                    state.client_state.notify_tx.send(&event);
-                }
                 // Job lifecycle already publishes its own ordered spawn/nudge batch.
                 for (screen, _) in screens.into_iter().filter(|_| !managed) {
                     state.client_state.notify_tx.send(&ServerEvent::mux_nudge(

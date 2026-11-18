@@ -1,6 +1,6 @@
 //! No shared Windows/WSL loopback reservation broker has been established.
-//! Every share operation fails before preparing/spawning SSH; explicit browser
-//! access remains a separately owned loopback listener.
+//! Every share operation fails before preparing or spawning SSH. Older
+//! browser gateway claims remain part of the exposure registry format.
 use splitty_transport::{admission::Admission, worker::Worker};
 use std::io;
 fn unsupported() -> io::Error {

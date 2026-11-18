@@ -106,7 +106,7 @@ impl ShellProfile {
     }
 }
 
-/// Atomic GET/PUT payload for shell profiles.
+/// Effective shell profiles returned by the settings API.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellProfilesState {
@@ -115,10 +115,10 @@ pub struct ShellProfilesState {
     #[serde(default)]
     pub profiles: Vec<ShellProfile>,
     /// Whether the default follows the system default rather than an explicit
-    /// choice. On update, true stores the empty "follow" value.
+    /// choice. The stored default ID is empty in this case.
     #[serde(default)]
     pub follow_system_default: bool,
-    /// The profile detected for the login shell; reported, ignored on update.
+    /// The profile detected for the login shell.
     #[serde(default)]
     pub system_default_profile_id: String,
 }
@@ -205,14 +205,6 @@ impl ResolvedShellProfile {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ShellProfilesError {
-    #[error("shell profile id is empty")]
-    EmptyId,
-    #[error("duplicate shell profile id: {0}")]
-    DuplicateId(String),
-    #[error("shell profile {0} has an empty name")]
-    EmptyName(String),
-    #[error("shell profile {0} has an empty executable")]
-    EmptyCommand(String),
     #[error("shell profile is unavailable: {0}")]
     Unavailable(String),
     #[error("no enabled, available shell profile exists")]
@@ -388,89 +380,6 @@ pub fn state_from_settings(settings: &ShellSettings) -> ShellProfilesState {
     let mut settings = settings.clone();
     let detection = detect_shell_profiles(&DetectionEnvironment::current());
     reconcile_shell_settings(&mut settings, &detection)
-}
-
-/// Validate and atomically replace editable profile data, then reconcile it
-/// with current detection. Detected profiles omitted by a client are retained
-/// as disabled; custom profiles omitted by a client are deleted.
-pub fn apply_shell_profiles_update(
-    settings: &mut ShellSettings,
-    update: ShellProfilesState,
-    detection: &DetectionResult,
-) -> Result<ShellProfilesState, ShellProfilesError> {
-    let mut seen = HashSet::new();
-    let detected_ids: HashSet<&str> = detection.profiles.iter().map(|p| p.id.as_str()).collect();
-    let mut stored = Vec::with_capacity(update.profiles.len());
-
-    for mut profile in update.profiles {
-        profile.id = profile.id.trim().to_string();
-        profile.name = profile.name.trim().to_string();
-        profile.command = profile.command.trim().to_string();
-        if profile.id.is_empty() {
-            return Err(ShellProfilesError::EmptyId);
-        }
-        if !seen.insert(profile.id.clone()) {
-            return Err(ShellProfilesError::DuplicateId(profile.id));
-        }
-        if profile.name.is_empty() {
-            return Err(ShellProfilesError::EmptyName(profile.id));
-        }
-        if profile.command.is_empty() {
-            return Err(ShellProfilesError::EmptyCommand(profile.id));
-        }
-        profile.source = if detected_ids.contains(profile.id.as_str())
-            || settings
-                .profiles
-                .iter()
-                .any(|p| p.id == profile.id && p.source == ShellProfileSource::Detected)
-        {
-            ShellProfileSource::Detected
-        } else {
-            ShellProfileSource::Custom
-        };
-        stored.push(profile.stored());
-    }
-
-    for old in &settings.profiles {
-        if old.source == ShellProfileSource::Detected && seen.insert(old.id.clone()) {
-            let mut retained = old.clone();
-            retained.enabled = false;
-            stored.push(retained);
-        }
-    }
-
-    let follow_system = update.follow_system_default;
-    let requested_default = if follow_system {
-        String::new()
-    } else {
-        update.default_profile_id
-    };
-    let mut candidate = ShellSettings {
-        default_profile_id: requested_default.clone(),
-        profiles: stored,
-    };
-    let mut state = reconcile_shell_settings(&mut candidate, detection);
-    let requested_is_valid = state
-        .profiles
-        .iter()
-        .any(|profile| profile.id == requested_default && profile.enabled && profile.available);
-    if !follow_system && !requested_is_valid {
-        if let Some(first) = state
-            .profiles
-            .iter()
-            .find(|profile| profile.enabled && profile.available)
-        {
-            candidate.default_profile_id = first.id.clone();
-            state.default_profile_id = first.id.clone();
-        }
-    }
-    // The invariant is deliberately stronger than mere ID validity: a default
-    // can always be started.
-    if state.default_profile().is_none() {
-        return Err(ShellProfilesError::NoAvailableProfile);
-    }
-    *settings = candidate;
-    Ok(state)
 }
 
 fn runtime_profile(
@@ -760,35 +669,6 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_duplicate_ids() {
-        let profile = ShellProfile {
-            id: "custom-a".into(),
-            name: "A".into(),
-            command: "/bin/sh".into(),
-            args: vec![],
-            enabled: true,
-            target: ShellTarget::Local,
-            source: ShellProfileSource::Custom,
-            available: true,
-            reason: None,
-            experimental: false,
-            detected_defaults: None,
-        };
-        let mut settings = ShellSettings::default();
-        let err = apply_shell_profiles_update(
-            &mut settings,
-            ShellProfilesState {
-                default_profile_id: "custom-a".into(),
-                profiles: vec![profile.clone(), profile],
-                ..ShellProfilesState::default()
-            },
-            &DetectionResult::default(),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ShellProfilesError::DuplicateId(_)));
-    }
-
-    #[test]
     fn runtime_resolution_prioritizes_profile_then_legacy_then_default() {
         let default = ShellProfile {
             id: "default".into(),
@@ -838,36 +718,6 @@ mod tests {
         assert_eq!(fallback.args, vec!["literal $HOME", "two words"]);
     }
 
-    #[test]
-    fn disabling_default_selects_first_active_profile_in_saved_order() {
-        let temp = TempDir::new().unwrap();
-        let bash = executable(temp.path(), "bash");
-        executable(temp.path(), "zsh");
-        let detection = detect_shell_profiles(&DetectionEnvironment {
-            path: vec![temp.path().to_path_buf()],
-            shell: Some(bash),
-            is_wsl: false,
-        });
-        let mut settings = ShellSettings::default();
-        let state = apply_shell_profiles_update(
-            &mut settings,
-            ShellProfilesState {
-                default_profile_id: "shell-bash".into(),
-                profiles: vec![
-                    detection.profiles[1].clone(),
-                    ShellProfile {
-                        enabled: false,
-                        ..detection.profiles[0].clone()
-                    },
-                ],
-                ..ShellProfilesState::default()
-            },
-            &detection,
-        )
-        .unwrap();
-        assert_eq!(state.default_profile_id, "shell-zsh");
-        assert_eq!(state.profiles[0].id, "shell-zsh");
-    }
     fn detection_with_login_shell(dir: &Path, shell: &str) -> DetectionResult {
         detect_shell_profiles(&DetectionEnvironment {
             path: vec![dir.to_path_buf()],
@@ -905,44 +755,34 @@ mod tests {
         let temp = TempDir::new().unwrap();
         executable(temp.path(), "bash");
         executable(temp.path(), "zsh");
-        let detection = detection_with_login_shell(temp.path(), "zsh");
-        let mut settings = ShellSettings::default();
-        let initial = reconcile_shell_settings(&mut settings, &detection);
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[shells]\ndefault_profile_id = 'shell-bash'\n").unwrap();
 
-        let saved = apply_shell_profiles_update(
-            &mut settings,
-            ShellProfilesState {
-                default_profile_id: "shell-bash".into(),
-                follow_system_default: false,
-                ..initial
-            },
-            &detection,
-        )
-        .unwrap();
-        assert_eq!(saved.default_profile_id, "shell-bash");
-        assert!(!saved.follow_system_default);
-        assert_eq!(settings.default_profile_id, "shell-bash");
+        for login in ["bash", "zsh"] {
+            let mut saved = crate::config::load_from(&path).shells;
+            let state = reconcile_shell_settings(
+                &mut saved,
+                &detection_with_login_shell(temp.path(), login),
+            );
+            assert_eq!(saved.default_profile_id, "shell-bash");
+            assert_eq!(state.default_profile_id, "shell-bash");
+            assert!(!state.follow_system_default);
+        }
+    }
 
-        let restarted = reconcile_shell_settings(
-            &mut settings,
-            &detection_with_login_shell(temp.path(), "zsh"),
-        );
-        assert_eq!(restarted.default_profile_id, "shell-bash");
-        assert!(!restarted.follow_system_default);
-
-        let followed = apply_shell_profiles_update(
-            &mut settings,
-            ShellProfilesState {
-                default_profile_id: "shell-bash".into(),
-                follow_system_default: true,
-                ..restarted
-            },
-            &detection,
-        )
-        .unwrap();
-        assert_eq!(settings.default_profile_id, "");
-        assert_eq!(followed.default_profile_id, "shell-zsh");
-        assert!(followed.follow_system_default);
+    #[test]
+    fn omitting_the_default_follows_the_system_profile_again() {
+        let temp = TempDir::new().unwrap();
+        executable(temp.path(), "bash");
+        executable(temp.path(), "zsh");
+        let path = temp.path().join("config.toml");
+        std::fs::write(&path, "[shells]\n").unwrap();
+        let mut saved = crate::config::load_from(&path).shells;
+        let state =
+            reconcile_shell_settings(&mut saved, &detection_with_login_shell(temp.path(), "zsh"));
+        assert!(saved.default_profile_id.is_empty());
+        assert_eq!(state.default_profile_id, "shell-zsh");
+        assert!(state.follow_system_default);
     }
 
     #[test]

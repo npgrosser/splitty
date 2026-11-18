@@ -60,4 +60,3 @@ splitty-remote = { path = "../splitty-remote", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 # Message values in the in-process native session test harness.
-tokio-tungstenite = "0.29"

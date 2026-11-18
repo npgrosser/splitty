@@ -1,8 +1,8 @@
 //! Core library for the Splitty terminal multiplexer.
 //!
 //! This crate contains all shared domain logic, data types, and subsystems
-//! used by the Splitty server. It is transport-agnostic -- the HTTP/WebSocket
-//! layer lives in a separate server crate.
+//! used by the Splitty server. The native transport and the owner control
+//! socket adapters live in the server crate.
 //!
 //! # Modules
 //!
@@ -11,7 +11,7 @@
 //! - [`daemon`] -- Daemon lifecycle helpers: info file, PID checks, state persistence, session restore.
 //! - [`keeper`] -- Session keepers: the process that keeps a daemon session's PTY and program alive across daemon restarts, its protocol and the daemon's side of it.
 //! - [`mux`] -- Multiplexer state machine: layout tree, reducer, effects, and store.
-//! - [`protocol`] -- WebSocket protocol messages, dispatcher, and notification engine.
+//! - [`protocol`] -- Session and mux messages, dispatcher, and notification engine.
 //! - [`pty`] -- PTY session management: spawn, read/write, resize, scrollback, OSC parsing.
 //! - [`template`] -- Saved layout templates (YAML-based CRUD).
 //! - [`theme`] -- Theme system: palette-based token derivation, bundled and custom themes.

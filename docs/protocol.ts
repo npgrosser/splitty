@@ -257,7 +257,7 @@ type ViewerSource =
  * or removed; no shell config/global install or already-running shell is modified.
  */
 interface SessionState {
-  /** Server-derived display text; available with serverDerivedPaneState. */
+  /** Server-derived display text. */
   displayTitle?: string;
   /** Known non-base-shell foreground process; false after exit. */
   busy?: boolean;
@@ -400,29 +400,11 @@ interface JobControlError {
 // 2. CLIENT → SERVER MESSAGES
 //
 // Sent by the client over a client connection. Two categories:
-// - Session messages: PTY I/O (input, resize, create, close)
+// - Session messages: PTY I/O (attach, detach, input, resize)
 // - Mux messages: Layout operations (split, move, etc.)
 // ============================================================================
 
 // --- Session Messages (existing, unchanged) ---
-
-/** Request a new PTY session. Server responds with SessionCreated. */
-interface SessionCreate {
-  type: "create";
-  /** Preferred backend shell profile. Takes precedence over legacy `shell`. */
-  shellProfileId?: string;
-  shell?: string;
-  cols?: number;
-  rows?: number;
-  command?: string;
-  dir?: string;
-  root?: string;
-  restoreMode?: string;
-  /** Client-generated pane ID. Injected as SPLITTY_PANE_ID into the session's env. */
-  panelId?: string;
-  /** Screen ID. Injected as SPLITTY_SCREEN_ID into the session's env. */
-  screenId?: string;
-}
 
 /** Attach to an existing PTY session (resubscribe to output). */
 interface SessionAttach {
@@ -499,12 +481,6 @@ interface SessionHide {
   id: string;
 }
 
-/** Close/kill a PTY session. */
-interface SessionClose {
-  type: "close";
-  id: string;
-}
-
 /**
  * Store an image a user pasted or dropped into a pane on that pane's own
  * server, which answers ImageSaved or ImageFailed. At most 10 MiB of PNG,
@@ -558,17 +534,6 @@ interface UploadCancel {
 }
 
 // --- Mux Messages (new in Milestone 1) ---
-
-/**
- * Sent once when a client connection opens. Initiates the handshake.
- * If clientId is provided (from localStorage), server checks if this
- * client was the last one attached → determines if snapshot is needed.
- */
-interface MuxConnect {
-  type: "mux.connect";
-  /** From localStorage. Omit on first-ever visit. */
-  clientId?: string;
-}
 
 /** Saved YAML/JSON template format (unchanged). Web panes are skipped, never rendered. */
 interface Template {
@@ -661,30 +626,6 @@ interface MuxOp {
 }
 
 /**
- * Attach to a specific screen. Sent after receiving mux.welcome.
- * Server responds with mux.screen_snapshot for this screen.
- *
- * Single-Attach: if another client is already attached to this screen,
- * server responds with mux.busy instead.
- *
- * The client decides which screens to attach to (typically all available
- * ones, but could be selective — e.g. `splitty attach backend`).
- */
-interface MuxAttach {
-  type: "mux.attach";
-  screenId: string;
-}
-
-/**
- * Detach from a specific screen. Sessions in server-owned screens
- * keep running. Sessions in client-owned screens are killed.
- */
-interface MuxDetach {
-  type: "mux.detach";
-  screenId: string;
-}
-
-/**
  * Explicit request for a full state snapshot of a screen.
  * Used when the client knows its local state is stale (e.g. after
  * receiving a mux.nudge from a CLI-initiated change).
@@ -705,7 +646,6 @@ interface MuxWorkspaceResync {
 
 type ClientMessage =
   | PortCatalogRequest
-  | SessionCreate
   | SessionAttach
   | SessionDetach
   | SessionInput
@@ -714,13 +654,9 @@ type ClientMessage =
   | SessionActivity
   | SessionIdle
   | SessionHide
-  | SessionClose
   | SaveImage
   | Upload
   | UploadCancel
-  | MuxConnect
-  | MuxAttach
-  | MuxDetach
   | MuxOp
   | ExtractTemplate
   | AssessClose
@@ -766,20 +702,9 @@ interface SessionEvent extends ServerEvent {
 
 // --- Session Lifecycle Events ---
 
-/** PTY session was created successfully. */
-interface SessionCreated extends SessionEvent {
-  type: "created";
-  shellProfileId?: string;
-  shellProfileFallbackReason?: "missing" | "disabled" | "unavailable";
-  homeDir?: string;
-  /** Always "unknown" for newly created sessions. */
-  semanticPhase?: string;
-}
-
 /** Reattached to an existing PTY session. */
 interface SessionAttached extends SessionEvent {
   type: "attached";
-  homeDir?: string;
   /** Current OSC 133 phase: "unknown" | "prompt" | "input" | "executing" | "idle". */
   semanticPhase?: string;
   /** Exit code from the last completed command (OSC 133 D). */
@@ -851,22 +776,8 @@ interface UploadFailed extends ServerEvent {
 
 // --- Session Stream Events (derived from PTY) ---
 
-/** Process title/cwd changed (polled ~1Hz via /proc, event-driven via OSC 0/2). */
-interface TitleChanged extends SessionEvent {
-  type: "title";
-  title: string;
-  cwd: string;
-  cmdline?: string;
-  baseShell: boolean;
-  /** Same display policy as the mux session snapshot and ordinary pane title; plain text, at most 500 characters. */
-  displayTitle?: string;
-  busy?: boolean;
-  /** OSC 0/2 window title (e.g. "✻ Claude Code"). */
-  oscTitle?: string;
-}
-
 // OSC 133 prompt boundaries are not sent as events: the server uses them for
-// `process.idle`, the semantic snapshot of `created`/`attached` and program
+// `process.idle`, the semantic snapshot of `attached` and program
 // status. Earlier servers also sent each boundary as an `osc133` event, which
 // no window read.
 
@@ -878,7 +789,7 @@ interface Bell extends SessionEvent {
 /**
  * "pty-size-v1": the session's PTY size as the server's size policy set it.
  * Sent to every connection streaming the session when it changes or the policy
- * is reconfigured, on attach before the replay, after `created`, and in answer
+ * is reconfigured, on attach before the replay, and in answer
  * to each of a connection's resizes (also when unchanged). Clients show the
  * session at this size and ignore one outside 1–1000 columns or 1–500 rows.
  */
@@ -908,7 +819,6 @@ type NotificationSeverity = "info" | "success" | "warning" | "error";
  * `notifications.enabled` only.
  */
 interface Notice {
-  kind: "process.finished" | "process.idle" | "session.exited" | "session.crashed" | "program-status";
   severity: NotificationSeverity;
   /** Plain text, at most 500 characters. */
   title: string;
@@ -924,7 +834,7 @@ interface Notice {
 
 /**
  * Foreground process returned to shell (baseShell false→true).
- * notice: kind "process.finished", info, "<process> finished", setting
+ * notice: info, "<process> finished", setting
  * "processFinished".
  */
 interface ProcessFinished extends SessionEvent {
@@ -936,7 +846,7 @@ interface ProcessFinished extends SessionEvent {
 
 /**
  * Shell command finished — app is waiting for input (detected via OSC 133 D).
- * notice: kind "process.idle", info, "<process> is waiting" or "Command
+ * notice: info, "<process> is waiting" or "Command
  * finished"; suppressed "program-status" while the session holds a root
  * program status record.
  */
@@ -949,10 +859,10 @@ interface ProcessIdle extends SessionEvent {
 
 /**
  * PTY session exited. Covers both clean exits and crashes. `userInitiated`:
- * the server closed the session while its program ran (a connection's
- * `close`, a closed pane or screen).
- * notice: exit code 0 kind "session.exited", info, "<process> exited",
- * setting "processExited"; otherwise kind "session.crashed", error,
+ * the server closed the session while its program ran (for example by closing
+ * its pane or screen).
+ * notice: exit code 0, info, "<process> exited",
+ * setting "processExited"; otherwise error,
  * "<process> failed", setting "processCrashed" ("session" when no process
  * is known); suppressed "user-initiated" with `userInitiated`.
  */
@@ -968,28 +878,22 @@ interface SessionExited extends SessionEvent {
 // --- Mux Events ---
 
 /**
- * Sent when a client connection opens. Tells the client:
- * - Its assigned clientId (store in localStorage for reconnect)
- * - Available screens with their attach status
- *
- * The client requests mux.resync for the listed screens. Terminal attach is
- * a separate session-protocol operation; there is no screen ownership.
+ * Sent first on a direct native client connection. Announces the available
+ * protocol features. The client requests the ordered workspace with
+ * mux.workspace_resync and individual screen snapshots with mux.resync.
  */
 interface MuxWelcome extends ServerEvent {
   type: "mux.welcome";
-  clientId: string;
-  screens: ScreenInfo[];
-  serverMode?: "embedded" | "daemon";
   /**
    * "viewer-annotations-v1" covers annotations with their numbers, statuses
    * and threads, the ops put_annotations, remove_annotations, put_replies,
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "terminal-input-bytes-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1", "viewer-reviews-v1" and "tab-group-transfer-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "terminal-input-bytes-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1", "scratchpad-versions-v1", "viewer-reviews-v1", "tab-group-transfer-v1" and "port-catalog-v1"; absent on old servers
 }
 
-/** Summary of a screen (sent in mux.welcome — NOT the full state). */
+/** Summary of a screen in the ordered workspace snapshot. */
 interface ScreenInfo {
   id: string;
   name?: string;
@@ -1196,7 +1100,6 @@ interface SettingsChanged extends ServerEvent {
 type ServerMessage =
   | SettingsChanged
   // Session lifecycle
-  | SessionCreated
   | SessionAttached
   | SessionOutput
   | SessionClosed
@@ -1207,7 +1110,6 @@ type ServerMessage =
   | UploadSaved
   | UploadFailed
   // Session stream
-  | TitleChanged
   | Bell
   | SessionSize
   // Process events
@@ -1419,7 +1321,7 @@ interface CreateScreenOp {
   ownership?: OwnershipMode;
 }
 
-// --- Shell Profile HTTP API (`GET|PUT /api/shell-profiles`) ---
+// --- Shell Profiles (`GET /api/shell-profiles`) ---
 
 type ShellTarget = "local" | "windowsInterop";
 
@@ -1440,10 +1342,9 @@ interface ShellProfilesState {
   /** The effective default profile. */
   defaultProfileId: string;
   profiles: ShellProfile[];
-  /** True while the default follows the system default (empty stored default).
-   *  On update, true stores the empty value; absent means false. */
+  /** True while the stored default is empty and follows the login shell. */
   followSystemDefault?: boolean;
-  /** The profile detected for the login shell (`$SHELL`); ignored on update. */
+  /** The profile detected for the login shell (`$SHELL`). */
   systemDefaultProfileId?: string;
 }
 
@@ -1461,12 +1362,6 @@ interface RenameScreenOp {
   type: "rename_screen";
   /** The enclosing mux.op screenId identifies the Screen. */
   name: string;
-}
-
-/** Legacy replacement order: unknown IDs are filtered; omitted Screens stay omitted. */
-interface ReorderScreensOp {
-  type: "reorder_screens";
-  screenOrder: string[];
 }
 
 /**
@@ -1712,7 +1607,6 @@ type Operation =
   | CloseScreenOp
   | SetActiveScreenOp
   | RenameScreenOp
-  | ReorderScreensOp
   | MoveScreenOp
   | MovePaneToScreenOp
   | MoveTabGroupToScreenOp
@@ -2121,27 +2015,6 @@ interface LegacyMigrationOffer {
 type RemoteHubMessage = RemoteReady | RemoteError;
 
 /**
- * GET /api/remote/hosts
- *
- * The known hosts of the user the server runs as, for a host picker: the
- * recent hosts (recorded when a hub host stream became ready), most recent first, then the `Host` names of `~/.ssh/config`
- * not already listed. Native host.list only; not on the control socket.
- *
- * Response:
- *   200 KnownHost[]
- */
-interface KnownHost {
-  target: string;
-  source: "recent" | "ssh-config";
-  /** Display only; SSH always receives target unchanged. */
-  alias?: string;
-  /** For a recent host: seconds since the Unix epoch; may be absent for an
-   * alias saved after the host aged out of the recent list. */
-  lastConnected?: number;
-}
-
-/**
- * GET /api/remote/host-preferences
  * PUT /api/remote/host-preferences
  *     { target: string, alias?: string | null, hidden?: false }
  * DELETE /api/remote/hosts  { target: string }
@@ -2149,8 +2022,8 @@ interface KnownHost {
  * Local display names and removal tombstones in remote-host-preferences.json,
  * shared by the local server's clients. The native operations require a local main connection and are absent
  * from the control socket.
- * GET has no side effects; missing/corrupt files yield an empty document,
- * invalid saved rows are skipped. Files are owner-only and atomically replaced.
+ * Read preferences through remote.directory.get. Preference files are
+ * owner-only and replaced atomically.
  *
  * PUT requires at least alias or hidden:false. Omitted fields preserve their
  * previous value. Aliases are trimmed, at most 200 characters, with no control
@@ -2163,8 +2036,8 @@ interface KnownHost {
  * and persists a hidden tombstone so ~/.ssh/config cannot reintroduce it.
  * It does not modify SSH config, remembered open screens, forwards, running
  * connections, remote sessions or processes. Hidden targets are omitted by
- * GET /api/remote/hosts and /api/remote/catalog. Catalog updates for a hidden
- * host return 409 and cannot resurrect its directory. A successful explicit
+ * remote.directory.get. An observation for a hidden host cannot resurrect
+ * its directory. A successful explicit
  * CLI/desktop connection unhides its target; PUT hidden:false reveals it for
  * an intentional hub connection, including when it is already running.
  * Automatic hub reconnects preserve tombstones and do not record recents.
@@ -2173,18 +2046,12 @@ interface KnownHost {
  * recording recents, preference changes, removal and catalog merges.
  *
  * Response:
- *   GET 200 RemoteHostPreferences
  *   PUT 200 RemoteHostPreference
  *   DELETE 204
  *   400 { error: string }   (invalid body or malformed JSON)
  *   415                     (not application/json)
  *   500 { error: string }   (metadata could not be written)
  */
-interface RemoteHostPreferences {
-  version: 1;
-  hosts: RemoteHostPreference[];
-}
-
 interface RemoteHostPreference {
   target: string;
   alias?: string;
@@ -2192,7 +2059,6 @@ interface RemoteHostPreference {
 }
 
 /**
- * GET /api/remote/host-order
  * PUT /api/remote/host-order  { order: string[] }
  *
  * The order in which the user arranged the client's host groups in the screen
@@ -2210,7 +2076,6 @@ interface RemoteHostPreference {
  * order. A missing or corrupt file reads as an empty order.
  *
  * Response:
- *   GET 200 RemoteHostOrder
  *   PUT 200 RemoteHostOrder (as stored)
  *   400 { error: string }   (invalid body or malformed JSON)
  *   415                     (not application/json)
@@ -2289,65 +2154,6 @@ interface RememberedHostScreens {
   screens: { screenId: string; name?: string; position?: number }[];
   /** The host was closed in the window. */
   closed?: boolean;
-}
-
-/**
- * GET /api/remote/catalog
- * PUT /api/remote/catalog   { target: string, screens: CatalogScreen[] }
- *
- * Last observed screen directories, separate from remembered open screens.
- * Windows report observations with hub.catalog.observe and read the merged
- * directory (remote.directory.get); these routes remain for older clients,
- * under the same rules. They only read/write local metadata; neither contacts a host nor
- * creates or opens a screen. Native local main role checks apply; absent from the control socket.
- *
- * GET returns the last 20 updated hosts, most recent update first (including
- * ties within a second). A missing, unreadable, malformed or wrong-version
- * file reads as an empty catalog. Invalid/repeated host rows are skipped,
- * preserving the other rows; an invalid screen invalidates its host row.
- *
- * PUT atomically replaces only this host's directory, including an empty
- * list, and returns its HostCatalog with a server-generated Unix timestamp.
- * Updates share a local-process OS file lock across the read/merge/write, so concurrent updates
- * to different hosts are retained. For one host, the last write wins. The
- * oldest entry is evicted when a new host would exceed the 20-host limit.
- * The file is remote-catalog.json in the configuration directory, owner-only
- * (0600 file, 0700 directory), written via an atomic rename.
- *
- * Invalid PUTs change nothing. Unknown fields at any level are refused.
- * Targets must pass SSH validation unchanged (no surrounding whitespace).
- * Each host has at most 200 screens with unique ids of 1–256 characters,
- * optional names of at most 200 characters, and nonnegative integral pane
- * counts. A client cannot supply lastSeen or a document version in a PUT.
- * An observation lists the host's screens as they are now. A screen without
- * `panes` (hub-host-state-v1) keeps the count stored for it; one without a
- * stored count is left out until an observation gives one.
- *
- * Response:
- *   GET 200 RemoteCatalog
- *   PUT 200 HostCatalog
- *   409 { error: string }   (target was removed; explicitly re-add it first)
- *   400 { error: string }   (invalid body; malformed JSON also returns 400)
- *   415                     (not application/json)
- *   500 { error: string }   (the file could not be written)
- */
-interface RemoteCatalog {
-  version: 1;
-  hosts: HostCatalog[];
-}
-
-interface HostCatalog {
-  target: string;
-  /** Server-generated seconds since the Unix epoch. */
-  lastSeen: number;
-  screens: CatalogScreen[];
-}
-
-interface CatalogScreen {
-  /** The screen's id on the host, never a local screen identifier. */
-  id: string;
-  name?: string;
-  panes: number;
 }
 
 /**
@@ -2893,11 +2699,8 @@ export interface ResolvedNativeTheme {
   ui: Record<string, string>;
   terminal: Record<string, string>;
   terminalPalette?: string;
-  effects?: Record<string, string>;
-  layout: {
-    "dnd-overlay-scope": string;
-    "dnd-overlay-target": string;
-  };
+  /** Retained for theme decoders in released native clients. */
+  layout: Record<string, never>;
 }
 
 export type NativeCall =
@@ -2907,7 +2710,6 @@ export type NativeCall =
   | { operation: "theme.get"; args?: { name?: string; } }
   | { operation: "theme.list"; args?: { } }
   | { operation: "shellProfiles.get"; args?: { } }
-  | { operation: "shellProfiles.update"; args: { body: unknown; } }
   | { operation: "template.extract"; args: { body: { screenId: string; name?: string; root?: string } } }
   | { operation: "template.list"; args?: { } }
   | { operation: "template.get"; args: { slug: string; } }
@@ -2935,17 +2737,12 @@ export type NativeCall =
   | { operation: "job.input"; args: { id: string; body: unknown; } }
   | { operation: "job.stop"; args: { id: string; } }
   | { operation: "job.forget"; args: { id: string; } }
-  | { operation: "host.list"; args?: { } }
   | { operation: "host.forget"; args: { body: unknown; } }
-  | { operation: "hostPreferences.get"; args?: { } }
   | { operation: "hostPreferences.update"; args: { body: unknown; } }
-  | { operation: "hostOrder.get"; args?: { } }
   | { operation: "hostOrder.update"; args: { body: unknown; } }
   | { operation: "remoteScreens.get"; args?: { } }
   | { operation: "remoteScreens.update"; args: { body: unknown; } }
   | { operation: "remoteScreens.updateHost"; args: { body: unknown; } }
-  | { operation: "catalog.get"; args?: { } }
-  | { operation: "catalog.update"; args: { body: unknown; } }
   | { operation: "forward.list"; args?: { } }
   | { operation: "forward.open"; args: { body: unknown; } }
   | { operation: "forward.stop"; args: { body: unknown; } }
@@ -3045,10 +2842,6 @@ export const NativeFrameKind = {
 } as const;
 export interface NativeHello {
   transportVersion: 1;
-  // Only a main broker may request this on the
-  // private owner endpoint. Direct/SSH remote carriers reject it before effects.
-  // ownerInstance pins the local hub before it opens the separate host stream.
-  openHost?: { ownerInstance: string; target: string; update: boolean };
 }
 export interface NativeLimits {
   frameBytes: number; // <= 16 MiB, includes header
@@ -3108,7 +2901,6 @@ export interface NativeClosed {
 }
 
 // GET /api/mux/status and native mux.status describe the terminal service.
-// listenAddr is always null; retained for released native clients.
 export interface ServiceStatus {
   serverMode: "embedded" | "daemon";
   capabilities: string[];
@@ -3116,7 +2908,6 @@ export interface ServiceStatus {
   screens: number;
   sessions: number;
   activeScreen: string | null;
-  listenAddr: null;
   instance: string;
   transportVersion: 1;
 }
@@ -3171,14 +2962,14 @@ interface SshPromptsChanged { type: "ssh.prompts.changed" }
 interface HubCatalogObservation {
   type: "hub.catalog.observe";
   target: string;
-  /** `panes` may be omitted with hub-host-state-v1 (see PUT /api/remote/catalog). */
+  /** `panes` may be omitted with hub-host-state-v1, preserving the stored count when available. */
   screens: { id: string; name?: string; panes?: number }[];
 }
 /** hub-host-state-v1 (local main connections): the hub writes remembered
  * screens per host (PUT /api/remote/screens/host, remoteScreens.updateHost)
  * and takes observations without pane counts. */
 /**
- * serverDerivedPaneState: ordinary terminal panes follow the owning server's
+ * Ordinary terminal panes follow the owning server's
  * terminal.closeOnExit policy (always / graceful / never); managed jobs remain.
  * A screen whose last pane closes this way is removed with it, announced by a
  * mux.nudge without screenId.
@@ -3194,21 +2985,18 @@ interface HubCatalogObservation {
 // complete effective settings. Validation failure is HTTP 400 with
 // { error: string, field: dottedFieldPath }; no change is persisted.
 // A field with `values` takes only a listed value; numbers compare by value.
-// terminal.xterm.scrollSensitivity and fastScrollSensitivity accept fractions.
 // appearance.titleBarStyle is "system" | "theme" (default "theme"); it selects
 // title-bar colors independently of geometry and application/terminal themes.
 // appearance.interfaceStyle is "system" | "theme" (default "theme").
 // appearance.windowDecoration is "system" | "splitty" (default "system").
 // appearance.windowButtons is "system" | "all" (default "all"); OS-owned frames
 // may retain their own controls. All four fields are metadata-gated native choices.
-// Legacy window.nativeTitleBar/titleBarColorMode remain separate web-shell settings.
 // appearance.zoom lists the zoom levels clients step through and offer as its
 // `values` (with min and max, no step); older servers publish
 // { min: 0.5, max: 3, step: 0.1 } and accept any level in that range.
 export interface SettingsChangedEvent {
   type: "settings.changed"; id: string; timestamp: number; settings: unknown;
 }
-// `created.shellProfileFallbackReason` is "missing", "disabled" or
-// "unavailable" when requested shellProfileId could not be used.
-// Mux-managed sessions report the same effective shellProfileId and
-// shellProfileFallbackReason on `mux.pane_spawned` before a client attaches.
+// `mux.pane_spawned` reports the effective shellProfileId before attach.
+// shellProfileFallbackReason is "missing", "disabled" or "unavailable"
+// when the requested shellProfileId could not be used.

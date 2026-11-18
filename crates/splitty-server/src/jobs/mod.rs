@@ -942,24 +942,6 @@ impl Jobs {
         Ok(())
     }
 
-    /// The raw session-close path has no layout operation.
-    pub async fn close_jobs(
-        &self,
-        screen: Option<&str>,
-        pane: Option<&str>,
-        session: Option<&str>,
-    ) {
-        for job in self.store.jobs().into_iter().filter(|j| {
-            !j.forgotten
-                && (screen.is_some_and(|s| s == j.screen_id.as_str())
-                    || pane.is_some_and(|p| p == j.pane_id.as_str())
-                    || session.is_some_and(|s| s == j.session_id.as_str()))
-        }) {
-            if let Err(error) = self.stop(&Actor::User, &job.job_id).await {
-                tracing::warn!(error=%error.error,"job close pending");
-            }
-        }
-    }
     /// A daemon's shutdown: grants end with the server, job processes run on
     /// in their keepers for the next daemon.
     pub async fn release(&self) {

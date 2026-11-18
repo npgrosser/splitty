@@ -150,39 +150,6 @@ impl Store {
             .collect()
     }
 
-    /// Includes removed job panes: old clients must not resurrect them via create.
-    pub fn job_for_pane(&self, pane_id: &str) -> Option<(SessionId, super::jobs::JobState)> {
-        let state = self.state.read().expect("workspace lock");
-        if let Some(job) = state
-            .jobs
-            .values()
-            .find(|job| job.pane_id.as_str() == pane_id)
-        {
-            return Some((job.session_id.clone(), job.state));
-        }
-        for screen in state.screens.values() {
-            if let Some(pane) = screen.panes.get(&PaneId::from(pane_id)) {
-                let session = pane
-                    .session_id
-                    .as_ref()
-                    .and_then(|id| screen.sessions.get(id));
-                if pane.job_id.is_some()
-                    || session.is_some_and(|s| {
-                        s.job_id.is_some() || s.restart_policy == super::jobs::RestartPolicy::Never
-                    })
-                {
-                    return Some((
-                        pane.session_id.clone().unwrap_or_else(|| {
-                            SessionId::from(format!("unavailable-job:{pane_id}"))
-                        }),
-                        super::jobs::JobState::Interrupted,
-                    ));
-                }
-            }
-        }
-        None
-    }
-
     /// Get screen summaries for the welcome message, in screen_order.
     pub fn list_screen_infos(&self) -> Vec<ScreenInfo> {
         let state = self.state.read().unwrap();
@@ -642,36 +609,6 @@ mod tests {
     }
 
     #[test]
-    fn reorder_screens() {
-        let store = Store::new();
-        for name in ["A", "B", "C"] {
-            store
-                .dispatch(Op::CreateScreen {
-                    name: Some(name.to_string()),
-                    screen_id: Some(ScreenId::from(name)),
-                    new_pane_id: None,
-                    shell_profile_id: None,
-                })
-                .unwrap();
-        }
-
-        store
-            .dispatch(Op::ReorderScreens {
-                screen_order: vec![
-                    ScreenId::from("C"),
-                    ScreenId::from("A"),
-                    ScreenId::from("B"),
-                ],
-            })
-            .unwrap();
-
-        let infos = store.list_screen_infos();
-        assert_eq!(infos[0].id, ScreenId::from("C"));
-        assert_eq!(infos[1].id, ScreenId::from("A"));
-        assert_eq!(infos[2].id, ScreenId::from("B"));
-    }
-
-    #[test]
     fn move_screen_uses_current_order_and_preserves_screen_content_and_sessions() {
         let store = Store::new();
         for name in ["A", "B", "C", "D"] {
@@ -794,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn move_screen_preserves_legacy_partial_order_after_an_unrelated_reorder() {
+    fn move_screen_preserves_legacy_partial_order() {
         let store = Store::new();
         for name in ["A", "B", "C", "D"] {
             store
@@ -806,19 +743,16 @@ mod tests {
                 })
                 .expect("create Screen");
         }
-        store
-            .dispatch(Op::ReorderScreens {
-                screen_order: ids(&["C", "absent", "A"]),
-            })
-            .expect("legacy replacement order");
-        assert_eq!(store.get_workspace_state().screen_order, ids(&["C", "A"]));
+        let mut state = store.get_workspace_state();
+        state.screen_order = ids(&["C", "A"]);
+        let store = Store::with_state(state);
         let before = store.get_workspace_state();
         store
             .dispatch(Op::MoveScreen {
                 screen_id: ScreenId::from("A"),
                 before_screen_id: Some(ScreenId::from("C")),
             })
-            .expect("relative placement after unrelated reorder");
+            .expect("relative placement in legacy order");
         let mut expected = before;
         expected.screen_order = ids(&["A", "C"]);
         assert_eq!(

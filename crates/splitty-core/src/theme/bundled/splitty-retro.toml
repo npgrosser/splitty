@@ -61,10 +61,3 @@ bright-blue = "#66bbee"
 bright-magenta = "#dd77ee"
 bright-cyan = "#66eedd"
 bright-white = "#d4e8c8"
-
-[effects]
-glow = "true"
-glow-color = "#39e639"
-glow-strength = "6px"
-scanlines = "true"
-scanline-opacity = "0.07"

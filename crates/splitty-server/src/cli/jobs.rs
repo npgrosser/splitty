@@ -765,7 +765,7 @@ mod tests {
         let socket = directory.path().join("api.sock");
         let listener = tokio::net::UnixListener::bind(&socket).expect("listener");
         let server = ServerInfo {
-            transport: crate::cli::Transport::LocalSocket(socket.to_string_lossy().into_owned()),
+            socket: socket.to_string_lossy().into_owned(),
             source: "test",
         };
         let task = tokio::spawn(async move {
@@ -796,7 +796,7 @@ mod tests {
         let socket = directory.path().join("api.sock");
         let listener = tokio::net::UnixListener::bind(&socket).expect("listener");
         let server = ServerInfo {
-            transport: crate::cli::Transport::LocalSocket(socket.to_string_lossy().into_owned()),
+            socket: socket.to_string_lossy().into_owned(),
             source: "test",
         };
         let task = tokio::spawn(async move {

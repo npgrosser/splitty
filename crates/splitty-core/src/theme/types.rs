@@ -1,5 +1,5 @@
 //! Theme data types: `ThemeFile` (authored TOML), `Palette`, `Variant`,
-//! `ResolvedTheme`, `UiTokens`, `TerminalTokens`, and effects.
+//! `ResolvedTheme`, `UiTokens`, and `TerminalTokens`.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -14,10 +14,6 @@ pub struct ThemeFile {
     pub overrides: HashMap<String, String>,
     #[serde(default)]
     pub terminal: HashMap<String, String>,
-    #[serde(default)]
-    pub effects: HashMap<String, String>,
-    #[serde(default)]
-    pub layout: LayoutTokens,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -49,7 +45,7 @@ pub struct Palette {
     pub success: String,
 }
 
-/// The fully resolved theme sent to the frontend as JSON.
+/// The fully resolved theme returned by the service as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResolvedTheme {
     /// Stable source identifier, distinct from the authored display name.
@@ -69,11 +65,7 @@ pub struct ResolvedTheme {
         skip_serializing_if = "Option::is_none"
     )]
     pub terminal_palette: Option<String>,
-    /// Optional visual effects (glow, scanlines, etc.). Passed to the
-    /// frontend as `--splitty-effect-*` CSS custom properties.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub effects: HashMap<String, String>,
-    /// Non-CSS behavioural layout tokens (e.g. DnD overlay behaviour).
+    /// Required by older native clients when decoding this answer.
     pub layout: LayoutTokens,
 }
 
@@ -121,24 +113,9 @@ pub struct UiTokens {
     pub tab_close_size: String,
 }
 
-/// Non-CSS behavioural layout tokens (DnD overlay behaviour, etc.).
+/// An empty layout object retained for older native clients.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct LayoutTokens {
-    /// Drop overlay scope: `"local"` (group-scoped) or `"global"` (full layout).
-    #[serde(default = "default_dnd_overlay_scope")]
-    pub dnd_overlay_scope: String,
-    /// Drop overlay target: `"content"` (panel only) or `"group"` (includes tab bar).
-    #[serde(default = "default_dnd_overlay_target")]
-    pub dnd_overlay_target: String,
-}
-
-fn default_dnd_overlay_scope() -> String {
-    "local".into()
-}
-fn default_dnd_overlay_target() -> String {
-    "content".into()
-}
+pub struct LayoutTokens {}
 
 /// Terminal color tokens derived from palette (or overridden).
 #[derive(Clone, Debug, Serialize, Deserialize)]

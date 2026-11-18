@@ -46,7 +46,7 @@ fn fixture() -> (WindowWorkspace, NotificationCenter, ScreenKey) {
 /// An event the server classified, governed by no switch but `enabled`.
 fn event(id: &str, session: &str, severity: &str) -> Value {
     json!({"type":"process.idle","id":id,"sessionId":session,"process":"task",
-        "notice":{"kind":"process.idle","severity":severity,"title":format!("event {id}")}})
+        "notice":{"severity":severity,"title":format!("event {id}")}})
 }
 /// `event_type` with the notice `notice`.
 fn noticed(event_type: &str, id: &str, notice: Value) -> Value {
@@ -64,7 +64,7 @@ fn admit(
 }
 
 /// mux-protocol, Classified Notification Events and Notifications in the
-/// Window: the server's notice decides kind, severity and title; a window
+/// Window: the server's notice decides severity and title; a window
 /// adds nothing for a suppressed one, a switch turned off also removes what
 /// it governs, and the watched pane's is recorded as read without a notice.
 #[test]
@@ -96,7 +96,7 @@ fn notices_settings_and_watched_read_share_one_bounded_policy() {
         let value = noticed(
             "session.exited",
             id,
-            json!({"kind":"session.crashed","severity":"error","title":"zsh failed",
+            json!({"severity":"error","title":"zsh failed",
                 "setting":"processCrashed","suppressed":reason}),
         );
         assert!(!admit(&mut center, &window, owner, &value, None), "{id}");
@@ -144,7 +144,7 @@ fn notices_settings_and_watched_read_share_one_bounded_policy() {
         &noticed(
             "process.finished",
             "kept",
-            json!({"kind":"process.finished","severity":"info","title":"kept","setting":"processFinished"})
+            json!({"severity":"info","title":"kept","setting":"processFinished"})
         ),
         None
     ));
@@ -242,13 +242,13 @@ fn an_older_server_gets_a_generic_notice() {
         noticed(
             "notification",
             "generic-notice",
-            json!({"kind":"process.idle","severity":"error","title":"build"}),
+            json!({"severity":"error","title":"build"}),
         ),
         // A type this build does not know carries no notice either.
         noticed(
             "future.event",
             "future",
-            json!({"kind":"process.idle","severity":"error","title":"build"}),
+            json!({"severity":"error","title":"build"}),
         ),
     ] {
         assert!(!admit(&mut center, &window, owner, &value, None), "{value}");
@@ -602,7 +602,7 @@ async fn opaque_ui_event_fixture_joins_peers_before_releasing_held_credit() {
 fn status_event(id: &str, session: &str, severity: &str, title: &str) -> Value {
     json!({"type":"program_status.changed","id":id,"timestamp":1,"sessionId":session,
         "paneId":"p9","screenId":"work","status":{"state":"blocked","updatedAt":5},"notify":true,
-        "notice":{"kind":"program-status","severity":severity,"title":title,"setting":"programStatus"}})
+        "notice":{"severity":severity,"title":title,"setting":"programStatus"}})
 }
 
 /// program-status, Status Notifications in the Window: a marked event
@@ -676,7 +676,7 @@ fn program_status_notifies_by_its_notice_and_switch() {
         &window,
         local,
         &json!({"type":"process.idle","id":"idle","sessionId":"s0","process":"claude",
-            "notice":{"kind":"process.idle","severity":"info","title":"claude is waiting","suppressed":"program-status"}}),
+            "notice":{"severity":"info","title":"claude is waiting","suppressed":"program-status"}}),
         None
     ));
 

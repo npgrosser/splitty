@@ -1,5 +1,5 @@
 //! Descriptor/task admission is independent of byte budgets. Quota objects are
-//! assigned by the native broker/authenticated gateway, never decoded from peer
+//! assigned by the authenticated native broker, never decoded from peer
 //! strings. There is no waiting queue and a failed promotion rolls back fully.
 use crate::budget::{Budget, Exhausted, Permit};
 use std::sync::{Arc, OnceLock};

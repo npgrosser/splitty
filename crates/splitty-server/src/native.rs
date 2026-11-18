@@ -110,27 +110,8 @@ pub async fn listen(
                 let handle = tasks.spawn(async move {
                     let (mut read, mut write) = stream.into_split();
                     let result = async {
-                        let (host, _hello_bytes) = negotiation::server_main(&mut read, &mut write, &context.budget).await?.into_parts();
-                        if let Some(host) = host {
-                            // A host-open is intent on this owner endpoint,
-                            // never a way to turn a remote carrier into a hub.
-                            if host.owner_instance != state.instance {
-                                let frame = splitty_transport::codec::Frame::control(Kind::Closed, &wire::Closed {
-                                    code: wire::CloseCode::BackendLost, retryable: true,
-                                    message: "local hub instance changed; refresh discovery".into(),
-                                }, &context.budget)?;
-                                time::timeout(wire::HANDSHAKE_TIMEOUT, splitty_transport::codec::write(&mut write, &frame)).await
-                                    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "stale hub delivery timed out"))??;
-                                return Err(io::Error::new(io::ErrorKind::InvalidData, negotiation::StaleInstance));
-                            }
-                            let target = state.hub.native_target(&host.target, &mut write, &context.budget).await?;
-                            let mut stopped = context.closing();
-                            state.hub.serve_native_accepted((read, write), target, host.update,
-                                async { let _ = stopped.wait_for(|closed| *closed).await; },
-                                (context, carrier, Some(opening))).await
-                        } else {
-                            serve_ready(read, write, state, assignment, context, opening, carrier).await
-                        }
+                        negotiation::server(&mut read, &mut write, &context.budget).await?;
+                        serve_ready(read, write, state, assignment, context, opening, carrier).await
                     }.await;
                     if let Err(error) = result { tracing::debug!(%error, "native client ended"); }
                 });

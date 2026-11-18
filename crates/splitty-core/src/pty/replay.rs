@@ -5,7 +5,6 @@
 //! counts as such a request. Every other sequence, also a
 //! color setter, a title or a hyperlink, is kept.
 //!
-//! The same rules as the web client's `frontend/src/lib/terminal/replay_output.ts`.
 //! Works on bytes, so UTF-8 and sequences split across replay frames survive.
 //! A sequence ends where a terminal ends it, also at CAN, SUB and an ESC that
 //! does not end a string: one that never ended asks for nothing, and what

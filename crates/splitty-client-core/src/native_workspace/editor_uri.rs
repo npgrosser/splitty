@@ -1,6 +1,5 @@
 //! The URI that hands a file or a folder to an editor, or a remote folder to
-//! an SFTP client. The same rules as the web client's (`editor_target.ts`),
-//! checked against the shared vectors in `testdata/`: the path is untrusted
+//! an SFTP client. Checked against the vectors in `testdata/`: the path is untrusted
 //! data and is encoded as such, the SSH target is the window's own (its SSH
 //! alias), and the WSL distribution is the local backend's.
 use super::PathKind;
@@ -240,8 +239,7 @@ mod tests {
         }
     }
 
-    /// One vector's URI; an editor or a kind the client does not know is
-    /// refused as the web client refuses it.
+    /// One vector's URI. Unknown editors and document kinds are refused.
     fn build(input: &Value) -> Result<String, String> {
         let editor = editor(&input["editor"]).ok_or("unknown editor")?;
         let kind = kind(&input["kind"]).ok_or("unknown kind")?;
@@ -252,7 +250,7 @@ mod tests {
         }
     }
 
-    /// The vectors shared with the web client.
+    /// The checked-in editor URI vectors.
     #[test]
     fn shared_vectors() {
         for (name, file, default_editor) in [

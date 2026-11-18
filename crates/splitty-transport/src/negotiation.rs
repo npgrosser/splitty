@@ -61,18 +61,7 @@ pub async fn client<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     write: &mut W,
     budget: &ConnectionBudget,
 ) -> io::Result<()> {
-    client_with_host(read, write, budget, None).await
-}
-
-/// Host intent is supplied by an authorized main broker/gateway. It is not a
-/// command understood by a remote bridge or a host relay.
-pub async fn client_with_host<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    read: &mut R,
-    write: &mut W,
-    budget: &ConnectionBudget,
-    open_host: Option<wire::OpenHost>,
-) -> io::Result<()> {
-    client_with_startup_timeout(read, write, budget, open_host, wire::HANDSHAKE_TIMEOUT).await
+    client_with_startup_timeout(read, write, budget, wire::HANDSHAKE_TIMEOUT).await
 }
 
 /// The local connector may allow time for SSH authentication before the peer
@@ -81,7 +70,6 @@ pub async fn client_with_startup_timeout<R: AsyncRead + Unpin, W: AsyncWrite + U
     read: &mut R,
     write: &mut W,
     budget: &ConnectionBudget,
-    open_host: Option<wire::OpenHost>,
     startup_timeout: std::time::Duration,
 ) -> io::Result<()> {
     let mut disconnected_write = None;
@@ -94,7 +82,6 @@ pub async fn client_with_startup_timeout<R: AsyncRead + Unpin, W: AsyncWrite + U
                 Kind::Hello,
                 &Hello {
                     transport_version: wire::VERSION,
-                    open_host,
                 },
             )
             .await
@@ -118,7 +105,7 @@ pub async fn client_with_startup_timeout<R: AsyncRead + Unpin, W: AsyncWrite + U
         }
         magic(read).await?;
         let hello: Charged<Hello> = expect(read, budget, Kind::Accept).await?;
-        if hello.transport_version != wire::VERSION || hello.open_host.is_some() {
+        if hello.transport_version != wire::VERSION {
             return Err(invalid("unsupported native transport acceptance"));
         }
         Ok(())
@@ -147,36 +134,11 @@ pub async fn server<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     write: &mut W,
     budget: &ConnectionBudget,
 ) -> io::Result<()> {
-    server_hello(read, write, budget, false).await.map(|_| ())
-}
-
-/// Only the peer-user-checked local owner endpoint may enable host opens.
-/// It must compare owner_instance against its immutable service before SSH.
-pub async fn server_main<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    read: &mut R,
-    write: &mut W,
-    budget: &ConnectionBudget,
-) -> io::Result<Charged<Option<wire::OpenHost>>> {
-    server_hello(read, write, budget, true).await
-}
-
-async fn server_hello<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
-    read: &mut R,
-    write: &mut W,
-    budget: &ConnectionBudget,
-    allow_host: bool,
-) -> io::Result<Charged<Option<wire::OpenHost>>> {
     deadline(async {
         magic(read).await?;
         let hello: Charged<Hello> = expect(read, budget, Kind::Hello).await?;
         if hello.transport_version != wire::VERSION {
             return Err(invalid("unsupported native transport version"));
-        }
-        if !allow_host && hello.open_host.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "host opens are unavailable on this assigned carrier",
-            ));
         }
         write.write_all(wire::MAGIC).await?;
         write_control(
@@ -185,11 +147,9 @@ async fn server_hello<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             Kind::Accept,
             &Hello {
                 transport_version: wire::VERSION,
-                open_host: None,
             },
         )
-        .await?;
-        Ok(hello.map(|hello| hello.open_host))
+        .await
     })
     .await
 }
@@ -399,7 +359,6 @@ mod tests {
             &mut read,
             &mut write,
             &ConnectionBudget::default(),
-            None,
             Duration::from_secs(120),
         )
         .await
@@ -434,7 +393,7 @@ mod tests {
         );
         let mut output = Vec::new();
         assert_eq!(
-            server_main(&mut input.as_slice(), &mut output, &budget)
+            server(&mut input.as_slice(), &mut output, &budget)
                 .await
                 .unwrap_err()
                 .kind(),
@@ -562,54 +521,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn host_open_is_explicit_and_rejected_by_direct_or_remote_carriers() {
-        let intent = wire::OpenHost {
-            owner_instance: "a".repeat(32),
-            target: "me@192.0.2.10".into(),
-            update: false,
-        };
-        let hello = Frame::json(
-            Kind::Hello,
-            &Hello {
-                transport_version: 1,
-                open_host: Some(intent.clone()),
-            },
-        )
-        .unwrap();
-        let mut bytes = wire::MAGIC.to_vec();
-        bytes.extend(hello.encode().unwrap());
+    async fn host_open_in_hello_is_refused_before_acceptance() {
         let budget = ConnectionBudget::default();
-        let mut output = Vec::new();
-        assert_eq!(
-            server(&mut bytes.as_slice(), &mut output, &budget)
+        for intent in [
+            serde_json::Value::Null,
+            serde_json::json!({"ownerInstance":"a".repeat(32),"target":"vm","update":false}),
+        ] {
+            let hello = Frame::json(
+                Kind::Hello,
+                &serde_json::json!({
+                    "transportVersion": wire::VERSION, "openHost": intent,
+                }),
+            )
+            .unwrap();
+            let mut bytes = wire::MAGIC.to_vec();
+            bytes.extend(hello.encode().unwrap());
+            let mut output = Vec::new();
+            let error = server(&mut bytes.as_slice(), &mut output, &budget)
                 .await
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        assert!(
-            output.is_empty(),
-            "an assigned remote carrier cannot even accept host intent"
-        );
-        assert_eq!(
-            server_main(&mut bytes.as_slice(), &mut output, &budget)
-                .await
-                .unwrap(),
-            Some(intent)
-        );
-        let mut response = output.as_slice();
-        magic(&mut response).await.unwrap();
-        let accepted: Charged<Hello> = expect(&mut response, &budget, Kind::Accept).await.unwrap();
-        assert!(accepted.open_host.is_none());
-        drop(accepted);
-        assert_eq!(budget.used(), 0);
-        assert!(
-            serde_json::from_value::<Hello>(serde_json::json!({"transportVersion":1,"openHost": {
-                "ownerInstance":"a".repeat(32),"target":"vm","update":false,"role":"main"
-            }}))
-            .is_err(),
-            "intent does not carry caller-selected authority"
-        );
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(output.is_empty());
+            assert_eq!(budget.used(), 0);
+        }
     }
 
     #[tokio::test]
@@ -792,7 +726,6 @@ mod tests {
                 Kind::Hello,
                 &Hello {
                     transport_version: 2,
-                    open_host: None,
                 },
             )
             .unwrap()
@@ -909,7 +842,6 @@ mod tests {
                 Kind::Accept,
                 &Hello {
                     transport_version: wire::VERSION,
-                    open_host: None,
                 },
             )
             .unwrap()
@@ -922,7 +854,6 @@ mod tests {
                 Kind::Accept,
                 &Hello {
                     transport_version: wire::VERSION + 1,
-                    open_host: None,
                 },
             )
             .unwrap()

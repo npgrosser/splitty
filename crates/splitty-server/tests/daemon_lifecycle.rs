@@ -1361,12 +1361,18 @@ sys.exit(p.wait())
             let welcome = codec::read(&mut output, &budget).await.unwrap().unwrap();
             assert_eq!(welcome.value.kind, Kind::Text);
             let welcome: serde_json::Value = welcome.value.decode().unwrap();
-            assert_eq!(welcome["type"], "mux.welcome"); assert_eq!(welcome["serverMode"], "embedded");
+            assert_eq!(welcome["type"], "mux.welcome"); assert!(welcome.get("serverMode").is_none());
             let helper_pid = if mode == "launcher-death" { fs::read_to_string(&helper_pid_file).unwrap().parse::<u32>().unwrap() } else { child.id().unwrap() };
             assert_no_tcp_listener(helper_pid);
             let raw = if mode.starts_with("blocked-") { "stty raw -echo; " } else { "" };
             let script = format!("trap '' HUP TERM; {raw}echo $$ > '{}'; printf '\\000\\377\\200'; exec sleep 120", pid_file.display());
-            let create = Frame::data_json(Kind::Text, wire::Delivery::new(ready.generation), &serde_json::json!({"type":"create", "command":script, "cols":80, "rows":24})).unwrap();
+            let create = Frame::data_json(Kind::Text, wire::Delivery::new(ready.generation), &serde_json::json!({
+                "type":"mux.op","screenId":"owned","op":{
+                    "type":"apply_template","createScreen":true,"paneIds":{"shell":"owned-pane"},
+                    "template":{"name":"Owned process","layout":{"slot":"shell"},
+                        "panes":{"shell":{"command":script,"restore_mode":"close"}}}
+                }
+            })).unwrap();
             codec::write(&mut input, &create).await.unwrap();
             let session_id = tokio::time::timeout(Duration::from_secs(5), async {
                 let mut session_id = None;
@@ -1375,7 +1381,13 @@ sys.exit(p.wait())
                     let frame = codec::read(&mut output, &budget).await.unwrap().unwrap();
                     if frame.value.kind == Kind::Text {
                         let value: serde_json::Value = frame.value.decode().unwrap();
-                        if value["type"] == "created" { session_id = value["sessionId"].as_str().map(str::to_owned); }
+                        if value["type"] == "mux.pane_spawned" {
+                            let id = value["sessionId"].as_str().expect("session id");
+                            session_id = Some(id.to_owned());
+                            let attach = Frame::data_json(Kind::Text, wire::Delivery::new(ready.generation), &serde_json::json!({"type":"attach","id":id})).unwrap();
+                            codec::write(&mut input, &attach).await.unwrap();
+                        }
+                        assert_ne!(value["type"], "mux.op_failed", "{value}");
                     }
                     if frame.value.kind == Kind::Binary {
                         let (_, data) = frame.value.application().unwrap();
@@ -1390,14 +1402,22 @@ sys.exit(p.wait())
             let owned_pid = fs::read_to_string(&pid_file).unwrap();
             assert!(alive(owned_pid.trim()));
             if mode == "closed-pane" {
-                let close = Frame::data_json(Kind::Text, wire::Delivery::new(ready.generation), &serde_json::json!({"type":"close", "id":session_id})).unwrap();
-                codec::write(&mut input, &close).await.unwrap();
+                for message in [
+                    serde_json::json!({"type":"mux.op","screenId":"owned","op":{"type":"close_pane","paneId":"owned-pane"}}),
+                    serde_json::json!({"type":"mux.workspace_resync"}),
+                ] {
+                    let request = Frame::data_json(Kind::Text, wire::Delivery::new(ready.generation), &message).unwrap();
+                    codec::write(&mut input, &request).await.unwrap();
+                }
                 tokio::time::timeout(Duration::from_secs(2), async {
                     loop {
                         let frame = codec::read(&mut output, &budget).await.unwrap().unwrap();
                         if frame.value.kind == Kind::Text {
                             let value: serde_json::Value = frame.value.decode().unwrap();
-                            if value["type"] == "closed" { break; }
+                            if value["type"] == "mux.workspace_snapshot" {
+                                assert_eq!(value["screens"], serde_json::json!([]));
+                                break;
+                            }
                         }
                     }
                 }).await.expect("pane removed before backend shutdown");
@@ -2506,7 +2526,7 @@ fn remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions()
             let welcome = codec::read(&mut output, &budget).await.unwrap().unwrap();
             assert_eq!(welcome.value.kind, Kind::Text);
             let welcome: serde_json::Value = welcome.value.decode().unwrap();
-            assert_eq!(welcome["type"], "mux.welcome"); assert_eq!(welcome["serverMode"], "daemon");
+            assert_eq!(welcome["type"], "mux.welcome"); assert!(welcome.get("serverMode").is_none());
             assert_no_tcp_listener(child.id().unwrap());
             let resync = Frame::data_json(Kind::Text, wire::Delivery::new(ready.generation), &serde_json::json!({"type":"mux.resync", "screenId":screen})).unwrap();
             codec::write(&mut input, &resync).await.unwrap();
@@ -2548,7 +2568,7 @@ fn remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions()
                 }
                 "invalid-frame" => { input.write_all(&[255, 0, 0, 0, 0]).await.unwrap(); }
                 "forbidden-operation" => {
-                    let frame = Frame::data_json(Kind::Request, wire::Delivery::new(ready.generation), &wire::Request { id:2, operation:"host.list".into(), args:serde_json::Map::new() }).unwrap();
+                    let frame = Frame::data_json(Kind::Request, wire::Delivery::new(ready.generation), &wire::Request { id:2, operation:"remote.directory.get".into(), args:serde_json::Map::new() }).unwrap();
                     codec::write(&mut input, &frame).await.unwrap();
                 }
                 _ => { input.shutdown().await.unwrap(); drop(input); }
@@ -3943,7 +3963,7 @@ fn control_socket_cannot_reach_privileged_endpoints() {
         ("POST", "/api/session"),
         // A pane process must not open SSH connections or read the user's hosts.
         ("GET", "/ws/remote?target=vm1"),
-        ("GET", "/api/remote/hosts"),
+        ("GET", "/api/remote/directory"),
     ];
 
     for (method, path) in forbidden {

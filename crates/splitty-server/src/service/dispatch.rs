@@ -101,7 +101,6 @@ impl State {
             Operation::ThemeGet => op::get_resolved_theme(self, query()).await.into_reply(),
             Operation::ThemeList => op::list_available_themes(self).await.into_reply(),
             Operation::ShellProfilesGet => op::get_shell_profiles(self).await.into_reply(),
-            Operation::ShellProfilesUpdate => op::put_shell_profiles(self, body!()).await,
             Operation::TemplateExtract => op::extract_template(self, body!()).await,
             Operation::TemplateList => op::list_templates(self).await,
             Operation::TemplateGet => op::get_template(self, slug).await,
@@ -135,17 +134,12 @@ impl State {
                 };
                 job!(jobs.logs(id, args))
             }
-            Operation::HostList => Payload(hub.known_hosts()).into_reply(),
             Operation::HostForget => {
                 op::host_preference_response(hub.forget_host(body).map(|()| None))
-            }
-            Operation::HostPreferencesGet => {
-                Payload(op::host_preferences_reply(hub.host_preferences())).into_reply()
             }
             Operation::HostPreferencesUpdate => {
                 op::host_preference_response(hub.update_host_preference(body).map(Some))
             }
-            Operation::HostOrderGet => Payload(op::host_order_reply(hub.host_order())).into_reply(),
             Operation::HostOrderUpdate => match hub.set_host_order(body) {
                 Ok(order) => Payload(op::host_order_reply(order)).into_reply(),
                 Err(error) => op::host_preference_response(Err(error)),
@@ -159,8 +153,6 @@ impl State {
                 serde_json::json!({"accepted": splitty_remote::askpass::respond_document(&body)}),
             )
             .into_reply(),
-            Operation::CatalogGet => Payload(hub.catalog()).into_reply(),
-            Operation::CatalogUpdate => op::update_catalog(hub, body),
             Operation::ForwardList => Payload(hub.forwards()).into_reply(),
             Operation::ForwardOpen => op::open_forward(hub, body).await,
             Operation::ForwardStop => op::stop_forward(hub, body).await,

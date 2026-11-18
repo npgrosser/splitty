@@ -2,19 +2,18 @@
 //!
 //! `Dispatcher` holds the backend reference, the optional notification engine
 //! and the arbiter of PTY sizes. `Connection` represents a single client: it
-//! handles create, attach, detach, input, resize, close, save_image, upload,
-//! activity, idle and hide messages, forwards subscriptions to session output and size to
-//! the client, and polls process info for title updates.
+//! handles attachment, input, sizing and transfers, forwards session output
+//! and size to the client, and feeds process metadata to notifications.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+use tracing::warn;
 
 use super::messages::*;
 use super::notify::NotificationEngine;
@@ -22,8 +21,7 @@ use super::paste::{self, PasteError};
 use super::sizing::{self, ClientKey, PtySize, SizeArbiter, SizeConfig, SizeState};
 use super::upload::{self, Upload, UploadError};
 use super::{Sender, ServerEvent};
-use crate::mux::effect_runner::EnvContext;
-use crate::pty::{Backend, CreateSessionOpts, SessionHandle, Subscription};
+use crate::pty::{Backend, SessionHandle, Subscription};
 
 /// Largest binary frame used to replay buffered output.
 const REPLAY_CHUNK: usize = 32 * 1024;
@@ -34,25 +32,11 @@ const REPLAY_CHUNK: usize = 32 * 1024;
 /// leave output still on its way.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 
-/// Callback type that resolves a pane ID to its mux session ID.
-pub type PaneIdResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
-
-/// Resolves retained job identities as well as currently visible panes, so a stale
-/// client's fallback cannot recreate a closed/failed/interrupted managed pane.
-pub type JobPaneResolver =
-    Arc<dyn Fn(&str) -> Option<(String, crate::mux::jobs::JobState)> + Send + Sync>;
-
 /// Dispatcher routes protocol requests to the PTY backend.
 pub struct Dispatcher {
     backend: Arc<dyn Backend>,
     /// Notification engine. `None` if notifications are not enabled.
     pub notify: Option<Arc<Mutex<NotificationEngine>>>,
-    /// Callback to resolve a pane ID to its mux session ID.
-    /// Set by the WS layer when mux is enabled.
-    pub session_id_for_pane: Option<PaneIdResolver>,
-    job_for_pane: RwLock<Option<JobPaneResolver>>,
-    /// Environment context injected into spawned sessions (server addr, token).
-    pub env: EnvContext,
     /// Where `save_image` stores pasted images: `splitty/paste/` of the
     /// user's cache directory, `None` without one. Tests point it elsewhere.
     pub paste_dir: Option<PathBuf>,
@@ -77,9 +61,6 @@ impl Dispatcher {
         Self {
             backend,
             notify: None,
-            session_id_for_pane: None,
-            job_for_pane: RwLock::new(None),
-            env: EnvContext::default(),
             paste_dir: paste::default_dir(),
             sizes: SizeArbiter::new(SizeConfig::default(), Box::new(resize)),
             next_client: AtomicU64::new(1),
@@ -99,10 +80,6 @@ impl Dispatcher {
     /// Return a reference to the underlying backend.
     pub fn backend(&self) -> &Arc<dyn Backend> {
         &self.backend
-    }
-
-    pub fn set_job_resolver(&self, resolver: JobPaneResolver) {
-        *self.job_for_pane.write().expect("job resolver lock") = Some(resolver);
     }
 
     /// Create a new [`Connection`] that sends responses via the given [`Sender`].
@@ -200,13 +177,11 @@ impl Connection {
     /// Route a request to the appropriate handler.
     pub async fn handle(&self, req: &Request) {
         match req.msg_type.as_str() {
-            MSG_CREATE => self.handle_create(req).await,
             MSG_ATTACH => self.handle_attach(req).await,
             MSG_DETACH => self.handle_detach(req).await,
             MSG_INPUT => self.write_input(&req.id, &req.data).await,
             MSG_INPUT_BYTES => self.handle_input_bytes(req).await,
             MSG_RESIZE => self.handle_resize(req),
-            MSG_CLOSE => self.handle_close(req).await,
             MSG_SAVE_IMAGE => self.handle_save_image(req).await,
             MSG_UPLOAD => self.handle_upload(req).await,
             MSG_UPLOAD_CANCEL => {
@@ -256,187 +231,6 @@ impl Connection {
         }
     }
 
-    async fn handle_create(&self, req: &Request) {
-        let managed = self
-            .dispatcher
-            .job_for_pane
-            .read()
-            .expect("job resolver lock")
-            .as_ref()
-            .and_then(|resolve| resolve(&req.pane_id));
-        let existing_job = if let Some((session_id, state)) = managed {
-            match self.dispatcher.backend.get(&session_id) {
-                Some(session) if session.is_managed() => Some(session),
-                _ => {
-                    let _ = self.sender.send(&ServerEvent::error(
-                        Some(session_id),
-                        format!("managed job is {state:?}; no replacement shell will be started"),
-                    ));
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-        // Resolve working directory
-        let mut dir = req.dir.clone();
-        if !dir.is_empty() && !req.root.is_empty() && !PathBuf::from(&dir).is_absolute() {
-            dir = PathBuf::from(&req.root)
-                .join(&dir)
-                .to_string_lossy()
-                .into_owned();
-        }
-
-        // Build extra env vars
-        let mut extra_env = Vec::new();
-        if !req.pane_id.is_empty() {
-            extra_env.push(format!("SPLITTY_PANE_ID={}", req.pane_id));
-        }
-        if !req.screen_id.is_empty() {
-            extra_env.push(format!("SPLITTY_SCREEN_ID={}", req.screen_id));
-        }
-        // See EnvContext: the control socket path replaces the former
-        // SPLITTY_SERVER + SPLITTY_TOKEN pair (SR-05).
-        if !self.dispatcher.env.control_socket.is_empty() {
-            extra_env.push(format!(
-                "SPLITTY_SOCK={}",
-                self.dispatcher.env.control_socket
-            ));
-        }
-
-        // Resolve mux session ID for this pane
-        let mut session_id = String::new();
-        if !req.pane_id.is_empty() {
-            if let Some(ref resolver) = self.dispatcher.session_id_for_pane {
-                if let Some(id) = resolver(&req.pane_id) {
-                    session_id = id;
-                } else {
-                    warn!(
-                        pane_id = %req.pane_id,
-                        "SessionIDForPane returned None -- mux pane not found"
-                    );
-                }
-            }
-        }
-
-        let opts = CreateSessionOpts {
-            id: session_id,
-            shell_profile_id: req.shell_profile_id.clone(),
-            shell: req.shell.clone(),
-            shell_args: vec![],
-            cols: req.cols,
-            rows: req.rows,
-            dir,
-            command: req.command.clone(),
-            restore_mode: req.restore_mode.clone(),
-            extra_env,
-        };
-
-        let result = match existing_job {
-            Some(session) => Ok(session),
-            None => self.dispatcher.backend.create(opts).await,
-        };
-        let session: Arc<dyn SessionHandle> = match result {
-            Ok(s) => s,
-            Err(e) => {
-                error!(err = %e, "create session failed");
-                let _ = self.sender.send(&ServerEvent::error(
-                    None,
-                    format!("failed to create session: {e}"),
-                ));
-                return;
-            }
-        };
-
-        let sid = session.session_id().to_string();
-        let cancel = CancellationToken::new();
-        // A get-or-create may return a session this connection already
-        // streams; its old stream must be gone before the new snapshot.
-        self.stop_stream(&sid).await;
-        // The session's reader runs from spawn, so the shell may already have
-        // printed: the snapshot carries that, the receiver everything later.
-        let subscription = session.subscribe_with(self.sender.delivery_context());
-        // The creating connection shows the session at the size it asked for.
-        let mut sizes = self.dispatcher.sizes.subscribe(&sid);
-        if req.cols > 0 && req.rows > 0 {
-            let size = PtySize {
-                cols: req.cols,
-                rows: req.rows,
-            };
-            let reported =
-                self.dispatcher
-                    .sizes
-                    .report(&sid, self.client, size, false, Instant::now());
-            if let Err(error) = reported.result {
-                warn!(session = %sid, %error, "PTY resize failed");
-            }
-        }
-        let size = *sizes.borrow_and_update();
-
-        // Track in notification engine
-        if let Some(ref notify) = self.dispatcher.notify {
-            let engine = notify.lock().unwrap();
-            engine.track_session(&sid, &req.command);
-        }
-
-        // Send created response
-        let home_dir = dirs::home_dir().map(|p| p.to_string_lossy().into_owned());
-
-        let _ = self
-            .sender
-            .send(&ServerEvent::session_created_with_fallback(
-                sid.clone(),
-                home_dir,
-                Some("unknown".to_string()),
-                session.shell_profile_id().map(str::to_string),
-                session.shell_profile_fallback_reason().map(str::to_string),
-            ));
-        if let Some(size) = size {
-            let _ = self.sender.send(&size_event(&sid, size));
-        }
-
-        self.start_stream(&session, subscription, cancel.clone());
-        self.watch_size(&session, sizes, cancel.clone());
-
-        // Spawn proc-info poller (1s interval for /proc data)
-        let notify_clone = self.dispatcher.notify.clone();
-        let sender_clone = Arc::clone(&self.sender);
-        let session_clone = Arc::clone(&session);
-        let cancel_clone = cancel.clone();
-        tokio::spawn(async move {
-            watch_title(session_clone, sender_clone, cancel_clone, notify_clone).await;
-        });
-
-        // Spawn event-driven OSC 0/2 title watcher (for tab titles)
-        {
-            let sender_clone = Arc::clone(&self.sender);
-            let session_clone = Arc::clone(&session);
-            let cancel_clone = cancel.clone();
-            tokio::spawn(async move {
-                watch_osc_title(session_clone, sender_clone, cancel_clone).await;
-            });
-        }
-
-        // Spawn semantic event watcher (OSC 133) for the notification engine
-        if let Some(notify) = self.dispatcher.notify.clone() {
-            let session_clone = Arc::clone(&session);
-            let cancel_clone = cancel.clone();
-            tokio::spawn(async move {
-                watch_semantic(session_clone, cancel_clone, notify).await;
-            });
-        }
-
-        // Spawn bell watcher
-        {
-            let sender_clone = Arc::clone(&self.sender);
-            let session_clone = Arc::clone(&session);
-            let cancel_clone = cancel.clone();
-            tokio::spawn(async move {
-                watch_bell(session_clone, sender_clone, cancel_clone).await;
-            });
-        }
-    }
-
     async fn handle_attach(&self, req: &Request) {
         let session = match self.dispatcher.backend.get(&req.id) {
             Some(s) => s,
@@ -474,13 +268,10 @@ impl Connection {
             engine.track_session(&sid, "");
         }
 
-        let home_dir = dirs::home_dir().map(|p| p.to_string_lossy().into_owned());
-
         // Include semantic state snapshot for reconnection
         let sem = session.semantic_state();
         let _ = self.sender.send(&ServerEvent::session_attached(
             sid.clone(),
-            home_dir,
             Some(sem.phase.as_str().to_string()),
             sem.last_exit_code,
             Some(sem.command_count),
@@ -489,27 +280,14 @@ impl Connection {
         self.start_stream(&session, subscription, cancel.clone());
         self.watch_size(&session, sizes, cancel.clone());
 
-        // Spawn proc-info poller
-        let notify_clone = self.dispatcher.notify.clone();
-        let sender_clone = Arc::clone(&self.sender);
-        let session_clone = Arc::clone(&session);
-        let cancel_clone = cancel.clone();
-        tokio::spawn(async move {
-            watch_title(session_clone, sender_clone, cancel_clone, notify_clone).await;
-        });
-
-        // Spawn event-driven OSC 0/2 title watcher (for tab titles)
-        {
-            let sender_clone = Arc::clone(&self.sender);
+        if let Some(notify) = self.dispatcher.notify.clone() {
             let session_clone = Arc::clone(&session);
             let cancel_clone = cancel.clone();
+            let proc_notify = notify.clone();
             tokio::spawn(async move {
-                watch_osc_title(session_clone, sender_clone, cancel_clone).await;
+                watch_foreground_process(session_clone, cancel_clone, proc_notify).await;
             });
-        }
 
-        // Spawn semantic event watcher (OSC 133) for the notification engine
-        if let Some(notify) = self.dispatcher.notify.clone() {
             let session_clone = Arc::clone(&session);
             let cancel_clone = cancel.clone();
             tokio::spawn(async move {
@@ -638,23 +416,6 @@ impl Connection {
         if !reported.changed || !streamed {
             let _ = self.sender.send(&size_event(&req.id, reported.state));
         }
-    }
-
-    async fn handle_close(&self, req: &Request) {
-        self.stop_stream(&req.id).await;
-        self.dispatcher
-            .sizes
-            .withdraw(&req.id, self.client, Instant::now());
-
-        if let Err(e) = self.dispatcher.backend.close(&req.id) {
-            let _ = self
-                .sender
-                .send(&ServerEvent::error(Some(req.id.clone()), e.to_string()));
-            return;
-        }
-        let _ = self
-            .sender
-            .send(&ServerEvent::session_closed(req.id.clone(), None));
     }
 
     /// Store a pasted image and answer with its path (`image_saved`) or why it
@@ -964,118 +725,26 @@ async fn stream_output(
     ));
 }
 
-/// Background task that reacts to OSC 0/2 title changes and forwards them to clients.
-/// Event-driven via the session's watch channel — no polling.
-async fn watch_osc_title(
+/// Feed foreground-process changes to the notification engine.
+async fn watch_foreground_process(
     session: Arc<dyn SessionHandle>,
-    sender: Arc<dyn Sender>,
     cancel: CancellationToken,
-) {
-    let mut rx = session.osc_title_watch();
-    let mut done_rx = session.done();
-    let sid = session.session_id().to_string();
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            _ = done_rx.changed() => break,
-            result = rx.changed() => {
-                if result.is_err() { break; }
-                let event = rx.borrow_and_update().clone();
-
-                // Send OSC title update to frontend
-                let info = session.title();
-                let cmdline = if info.cmdline.is_empty() { None } else { Some(info.cmdline) };
-                let osc = if event.title.is_empty() { None } else { Some(event.title) };
-                let _ = sender.send(&ServerEvent::title_changed(
-                    sid.clone(), info.proc, info.cwd,
-                    cmdline, info.base_shell, osc,
-                ));
-            }
-        }
-    }
-}
-
-/// Background task that polls session proc info and sends title updates on change.
-/// Only handles /proc-based data (proc name, cwd, cmdline, base_shell).
-/// OSC 133 semantic events are handled by watch_semantic.
-async fn watch_title(
-    session: Arc<dyn SessionHandle>,
-    sender: Arc<dyn Sender>,
-    cancel: CancellationToken,
-    notify: Option<Arc<Mutex<NotificationEngine>>>,
+    notify: Arc<Mutex<NotificationEngine>>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
-    let mut prev_title = String::new();
-    let mut prev_cwd = String::new();
-    let mut prev_cmdline = String::new();
-    let mut prev_base_shell = false;
-    let mut done_rx = session.done();
-
-    // Send initial title if available
-    {
-        let info = session.title();
-        let osc_rx = session.osc_title_watch();
-        let osc = osc_rx.borrow().title.clone();
-        if !info.proc.is_empty() {
-            prev_title = info.proc.clone();
-            prev_cwd = info.cwd.clone();
-            prev_cmdline = info.cmdline.clone();
-            prev_base_shell = info.base_shell;
-            let cmdline = if info.cmdline.is_empty() {
-                None
-            } else {
-                Some(info.cmdline)
-            };
-            let osc_title = if osc.is_empty() { None } else { Some(osc) };
-            let _ = sender.send(&ServerEvent::title_changed(
-                session.session_id(),
-                info.proc,
-                info.cwd,
-                cmdline,
-                info.base_shell,
-                osc_title,
-            ));
-        }
-    }
-
+    let mut done = session.done();
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
-            _ = done_rx.changed() => break,
+            _ = done.changed() => break,
             _ = interval.tick() => {
                 let info = session.title();
-                let osc_rx = session.osc_title_watch();
-                let osc = osc_rx.borrow().title.clone();
-
-                if info.proc != prev_title
-                    || info.cwd != prev_cwd
-                    || info.cmdline != prev_cmdline
-                    || info.base_shell != prev_base_shell
-                {
-                    let cmdline = if info.cmdline.is_empty() { None } else { Some(info.cmdline.clone()) };
-                    let osc_title = if osc.is_empty() { None } else { Some(osc) };
-                    let _ = sender.send(&ServerEvent::title_changed(
-                        session.session_id(), info.proc.clone(), info.cwd.clone(),
-                        cmdline, info.base_shell, osc_title,
-                    ));
-
-                    prev_title = info.proc.clone();
-                    prev_cwd = info.cwd.clone();
-                    prev_cmdline = info.cmdline.clone();
-                    prev_base_shell = info.base_shell;
-                }
-
-                // Notify engine about proc info changes
-                if let Some(ref notify_engine) = notify {
-                    let engine = notify_engine.lock().unwrap();
-                    engine.on_proc_update(
-                        session.session_id(),
-                        &info.proc,
-                        &info.cmdline,
-                        info.base_shell,
-                    );
-                }
+                notify.lock().unwrap().on_proc_update(
+                    session.session_id(),
+                    &info.proc,
+                    &info.cmdline,
+                    info.base_shell,
+                );
             }
         }
     }
@@ -1163,6 +832,7 @@ mod tests {
         /// standing in for a reader thread that records a chunk meanwhile.
         print_on_subscribe: Vec<u8>,
         resizes: Mutex<Vec<(u16, u16)>>,
+        title: TitleInfo,
         closed: AtomicBool,
         exit_code: AtomicI32,
         exit_reported: AtomicBool,
@@ -1190,6 +860,7 @@ mod tests {
                 output: Mutex::new(MockOutput::default()),
                 print_on_subscribe: Vec::new(),
                 resizes: Mutex::new(Vec::new()),
+                title: TitleInfo::default(),
                 closed: AtomicBool::new(false),
                 exit_code: AtomicI32::new(0),
                 exit_reported: AtomicBool::new(false),
@@ -1274,7 +945,7 @@ mod tests {
         }
 
         fn title(&self) -> TitleInfo {
-            TitleInfo::default()
+            self.title.clone()
         }
 
         fn osc_title_watch(&self) -> watch::Receiver<crate::pty::OscTitleEvent> {
@@ -1327,10 +998,6 @@ mod tests {
                 .unwrap()
                 .insert(session.id.clone(), session);
             self
-        }
-
-        fn set_next_id(&self, id: &str) {
-            *self.next_id.lock().unwrap() = id.to_string();
         }
     }
 
@@ -1486,35 +1153,7 @@ mod tests {
     // ---- Tests ----
 
     #[tokio::test]
-    async fn managed_pending_failed_and_interrupted_panes_never_create_a_shell() {
-        use crate::mux::jobs::JobState;
-        for state in [
-            JobState::Starting,
-            JobState::Failed,
-            JobState::Interrupted,
-            JobState::Exited,
-        ] {
-            let backend = Arc::new(MockBackend::new());
-            let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
-            dispatcher.set_job_resolver(Arc::new(move |_| Some(("managed-session".into(), state))));
-            let sender = Arc::new(MockSender::new());
-            let conn = dispatcher.new_connection(sender.clone());
-            let request = Request {
-                msg_type: MSG_CREATE.into(),
-                pane_id: "job-pane".into(),
-                ..Default::default()
-            };
-            conn.handle(&request).await;
-            assert!(backend.sessions().is_empty());
-            assert!(matches!(
-                sender.events().as_slice(),
-                [ServerEvent::Error { .. }]
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn managed_fallback_and_attach_reuse_the_started_program() {
+    async fn two_attaches_share_the_started_managed_program() {
         if !pty_available() {
             return;
         }
@@ -1533,27 +1172,12 @@ mod tests {
             .await
             .expect("job");
         let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
-        dispatcher.set_job_resolver(Arc::new(|_| {
-            Some((
-                "managed-session".into(),
-                crate::mux::jobs::JobState::Running,
-            ))
-        }));
         let a = Arc::new(MockSender::new());
         let b = Arc::new(MockSender::new());
-        let create_conn = dispatcher.new_connection(a.clone());
-        let attach_conn = dispatcher.new_connection(b.clone());
-        let create = Request {
-            msg_type: MSG_CREATE.into(),
-            pane_id: "job-pane".into(),
-            command: "must not run".into(),
-            ..Default::default()
-        };
-        let attach_request = attach("managed-session");
-        tokio::join!(
-            create_conn.handle(&create),
-            attach_conn.handle(&attach_request)
-        );
+        let first = dispatcher.new_connection(a.clone());
+        let second = dispatcher.new_connection(b.clone());
+        let request = attach("managed-session");
+        tokio::join!(first.handle(&request), second.handle(&request));
         assert_eq!(backend.sessions().len(), 1);
         session.write(b"finished\n").await.expect("input");
         assert!(
@@ -1567,43 +1191,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_create() {
-        let backend = Arc::new(MockBackend::new());
-        backend.set_next_id("sess-1");
-        let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
+    async fn removed_session_types_are_unknown() {
+        let dispatcher = Arc::new(Dispatcher::new(Arc::new(MockBackend::new())));
         let sender = Arc::new(MockSender::new());
         let conn = dispatcher.new_connection(sender.clone());
-
-        conn.handle(&Request {
-            msg_type: MSG_CREATE.to_string(),
-            shell: "/bin/bash".to_string(),
-            cols: 80,
-            rows: 24,
-            ..Default::default()
-        })
-        .await;
-
-        // Give spawned tasks a moment to start
-        tokio::task::yield_now().await;
-
-        let events = sender.events();
-        assert!(!events.is_empty(), "should have sent at least one event");
-        match &events[0] {
-            ServerEvent::SessionCreated {
-                session_id,
-                home_dir,
-                ..
-            } => {
-                assert_eq!(session_id, "sess-1");
-                assert!(home_dir.is_some(), "home_dir should be set");
-            }
-            other => panic!("expected SessionCreated, got {:?}", other),
+        for kind in ["create", "close"] {
+            conn.handle(&Request {
+                msg_type: kind.into(),
+                ..Default::default()
+            })
+            .await;
         }
+        for (event, kind) in sender.events().iter().zip(["create", "close"]) {
+            assert!(matches!(event, ServerEvent::Error { error, .. }
+                if error == &format!("unknown message type: {kind}")));
+        }
+        assert_eq!(sender.events().len(), 2);
+    }
 
-        // Verify session was created in backend
-        assert!(backend.get("sess-1").is_some());
-
-        conn.close();
+    #[tokio::test]
+    async fn foreground_changes_still_notify_without_a_title_event() {
+        let mut fixture = MockSession::new("foreground");
+        fixture.title = TitleInfo {
+            proc: "sh".into(),
+            base_shell: true,
+            ..Default::default()
+        };
+        let backend = MockBackend::new().with_session(Arc::new(fixture));
+        let sender = Arc::new(MockSender::new());
+        let notices = sender.clone();
+        let notification = NotificationEngine::new(Box::new(move |event| {
+            notices.send(&event).unwrap();
+        }));
+        let notification = Arc::new(Mutex::new(notification));
+        let mut dispatcher = Dispatcher::new(Arc::new(backend));
+        dispatcher.notify = Some(notification.clone());
+        let connection = Arc::new(dispatcher).new_connection(sender.clone());
+        connection.handle(&attach("foreground")).await;
+        notification
+            .lock()
+            .unwrap()
+            .on_proc_update("foreground", "editor", "editor file", false);
+        assert!(
+            wait_until(Duration::from_secs(3), || sender
+                .order()
+                .iter()
+                .any(|kind| kind == "process.finished"))
+            .await
+        );
+        assert!(sender.order().iter().all(|kind| kind != "title"));
     }
 
     #[tokio::test]
@@ -1753,49 +1389,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_close() {
-        let session = Arc::new(MockSession::new("sess-close"));
-        let backend = Arc::new(MockBackend::new().with_session(session.clone()));
-        let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
-        let sender = Arc::new(MockSender::new());
-        let conn = dispatcher.new_connection(sender.clone());
-
-        conn.handle(&Request {
-            msg_type: MSG_CLOSE.to_string(),
-            id: "sess-close".to_string(),
-            ..Default::default()
-        })
-        .await;
-
-        let events = sender.events();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ServerEvent::SessionClosed { session_id, .. } => {
-                assert_eq!(session_id, "sess-close");
-            }
-            other => panic!("expected SessionClosed, got {:?}", other),
-        }
-
-        // Session should be removed from backend
-        assert!(backend.get("sess-close").is_none());
-    }
-
-    #[tokio::test]
     async fn test_handle_detach() {
-        let backend = Arc::new(MockBackend::new());
-        backend.set_next_id("sess-detach");
+        let session = Arc::new(MockSession::new("sess-detach"));
+        let backend = Arc::new(MockBackend::new().with_session(session));
         let dispatcher = Arc::new(Dispatcher::new(backend));
         let sender = Arc::new(MockSender::new());
         let conn = dispatcher.new_connection(sender.clone());
 
-        // Create a session first to get a stream entry
-        conn.handle(&Request {
-            msg_type: MSG_CREATE.to_string(),
-            cols: 80,
-            rows: 24,
-            ..Default::default()
-        })
-        .await;
+        conn.handle(&attach("sess-detach")).await;
 
         tokio::task::yield_now().await;
 
@@ -1988,20 +1589,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_non_mux_closes_sessions() {
-        let backend = Arc::new(MockBackend::new());
-        backend.set_next_id("sess-nm");
+        let session = Arc::new(MockSession::new("sess-nm"));
+        let backend = Arc::new(MockBackend::new().with_session(session));
         let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
         let sender = Arc::new(MockSender::new());
         let conn = dispatcher.new_connection(sender);
 
-        // Create a session
-        conn.handle(&Request {
-            msg_type: MSG_CREATE.to_string(),
-            cols: 80,
-            rows: 24,
-            ..Default::default()
-        })
-        .await;
+        conn.handle(&attach("sess-nm")).await;
 
         tokio::task::yield_now().await;
 
@@ -2018,21 +1612,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_close_mux_managed_keeps_sessions() {
-        let backend = Arc::new(MockBackend::new());
-        backend.set_next_id("sess-mux");
+        let session = Arc::new(MockSession::new("sess-mux"));
+        let backend = Arc::new(MockBackend::new().with_session(session));
         let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
         let sender = Arc::new(MockSender::new());
         let mut conn = dispatcher.new_connection(sender);
         conn.mux_managed = true;
 
-        // Create a session
-        conn.handle(&Request {
-            msg_type: MSG_CREATE.to_string(),
-            cols: 80,
-            rows: 24,
-            ..Default::default()
-        })
-        .await;
+        conn.handle(&attach("sess-mux")).await;
 
         tokio::task::yield_now().await;
 
@@ -2581,25 +2168,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_records_its_size_and_sends_it_after_created() {
-        let backend = Arc::new(MockBackend::new());
-        backend.set_next_id("sess-1");
-        let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
-        let sender = Arc::new(MockSender::new());
-        let conn = dispatcher.new_connection(sender.clone());
-        conn.handle(&Request {
-            msg_type: MSG_CREATE.to_string(),
-            cols: 90,
-            rows: 20,
-            ..Default::default()
-        })
-        .await;
-        let order = sender.order();
-        assert_eq!(order.first().map(String::as_str), Some("created"));
-        assert_eq!(sizes(&sender, "sess-1"), [(90, 20)]);
-    }
-
-    #[tokio::test]
     async fn a_client_that_disconnects_gives_the_size_back() {
         let (session, _senders, conns) = shown_by(2, b"").await;
         conns[0].handle(&resize("sess-1", 120, 40)).await;
@@ -2809,10 +2377,9 @@ mod tests {
         String::from_utf8_lossy(bytes).into_owned()
     }
 
-    /// Output a session printed before the creating connection subscribed is
-    /// delivered to that connection, after `created`.
+    /// An attach replays output printed before it subscribed.
     #[tokio::test]
-    async fn create_delivers_output_printed_before_subscribing() {
+    async fn attach_replays_output_printed_before_subscribing() {
         if !pty_available() {
             return;
         }
@@ -2820,29 +2387,25 @@ mod tests {
             settle_on: Some("early-bird"),
             ..PtyBackend::new()
         });
+        let session = backend
+            .create(sh_opts("replay", "echo early-bird; sleep 5"))
+            .await
+            .expect("session");
+        let sid = session.session_id();
         let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
         let sender = Arc::new(MockSender::new());
         let conn = dispatcher.new_connection(sender.clone());
 
-        conn.handle(&Request {
-            msg_type: MSG_CREATE.to_string(),
-            shell: "/bin/sh".to_string(),
-            command: "echo early-bird; sleep 5".to_string(),
-            restore_mode: "close".to_string(),
-            ..Default::default()
-        })
-        .await;
+        conn.handle(&attach(sid)).await;
 
-        let sid = match sender.events().first() {
-            Some(ServerEvent::SessionCreated { session_id, .. }) => session_id.clone(),
-            other => panic!("expected created first, got {other:?}"),
-        };
-        assert!(
-            text(&sender.output(&sid)).contains("early-bird"),
-            "output: {:?}",
-            text(&sender.output(&sid))
-        );
-        assert_eq!(sender.order().first().map(String::as_str), Some("created"));
+        assert!(text(&sender.output(sid)).contains("early-bird"));
+        let events = sender.events();
+        let attached = events
+            .iter()
+            .find(|event| matches!(event, ServerEvent::SessionAttached { .. }))
+            .expect("attached");
+        let attached = serde_json::to_value(attached).unwrap();
+        assert!(attached.get("homeDir").is_none());
 
         conn.close();
         backend.close_all();
@@ -2864,7 +2427,7 @@ mod tests {
 
         let first = Arc::new(MockSender::new());
         let mut conn = dispatcher.new_connection(first.clone());
-        conn.mux_managed = true; // as the WebSocket layer runs it: sessions outlive connections
+        conn.mux_managed = true; // Sessions outlive client connections.
         conn.handle(&attach("reconnect")).await;
         assert!(
             wait_until(Duration::from_secs(5), || !first.binary_chunks().is_empty()).await,

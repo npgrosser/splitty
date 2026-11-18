@@ -1445,8 +1445,9 @@ async fn the_hub_relays_a_host_through_real_ssh() {
     }
 
     // Only the host that became ready is recorded, and the picker lists it.
-    let (status, hosts) = hub.api("GET", "/api/remote/hosts", None).await;
+    let (status, hosts) = hub.api("GET", "/api/remote/directory", None).await;
     assert_eq!(status, 200, "{hosts}");
+    let hosts = &hosts["hosts"];
     assert_eq!(hosts[0]["target"], HOST, "{hosts}");
     assert_eq!(hosts[0]["source"], "recent", "{hosts}");
     assert_eq!(hosts.as_array().map(Vec::len), Some(1), "{hosts}");

@@ -168,18 +168,6 @@ pub(super) fn valid_control(kind: crate::wire::Kind, value: &serde_json::Value) 
     fn u16_value(value: &Value) -> bool {
         value.as_u64().is_some_and(|n| u16::try_from(n).is_ok())
     }
-    fn open_host(value: &Value) -> bool {
-        value.is_null()
-            || object(
-                value,
-                &[
-                    ("ownerInstance", Value::is_string),
-                    ("target", Value::is_string),
-                    ("update", Value::is_boolean),
-                ],
-                &[],
-            )
-    }
     fn purpose(value: &Value) -> bool {
         match value.get("kind").and_then(Value::as_str) {
             Some("direct" | "owner") => object(value, &[("kind", Value::is_string)], &[]),
@@ -218,11 +206,7 @@ pub(super) fn valid_control(kind: crate::wire::Kind, value: &serde_json::Value) 
         )
     }
     match kind {
-        Kind::Hello | Kind::Accept => object(
-            value,
-            &[("transportVersion", u16_value)],
-            &[("openHost", open_host)],
-        ),
+        Kind::Hello | Kind::Accept => object(value, &[("transportVersion", u16_value)], &[]),
         Kind::Ready => object(
             value,
             &[

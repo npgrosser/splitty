@@ -94,9 +94,6 @@ pub enum Op {
     /// Set the active screen.
     SetActiveScreen { screen_id: ScreenId },
 
-    /// Reorder screens.
-    ReorderScreens { screen_order: Vec<ScreenId> },
-
     /// Place one currently ordered Screen before another, or at the current end.
     MoveScreen {
         screen_id: ScreenId,

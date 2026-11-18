@@ -4,34 +4,28 @@ use axum::response::IntoResponse;
 
 async fn message_type(socket: &mut Socket, expected: &str) -> serde_json::Value {
     loop {
-        match next(socket).await {
-            Message::Text(text) => {
-                let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
-                if value["type"] == expected {
-                    return value;
-                }
+        if let Message::Text(text) = next(socket).await {
+            let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+            if value["type"] == expected {
+                return value;
             }
-            Message::Ping(bytes) => {
-                socket.send(Message::Pong(bytes)).await.expect("pong");
-            }
-            _ => {}
         }
     }
 }
 async fn send(socket: &mut Socket, value: serde_json::Value) {
     socket
-        .send(Message::Text(value.to_string().into()))
+        .send(Message::Text(value.to_string()))
         .await
         .expect("send");
 }
 
 #[tokio::test]
-async fn editor_request_uses_registered_attached_websocket_and_owner_route() {
-    run_editor_request_uses_registered_attached_websocket_and_owner_route(false).await;
-    run_editor_request_uses_registered_attached_websocket_and_owner_route(true).await;
+async fn editor_request_uses_registered_native_session_and_owner_route() {
+    run_editor_request_uses_registered_native_session_and_owner_route(false).await;
+    run_editor_request_uses_registered_native_session_and_owner_route(true).await;
 }
 
-async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(native: bool) {
+async fn run_editor_request_uses_registered_native_session_and_owner_route(native: bool) {
     use splitty_core::pty::testing::pty_available;
     if !pty_available() {
         return;
@@ -39,6 +33,7 @@ async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(n
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+    use_test_shell(&served.state);
     let mut socket = served.open_local().await;
     let welcome = message_type(&mut socket, "mux.welcome").await;
     assert!(welcome["capabilities"]
@@ -46,13 +41,7 @@ async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(n
         .expect("capabilities")
         .contains(&json!("editor-open-v1")));
     send(&mut socket, json!({"type":"editor.register"})).await;
-    send(
-        &mut socket,
-        json!({"type":"create","shell":"/bin/sh","cols":80,"rows":24,"dir":dir.path()}),
-    )
-    .await;
-    let created = message_type(&mut socket, "created").await;
-    let session = created["sessionId"].as_str().expect("session");
+    let session = spawn_test_pane(&mut socket, "test-screen", "test-pane", dir.path(), "").await;
     // A subsequent request/response is a fence after subscription routing updated.
     send(
         &mut socket,
@@ -129,11 +118,10 @@ async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(n
             .expect("response");
         assert!(response.status().is_client_error());
     }
-    served
-        .state
-        .client_state
-        .dispatcher
-        .backend()
-        .close(session)
-        .expect("close");
+    send(
+        &mut socket,
+        json!({"type":"mux.op","screenId":"test-screen",
+        "op":{"type":"close_pane","paneId":"test-pane"}}),
+    )
+    .await;
 }

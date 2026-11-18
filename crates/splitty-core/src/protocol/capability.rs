@@ -11,8 +11,6 @@ pub const PORT_CATALOG: &str = "port-catalog-v1";
 
 /// Managed jobs (`managed-jobs`); also listed by `GET /api/jobs`.
 pub const MANAGED_JOBS: &str = "managed-jobs-v1";
-/// Per-session scratchpads (`session-scratchpad`).
-pub const SCRATCHPAD: &str = "scratchpad-v1";
 /// Window layout changes reach the server (`mux-protocol`, Window Layout
 /// Changes Reach the Server).
 pub const LAYOUT_ARRANGE: &str = "layout-arrange-v1";
@@ -47,9 +45,6 @@ pub const HUB_AUTO_FORWARD: &str = "hub-auto-forward-v1";
 /// without pane counts.
 pub const HUB_HOST_STATE: &str = "hub-host-state-v1";
 
-/// Pane titles and busy state come from the server's snapshots, the server
-/// closes exited panes and leaves launch overrides out unless given.
-pub const SERVER_DERIVED_PANE_STATE: &str = "serverDerivedPaneState";
 /// Confirmed external-editor requests (`editor.request`).
 pub const EDITOR_OPEN: &str = "editor-open-v1";
 /// Files offered to the windows of a session (`file.offer`).
@@ -83,9 +78,8 @@ pub const VIEWER_REVIEWS: &str = "viewer-reviews-v1";
 pub const TAB_GROUP_TRANSFER: &str = "tab-group-transfer-v1";
 
 /// What every connection is told.
-const EVERY_CONNECTION: [&str; 10] = [
+const EVERY_CONNECTION: [&str; 9] = [
     MANAGED_JOBS,
-    SCRATCHPAD,
     LAYOUT_ARRANGE,
     TAB_SELECT,
     TAB_PLACEMENT,
@@ -105,8 +99,7 @@ const LOCAL_HUB: [&str; 4] = [
 ];
 
 /// What every connection is told after the hub's capabilities.
-const SESSION: [&str; 15] = [
-    SERVER_DERIVED_PANE_STATE,
+const SESSION: [&str; 14] = [
     EDITOR_OPEN,
     FILE_OFFER,
     PTY_SIZE,

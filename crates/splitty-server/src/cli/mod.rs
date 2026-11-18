@@ -9,7 +9,7 @@ pub mod jobs;
 pub mod panes;
 pub mod review;
 pub mod viewer;
-pub use discovery::{discover, ServerInfo, Transport};
+pub use discovery::{discover, ServerInfo};
 use serde_json::{json, Value};
 
 /// Render a server-provided listing cell without terminal controls or line breaks.
@@ -52,8 +52,7 @@ pub async fn request_within(
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
     }
-    let Transport::LocalSocket(socket) = &server.transport;
-    let builder = builder.unix_socket(socket.clone());
+    let builder = builder.unix_socket(server.socket.clone());
     let url = format!("http://localhost{path}");
     let client = builder
         .build()
@@ -162,7 +161,7 @@ mod tests {
             }
         });
         let server = ServerInfo {
-            transport: Transport::LocalSocket(socket.to_string_lossy().into_owned()),
+            socket: socket.to_string_lossy().into_owned(),
             source: "test",
         };
         assert_eq!(
@@ -199,7 +198,7 @@ mod tests {
         let client = tokio::spawn(async move {
             api_get(
                 &ServerInfo {
-                    transport: Transport::LocalSocket(socket.to_string_lossy().into_owned()),
+                    socket: socket.to_string_lossy().into_owned(),
                     source: "test",
                 },
                 "/api/jobs",
@@ -244,7 +243,7 @@ mod tests {
             }
         });
         let server = ServerInfo {
-            transport: Transport::LocalSocket(path.to_string_lossy().into_owned()),
+            socket: path.to_string_lossy().into_owned(),
             source: "test",
         };
         assert_eq!(

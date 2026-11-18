@@ -1,6 +1,5 @@
 //! Owned native-v1 SSH/desktop pipes: negotiated service identity, bounded
-//! delivery credit and one child lifetime. Browser credentials and TCP listeners
-//! do not belong to this transport.
+//! delivery credit and one child lifetime.
 
 use std::io;
 use std::process::{ExitStatus, Stdio};
@@ -297,7 +296,7 @@ impl NativeBridge {
         let result = tokio::select! { biased;
             _ = closing.wait_for(|closed| *closed) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "native owner closed")),
             ready = async {
-                negotiation::client_with_startup_timeout(&mut output, &mut input, &context.budget, None, startup_timeout).await?;
+                negotiation::client_with_startup_timeout(&mut output, &mut input, &context.budget, startup_timeout).await?;
                 negotiation::accept(&mut output, &mut input, &context.budget, expected, progress).await
             } => ready,
         };

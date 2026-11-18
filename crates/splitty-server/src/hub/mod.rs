@@ -374,7 +374,7 @@ impl Hub {
         self.changes.0.subscribe()
     }
 
-    /// The known hosts, for `GET /api/remote/hosts`.
+    /// The known hosts in the local directory.
     pub fn known_hosts(&self) -> Vec<KnownHost> {
         hosts::known(&self.config_dir, self.ssh_dir.as_deref())
     }
@@ -390,7 +390,7 @@ impl Hub {
         hosts::update_preference(&self.config_dir, document).inspect(|_| self.changes.send())
     }
 
-    /// The order of the client's host groups, for `GET /api/remote/host-order`.
+    /// The stored order of the client's host groups.
     pub fn host_order(&self) -> HostOrder {
         hosts::host_order(&self.config_dir)
     }
@@ -461,12 +461,12 @@ impl Hub {
         Ok(stored)
     }
 
-    /// The last observed host directories, for `GET /api/remote/catalog`.
+    /// The last observed host directories.
     pub fn catalog(&self) -> Catalog {
         catalog::read(&self.config_dir)
     }
 
-    /// Replace only one host's directory, for `PUT /api/remote/catalog`.
+    /// Replace only the observed host's directory.
     /// Both catalog methods only access local metadata, never the connector.
     pub fn update_catalog(&self, document: serde_json::Value) -> Result<HostCatalog, CatalogError> {
         let update = catalog::check(document)?;

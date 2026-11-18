@@ -71,19 +71,6 @@
       "errors": "plain"
     },
     {
-      "operation": "shellProfiles.update",
-      "method": "PUT",
-      "path": "/api/shell-profiles",
-      "scope": "backend",
-      "arguments": [
-        "body"
-      ],
-      "maxBodyBytes": 1048576,
-      "cancellation": "mutation",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
       "operation": "template.extract",
       "method": "POST",
       "path": "/api/templates/extract/screen",
@@ -476,17 +463,6 @@
       "errors": "plain"
     },
     {
-      "operation": "host.list",
-      "method": "GET",
-      "path": "/api/remote/hosts",
-      "scope": "localHub",
-      "arguments": [],
-      "maxBodyBytes": 1048576,
-      "cancellation": "read",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
       "operation": "host.forget",
       "method": "DELETE",
       "path": "/api/remote/hosts",
@@ -500,17 +476,6 @@
       "errors": "plain"
     },
     {
-      "operation": "hostPreferences.get",
-      "method": "GET",
-      "path": "/api/remote/host-preferences",
-      "scope": "localHub",
-      "arguments": [],
-      "maxBodyBytes": 1048576,
-      "cancellation": "read",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
       "operation": "hostPreferences.update",
       "method": "PUT",
       "path": "/api/remote/host-preferences",
@@ -520,17 +485,6 @@
       ],
       "maxBodyBytes": 1048576,
       "cancellation": "mutation",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
-      "operation": "hostOrder.get",
-      "method": "GET",
-      "path": "/api/remote/host-order",
-      "scope": "localHub",
-      "arguments": [],
-      "maxBodyBytes": 1048576,
-      "cancellation": "read",
       "deadlineMs": 30000,
       "errors": "plain"
     },
@@ -575,30 +529,6 @@
       "operation": "remoteScreens.updateHost",
       "method": "PUT",
       "path": "/api/remote/screens/host",
-      "scope": "localHub",
-      "arguments": [
-        "body"
-      ],
-      "maxBodyBytes": 1048576,
-      "cancellation": "mutation",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
-      "operation": "catalog.get",
-      "method": "GET",
-      "path": "/api/remote/catalog",
-      "scope": "localHub",
-      "arguments": [],
-      "maxBodyBytes": 1048576,
-      "cancellation": "read",
-      "deadlineMs": 30000,
-      "errors": "plain"
-    },
-    {
-      "operation": "catalog.update",
-      "method": "PUT",
-      "path": "/api/remote/catalog",
       "scope": "localHub",
       "arguments": [
         "body"
@@ -758,13 +688,11 @@
     }
   ],
   "sessionOperations": [
-    "create",
     "attach",
     "detach",
     "input",
     "input_bytes",
     "resize",
-    "close",
     "save_image",
     "upload",
     "upload_cancel",

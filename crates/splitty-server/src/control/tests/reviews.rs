@@ -64,7 +64,7 @@ async fn window(served: &Served) -> Socket {
 
 async fn send(socket: &mut Socket, value: Value) {
     socket
-        .send(Message::Text(value.to_string().into()))
+        .send(Message::Text(value.to_string()))
         .await
         .expect("send");
 }
@@ -75,19 +75,15 @@ async fn messages(socket: &mut Socket, expected: &[&str]) -> Vec<Value> {
     let mut found: Vec<Option<Value>> = vec![None; expected.len()];
     tokio::time::timeout(WAIT, async {
         while found.iter().any(Option::is_none) {
-            match next(socket).await {
-                Message::Text(text) => {
-                    let value: Value = serde_json::from_str(&text).expect("JSON");
-                    let slot = expected
-                        .iter()
-                        .zip(found.iter_mut())
-                        .find(|(kind, slot)| slot.is_none() && value["type"] == **kind);
-                    if let Some((_, slot)) = slot {
-                        *slot = Some(value);
-                    }
+            if let Message::Text(text) = next(socket).await {
+                let value: Value = serde_json::from_str(&text).expect("JSON");
+                let slot = expected
+                    .iter()
+                    .zip(found.iter_mut())
+                    .find(|(kind, slot)| slot.is_none() && value["type"] == **kind);
+                if let Some((_, slot)) = slot {
+                    *slot = Some(value);
                 }
-                Message::Ping(bytes) => socket.send(Message::Pong(bytes)).await.expect("pong"),
-                _ => {}
             }
         }
     })

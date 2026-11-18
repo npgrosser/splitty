@@ -237,10 +237,20 @@ async fn unattended_metadata_populates_snapshots_and_cli_pane_titles() {
     let session = backend
         .create(command_opts(
             sid.as_str(),
-            r"printf '\033]2;Live title\007'; sleep 30",
+            r"read line; printf '\033]2;Live title\007'; sleep 30",
         ))
         .await
         .expect("PTY");
+    let (mut peer, task) = conformance::framed(&app, splitty_core::native_api::Role::Main).await;
+    conformance::next_text(&mut peer, "mux.welcome").await;
+    use splitty_transport::wire::Kind;
+    peer.sender
+        .json(Kind::Text, &json!({"type":"attach","id":sid}))
+        .unwrap();
+    conformance::next_text(&mut peer, "attached").await;
+    peer.sender
+        .json(Kind::Text, &json!({"type":"input","id":sid,"data":"go\n"}))
+        .unwrap();
     assert!(
         wait_until(WAIT, || session.osc_title_watch().borrow().title
             == "Live title")
@@ -266,6 +276,18 @@ async fn unattended_metadata_populates_snapshots_and_cli_pane_titles() {
     );
     assert_eq!(entry.busy, session.title().busy());
     assert_eq!(entry.status, SessionStatus::Running);
+    let no_title = tokio::time::timeout(Duration::from_millis(1100), async {
+        while let Some(frame) = peer.recv().await {
+            if frame.frame.kind == Kind::Text {
+                let message = frame.frame.decode::<serde_json::Value>().unwrap();
+                assert_ne!(message["type"], "title");
+            }
+        }
+    })
+    .await;
+    assert!(no_title.is_err(), "the connection remains open");
+    peer.shutdown().await;
+    task.await.unwrap().unwrap();
     backend.close(sid.as_str()).expect("cleanup");
 }
 

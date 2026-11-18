@@ -1,4 +1,4 @@
-//! Explicit mapping between the browser API and native UI requests.
+//! Catalog of native service operations and their HTTP control form.
 //!
 //! The assigned role is trusted adapter state, never a request field. Arguments
 //! carry operation data, not URLs, HTTP methods, headers or socket addresses.
@@ -40,7 +40,7 @@ pub enum Scope {
 
 /// How an operation answers a request it cannot decode, and the shape of its
 /// other errors. Only the dispatcher's own decoding uses it; the shapes are
-/// those the browser API has always answered.
+/// shared by native and control requests.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorStyle {
     /// `{"error"}`; an argument or body that does not decode is 422.
@@ -54,7 +54,7 @@ pub enum ErrorStyle {
 }
 
 /// What an argument carries. Every non-body argument is a string on the wire,
-/// as path and query arguments of the browser API are.
+/// for path and query arguments.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArgumentType {
     Text,
@@ -207,7 +207,6 @@ operations! {
     ThemeGet, "theme.get", "GET", "/api/home/theme", Backend, ["name?"], MAX_API_BODY, Read, Ordinary, Plain;
     ThemeList, "theme.list", "GET", "/api/home/themes", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
     ShellProfilesGet, "shellProfiles.get", "GET", "/api/shell-profiles", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
-    ShellProfilesUpdate, "shellProfiles.update", "PUT", "/api/shell-profiles", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     TemplateExtract, "template.extract", "POST", "/api/templates/extract/screen", Backend, ["body"], MAX_API_BODY, Read, Ordinary, Plain;
     TemplateList, "template.list", "GET", "/api/templates", Backend, [], MAX_API_BODY, Read, Ordinary, Plain;
     TemplateGet, "template.get", "GET", "/api/templates/{slug}", Backend, ["slug"], MAX_API_BODY, Read, Ordinary, Plain;
@@ -238,17 +237,12 @@ operations! {
     HostDirectory, "remote.directory.get", "GET", "/api/remote/directory", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     SshPrompts, "ssh.prompts.get", "GET", "/api/remote/ssh-prompts", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     SshAnswer, "ssh.prompts.answer", "POST", "/api/remote/ssh-prompts", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
-    HostList, "host.list", "GET", "/api/remote/hosts", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     HostForget, "host.forget", "DELETE", "/api/remote/hosts", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
-    HostPreferencesGet, "hostPreferences.get", "GET", "/api/remote/host-preferences", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     HostPreferencesUpdate, "hostPreferences.update", "PUT", "/api/remote/host-preferences", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
-    HostOrderGet, "hostOrder.get", "GET", "/api/remote/host-order", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     HostOrderUpdate, "hostOrder.update", "PUT", "/api/remote/host-order", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     RemoteScreensGet, "remoteScreens.get", "GET", "/api/remote/screens", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     RemoteScreensUpdate, "remoteScreens.update", "PUT", "/api/remote/screens", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     RemoteScreensUpdateHost, "remoteScreens.updateHost", "PUT", "/api/remote/screens/host", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
-    CatalogGet, "catalog.get", "GET", "/api/remote/catalog", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
-    CatalogUpdate, "catalog.update", "PUT", "/api/remote/catalog", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary, Plain;
     ForwardList, "forward.list", "GET", "/api/remote/forwards", LocalHub, [], MAX_API_BODY, Read, Ordinary, Plain;
     ForwardOpen, "forward.open", "POST", "/api/remote/forwards", LocalHub, ["body"], MAX_API_BODY, Mutation, Forward, Plain;
     ForwardStop, "forward.stop", "DELETE", "/api/remote/forwards", LocalHub, ["body"], MAX_API_BODY, Mutation, Forward, Plain;
@@ -340,13 +334,11 @@ impl Request {
 /// Existing session JSON types. They retain their dispatcher/domain validation
 /// and ordering; they cannot mint credentials or perform host administration.
 pub const SESSION_OPERATIONS: &[&str] = &[
-    "create",
     "attach",
     "detach",
     "input",
     "input_bytes",
     "resize",
-    "close",
     "save_image",
     "upload",
     "upload_cancel",
@@ -419,4 +411,27 @@ pub fn validate_session(
         }
     }
     Ok(lease.charge(value))
+}
+
+#[cfg(test)]
+mod retired_operations_tests {
+    use super::*;
+
+    #[test]
+    fn removed_operation_names_are_rejected() {
+        for name in [
+            "shellProfiles.update",
+            "host.list",
+            "hostPreferences.get",
+            "hostOrder.get",
+            "catalog.get",
+            "catalog.update",
+        ] {
+            let request = serde_json::json!({"operation":name,"args":{}});
+            assert!(
+                serde_json::from_value::<Request>(request).is_err(),
+                "{name}"
+            );
+        }
+    }
 }

@@ -66,12 +66,3 @@ bright-blue = "#a5f3fc"
 bright-magenta = "#d8b4fe"
 bright-cyan = "#a5f3fc"
 bright-white = "#e8eaed"
-
-[effects]
-glow = "true"
-glow-color = "#a78bfa"
-glow-strength = "10px"
-
-[layout]
-dnd-overlay-scope = "global"
-dnd-overlay-target = "group"

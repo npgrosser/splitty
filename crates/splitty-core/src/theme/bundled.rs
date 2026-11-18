@@ -134,7 +134,6 @@ mod tests {
         let theme = splitty_aurora();
         assert_eq!(theme.name, "Splitty Aurora");
         assert_eq!(theme.palette.accent, "#a78bfa");
-        assert_eq!(theme.effects.get("glow").map(|s| s.as_str()), Some("true"));
     }
 
     #[test]
@@ -142,20 +141,13 @@ mod tests {
         let theme = splitty_neon();
         assert_eq!(theme.name, "Splitty Neon");
         assert_eq!(theme.palette.accent, "#ff2d95");
-        assert_eq!(
-            theme.effects.get("scanlines").map(|s| s.as_str()),
-            Some("true")
-        );
     }
 
     #[test]
-    fn test_bundled_retro_has_effects() {
+    fn test_bundled_retro_parses() {
         let theme = splitty_retro();
-        assert_eq!(
-            theme.effects.get("scanlines").map(|s| s.as_str()),
-            Some("true")
-        );
-        assert_eq!(theme.effects.get("glow").map(|s| s.as_str()), Some("true"));
+        assert_eq!(theme.name, "Splitty Retro");
+        assert!(!theme.terminal.is_empty());
     }
 
     #[test]

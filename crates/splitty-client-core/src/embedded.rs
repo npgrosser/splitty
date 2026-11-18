@@ -486,7 +486,7 @@ mod tests {
             let mut client = service.connect().await.unwrap();
             let instance = service.runtime.as_ref().unwrap().state.instance.clone();
             let welcome = kind(&mut client, "mux.welcome").await;
-            assert_eq!(welcome.json().unwrap()["screens"], json!([]));
+            assert!(welcome.json().unwrap().get("screens").is_none());
             client.request_workspace().unwrap();
             assert_eq!(kind(&mut client, "mux.workspace_snapshot").await.json().unwrap()["screens"], json!([]));
             let ids = client.create_screen("Embedded terminal").unwrap();
@@ -543,7 +543,9 @@ mod tests {
                 let next = EmbeddedService::start();
                 let mut client = next.connect().await.unwrap();
                 assert_ne!(next.runtime.as_ref().unwrap().state.instance, instance);
-                assert_eq!(kind(&mut client, "mux.welcome").await.json().unwrap()["screens"], json!([]));
+                kind(&mut client, "mux.welcome").await;
+                client.request_workspace().unwrap();
+                assert_eq!(kind(&mut client, "mux.workspace_snapshot").await.json().unwrap()["screens"], json!([]));
                 let mut api = next.api_stream().await.unwrap();
                 let jobs = api.request(serde_json::from_value(json!("job.list")).unwrap(), Default::default()).await.unwrap();
                 assert_eq!(serde_json::from_str::<serde_json::Value>(&jobs.body).unwrap()["jobs"], json!([]));
@@ -609,12 +611,7 @@ mod tests {
         );
         // A welcome without the extension must revoke it, including after
         // this connection has previously used binary input successfully.
-        let mut legacy = splitty_core::protocol::ServerEvent::mux_welcome(
-            "legacy-peer".into(),
-            vec![],
-            None,
-            false,
-        );
+        let mut legacy = splitty_core::protocol::ServerEvent::mux_welcome(false);
         if let splitty_core::protocol::ServerEvent::MuxWelcome { capabilities, .. } = &mut legacy {
             capabilities.retain(|offered| offered != capability::TERMINAL_INPUT_BYTES);
         }

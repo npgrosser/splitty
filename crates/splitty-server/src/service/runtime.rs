@@ -127,7 +127,7 @@ fn assemble(
 
     // Spawned shells learn the path to the local control socket, not a network
     // address and master token (security review SR-05).
-    dispatcher.env = splitty_core::mux::effect_runner::EnvContext {
+    let env = splitty_core::mux::effect_runner::EnvContext {
         control_socket: control_socket.to_string_lossy().into_owned(),
     };
 
@@ -178,7 +178,6 @@ fn assemble(
     let effect_runner = Arc::new(splitty_core::mux::effect_runner::EffectRunner::new(
         pty_manager.clone() as Arc<dyn splitty_core::pty::Backend>,
     ));
-    let env = dispatcher.env.clone();
 
     let config = Arc::new(RwLock::new(config));
     let hub = Arc::new(hub.with_settings(config.clone()));
@@ -197,7 +196,6 @@ fn assemble(
             effect_runner,
             env,
             notify_tx,
-            server_mode.to_string(),
         )
         .with_hub(hub.clone())
         .with_ports(port_watch),
