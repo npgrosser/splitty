@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/gpui-pre-linux"]
+exclude = ["vendor/gpui-pre-linux", "vendor/gpui-component", "vendor/gpui-pre-wgpu"]
 members = [
     "crates/splitty-core",
     "crates/splitty-server",
@@ -29,3 +29,6 @@ hex = "0.4"
 
 [patch.crates-io]
 gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+
+gpui-component = { path = "vendor/gpui-component" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }

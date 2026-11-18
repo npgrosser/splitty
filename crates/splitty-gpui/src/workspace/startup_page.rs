@@ -301,6 +301,10 @@ mod view_tests {
             std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4().simple()));
         let path = directory.join("last-appearance.json");
         let remembered = RememberedAppearance {
+            interface_style: "theme".into(),
+            window_decoration: "system".into(),
+            window_buttons: "all".into(),
+            title_bar_style: "theme".into(),
             theme_mode: "fixed".into(),
             theme: "splitty-light".into(),
             theme_dark: "splitty-dark".into(),

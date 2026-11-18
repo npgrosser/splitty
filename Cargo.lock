@@ -2514,8 +2514,6 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45bbfdba0efa392190f2fd446ec311325302eb047d5ce45dc1bcf189cb18f5eb"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3045,8 +3043,6 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "211cf352de1a0b0c9bea3f105df5572ce1d2c899389b924a888e5af36b50f93d"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -6981,8 +6977,10 @@ name = "splitty-gpui"
 version = "0.5.0"
 dependencies = [
  "anyhow",
+ "ashpd",
  "cef",
  "embed-resource",
+ "futures",
  "gpui-kit",
  "gpui-pre-platform",
  "image",

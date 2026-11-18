@@ -96,6 +96,7 @@ impl Askpass {
 /// A host key needs room to be read; a password prompt is one line.
 fn options(confirm: bool, cx: &App) -> WindowOptions {
     WindowOptions {
+        app_id: cfg!(target_os = "linux").then(|| "splitty".into()),
         window_bounds: Some(WindowBounds::centered(
             size(px(520.), px(if confirm { 320. } else { 210. })),
             cx,

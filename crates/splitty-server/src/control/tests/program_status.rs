@@ -42,11 +42,15 @@ async fn both(a: &mut Socket, b: &mut Socket) -> serde_json::Value {
 /// The message after `mux.welcome` and the listening ports, where the
 /// system lists them.
 async fn after_greetings(socket: &mut Socket) -> serde_json::Value {
-    let message = json_of(next(socket).await);
-    if message["type"] == "ports.changed" {
-        return json_of(next(socket).await);
+    loop {
+        let message = json_of(next(socket).await);
+        if !matches!(
+            message["type"].as_str(),
+            Some("ports.changed" | "ports.catalog")
+        ) {
+            return message;
+        }
     }
-    message
 }
 
 async fn send(socket: &mut Socket, value: serde_json::Value) {

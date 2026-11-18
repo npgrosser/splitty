@@ -142,6 +142,11 @@ pub enum CommandKind {
         request: ForwardRequest,
     },
     RefreshForwards,
+    ManagePortCatalog {
+        request_id: uuid::Uuid,
+        port: u16,
+        name: Option<String>,
+    },
     /// Share a local port with a host, or stop, remember or forget a share.
     ManageShare {
         request: crate::hub::ShareRequest,
@@ -464,6 +469,11 @@ pub enum Update {
     },
     Forwards(Arc<ForwardSnapshot>),
     Forward(ForwardResult),
+    PortCatalogResult {
+        source: SourceToken,
+        request_id: uuid::Uuid,
+        error: Option<String>,
+    },
     HostManagement(HostManagementResult),
     HostDirectory(HubUpdate),
     RememberedScreens(Arc<crate::hub::RememberedScreens>),
@@ -584,6 +594,13 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
 
 fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: String) -> Update {
     match command {
+        CommandKind::ManagePortCatalog { request_id, .. } if source.is_some() => {
+            Update::PortCatalogResult {
+                source: source.expect("captured source"),
+                request_id: *request_id,
+                error: Some(reason),
+            }
+        }
         CommandKind::CreateRemoteScreen { request } => Update::RemoteScreenCreateRejected {
             owner: request.target().local_owner(),
             source: request.source(),

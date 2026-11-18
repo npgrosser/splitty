@@ -786,6 +786,8 @@
     "viewer.anchor",
     "viewer.review",
     "viewer.review_answer",
-    "hub.catalog.observe"
+    "hub.catalog.observe",
+    "ports.save",
+    "ports.remove"
   ]
 }

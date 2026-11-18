@@ -163,6 +163,10 @@ impl AppearanceSnapshot {
         use SettingsValue as V;
         let a = self.settings();
         Some(match field {
+            F::InterfaceStyle => V::Text(a.interface_style.clone()),
+            F::WindowDecoration => V::Text(a.window_decoration.clone()),
+            F::WindowButtons => V::Text(a.window_buttons.clone()),
+            F::TitleBarStyle => V::Text(a.title_bar_style.clone()),
             F::ThemeMode => V::Text(a.theme_mode.clone()),
             F::Theme => V::Text(a.theme.clone()),
             F::ThemeDark => V::Text(a.theme_dark.clone()),

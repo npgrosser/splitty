@@ -12,6 +12,10 @@ pub enum SettingsDomain {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum SettingsField {
     ThemeMode,
+    InterfaceStyle,
+    WindowDecoration,
+    WindowButtons,
+    TitleBarStyle,
     Theme,
     ThemeDark,
     ThemeLight,
@@ -47,8 +51,12 @@ pub enum SettingsField {
     NotificationProgramStatus,
 }
 impl SettingsField {
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 35] = [
         Self::ThemeMode,
+        Self::InterfaceStyle,
+        Self::WindowDecoration,
+        Self::WindowButtons,
+        Self::TitleBarStyle,
         Self::Theme,
         Self::ThemeDark,
         Self::ThemeLight,
@@ -94,6 +102,10 @@ impl SettingsField {
     }
     pub fn path(self) -> &'static str {
         match self {
+            Self::InterfaceStyle => "appearance.interfaceStyle",
+            Self::WindowDecoration => "appearance.windowDecoration",
+            Self::WindowButtons => "appearance.windowButtons",
+            Self::TitleBarStyle => "appearance.titleBarStyle",
             Self::ThemeMode => "appearance.themeMode",
             Self::Theme => "appearance.theme",
             Self::ThemeDark => "appearance.themeDark",
@@ -151,7 +163,11 @@ impl SettingsField {
     pub fn needs_metadata(self) -> bool {
         matches!(
             self,
-            Self::FontFamily
+            Self::InterfaceStyle
+                | Self::WindowDecoration
+                | Self::WindowButtons
+                | Self::TitleBarStyle
+                | Self::FontFamily
                 | Self::DrawerPinned
                 | Self::ScrollToBottom
                 | Self::ReconnectHosts
@@ -234,7 +250,11 @@ impl SettingsEdit {
             }
             (
                 SettingsValue::Text(s),
-                F::ThemeMode
+                F::InterfaceStyle
+                | F::WindowDecoration
+                | F::WindowButtons
+                | F::TitleBarStyle
+                | F::ThemeMode
                 | F::ZoomScope
                 | F::TabsCloseButton
                 | F::EditorFile
@@ -363,6 +383,10 @@ pub fn fallback_limits(field: SettingsField) -> Option<&'static SettingsLimits> 
                 ),
                 (F::DrawerWidth, range(150.0, 400.0, 10.0, Vec::new())),
                 (F::ThemeMode, choices(&["fixed", "auto"])),
+                (F::InterfaceStyle, choices(&["system", "theme"])),
+                (F::WindowDecoration, choices(&["system", "splitty"])),
+                (F::WindowButtons, choices(&["system", "all"])),
+                (F::TitleBarStyle, choices(&["system", "theme"])),
                 (F::ZoomScope, choices(&["window", "terminals"])),
                 (F::TabsCloseButton, choices(&["always", "active"])),
                 (F::EditorFile, choices(&["vscode", "zed"])),
@@ -479,7 +503,7 @@ mod tests {
                 .into_iter()
                 .filter(|field| field.domain() == SettingsDomain::Appearance)
                 .count(),
-            24
+            28
         );
     }
 }

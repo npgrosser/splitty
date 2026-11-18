@@ -5,6 +5,37 @@
 //! not know.
 
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ForwardOptions {
+    pub bind: Option<IpAddr>,
+    pub auto_local: Option<bool>,
+}
+pub fn default_bind() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+fn is_default_bind(bind: &IpAddr) -> bool {
+    *bind == default_bind()
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+pub fn valid_bind(bind: IpAddr) -> bool {
+    !bind.is_multicast() && bind != IpAddr::V4(Ipv4Addr::BROADCAST)
+}
+/// Browser host derived from a validated binding, never from a server URL.
+pub fn browser_host(bind: IpAddr) -> String {
+    if bind == default_bind() || bind == IpAddr::V4(Ipv4Addr::UNSPECIFIED) {
+        "localhost".into()
+    } else if bind.is_unspecified() {
+        "[::1]".into()
+    } else {
+        match bind {
+            IpAddr::V4(ip) => ip.to_string(),
+            IpAddr::V6(ip) => format!("[{ip}]"),
+        }
+    }
+}
 
 /// An active forward: `localhost:local` here reaches port `remote` of the
 /// host.
@@ -13,6 +44,8 @@ pub struct ForwardInfo {
     pub target: String,
     pub remote: u16,
     pub local: u16,
+    #[serde(default = "default_bind", skip_serializing_if = "is_default_bind")]
+    pub bind: IpAddr,
     /// Where a browser opens the forward.
     #[serde(default)]
     pub url: String,
@@ -32,9 +65,13 @@ pub enum ForwardState {
 /// in a reply (`lastError`).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SavedForward {
+    #[serde(default, rename = "autoLocal", skip_serializing_if = "is_false")]
+    pub auto_local: bool,
     pub target: String,
     pub remote: u16,
     pub local: u16,
+    #[serde(default = "default_bind", skip_serializing_if = "is_default_bind")]
+    pub bind: IpAddr,
     pub label: String,
     /// Restored when the host connects.
     pub enabled: bool,

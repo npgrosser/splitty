@@ -1,6 +1,6 @@
 //! Host ports forwarded by an owned SSH worker for the remote screen hub.
 //!
-//! Each forward is bound to `127.0.0.1` here and reaches `localhost:<port>` on
+//! Each forward defaults to `127.0.0.1` here and reaches `localhost:<port>` on
 //! the host, a name `sshd` resolves there, so a dev server that listens only on
 //! IPv6 is reached as well. It is announced as `http://localhost:<port>`: the
 //! session cookie of a Splitty server belongs to the host `127.0.0.1`, whatever
@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use splitty_transport::{admission::Admission, worker::Worker};
 use tokio::task::JoinHandle;
 
-use super::{wait_for_forward, PortReservation};
+use super::PortReservation;
 use crate::ssh::{diagnostic_budget, keep_end, kept_end, Diagnostic, Ssh, SshError};
 
 /// A forward as the user asks for it: `PORT`, or `LOCAL:REMOTE`.
@@ -76,6 +76,14 @@ pub fn reserve_exact(port: u16) -> io::Result<PortReservation> {
     let held = PortReservation::acquire_port(port)?;
     held.check_forward_address()?;
     Ok(held)
+}
+
+/// Reserve a free port on the selected interface, retrying IPv6 collisions.
+pub fn reserve_free_at(bind: std::net::IpAddr) -> io::Result<PortReservation> {
+    reserve_free(
+        || PortReservation::acquire_at(bind, 0),
+        PortReservation::check_forward_address,
+    )
 }
 
 fn reserve_free(
@@ -161,18 +169,35 @@ async fn read_ready(stdout: impl tokio::io::AsyncRead + Unpin, marker: &str) -> 
 /// OpenSSH ssh_session2 runs ssh_init_forwarding before LocalCommand, and
 /// ExitOnForwardFailure exits before that command when -L cannot bind. A live
 /// authenticating child plus someone else's TCP listener is not readiness.
+#[cfg(test)]
 async fn wait_for_ready(
     child: &mut Worker,
     port: u16,
     marker: &str,
     timeout: Duration,
 ) -> io::Result<()> {
+    wait_for_ready_at(
+        child,
+        port,
+        marker,
+        timeout,
+        std::net::Ipv4Addr::LOCALHOST.into(),
+    )
+    .await
+}
+async fn wait_for_ready_at(
+    child: &mut Worker,
+    port: u16,
+    marker: &str,
+    timeout: Duration,
+    bind: std::net::IpAddr,
+) -> io::Result<()> {
     let stdout = child
         .stdout()
         .ok_or_else(|| io::Error::other("missing SSH readiness pipe"))?;
     tokio::time::timeout(timeout, async {
         read_ready(stdout, marker).await?;
-        wait_for_forward(child, port).await
+        super::wait_for_forward_at(child, port, bind).await
     })
     .await
     .map_err(|_| {
@@ -184,7 +209,16 @@ async fn wait_for_ready(
 }
 
 /// Build the owned forward's command independently of host configuration.
+#[cfg(test)]
 fn port_command(ssh: &Ssh, port: u16, remote: u16) -> tokio::process::Command {
+    port_command_at(ssh, port, remote, std::net::Ipv4Addr::LOCALHOST.into())
+}
+fn port_command_at(
+    ssh: &Ssh,
+    port: u16,
+    remote: u16,
+    bind: std::net::IpAddr,
+) -> tokio::process::Command {
     let mut command = ssh.command();
     command
         // A reused multiplex master may bypass LocalCommand entirely;
@@ -202,7 +236,13 @@ fn port_command(ssh: &Ssh, port: u16, remote: u16) -> tokio::process::Command {
         .args(["-o", "PermitLocalCommand=yes", "-o"])
         .arg(READY_COMMAND)
         .arg("-L")
-        .arg(format!("127.0.0.1:{port}:localhost:{remote}"))
+        .arg(format!(
+            "{}:{port}:localhost:{remote}",
+            match bind {
+                std::net::IpAddr::V4(ip) => ip.to_string(),
+                std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+            }
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -278,7 +318,8 @@ impl PortTunnel {
         }
 
         let port = local.port();
-        let mut command = port_command(ssh, port, remote);
+        let bind = local.bind_address();
+        let mut command = port_command_at(ssh, port, remote, bind);
         command.arg(ssh.target().destination());
         // ssh -G can await. Recheck at the handoff, with IPv4 still held.
         local
@@ -306,9 +347,10 @@ impl PortTunnel {
             .stderr()
             .map(|stderr| tokio::spawn(keep_end(stderr, diagnostic_bytes)));
         let mut tunnel = Self { child, stderr };
-        let Err(error) = wait_for_ready(&mut tunnel.child, port, READY_MARKER, timeout).await
+        let Err(error) =
+            wait_for_ready_at(&mut tunnel.child, port, READY_MARKER, timeout, bind).await
         else {
-            if let Err(source) = check_forward_address(port) {
+            if let Err(source) = PortReservation::check_bind(bind, port) {
                 tunnel.close().await;
                 return Err(PortTunnelError::LocalPortUnavailable {
                     local: port,
@@ -411,6 +453,25 @@ mod tests {
             assert!(read_ready(output.as_bytes(), READY_MARKER).await.is_err());
         }
         assert_eq!(READY_COMMAND, format!("LocalCommand=echo {READY_MARKER}"));
+    }
+
+    #[tokio::test]
+    async fn explicit_network_bindings_survive_ssh_configuration() {
+        let ssh = Ssh::forward_only(crate::ssh::SshTarget::parse("localhost").unwrap());
+        let config = tempfile::NamedTempFile::new().unwrap();
+        for bind in ["0.0.0.0", "192.0.2.4", "2001:db8::1"] {
+            let output = port_command_at(&ssh, 15173, 5173, bind.parse().unwrap())
+                .args(["-G", "-F"])
+                .arg(config.path())
+                .arg("localhost")
+                .output()
+                .await
+                .unwrap();
+            assert!(output.status.success());
+            let config = String::from_utf8(output.stdout).unwrap();
+            let expected = format!("localforward [{bind}]:15173 [localhost]:5173");
+            assert!(config.lines().any(|line| line == expected), "{config}");
+        }
     }
 
     #[tokio::test]

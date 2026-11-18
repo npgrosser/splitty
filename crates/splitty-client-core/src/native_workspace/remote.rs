@@ -661,6 +661,7 @@ impl<'a> Remotes<'a> {
         let allowed = matches!(
             &command.kind,
             CommandKind::CreateRemoteScreen { .. }
+                | CommandKind::ManagePortCatalog { .. }
                 | CommandKind::RenameScreen { .. }
                 // A refused save would leave the text in the window alone,
                 // where the Screen's next snapshot replaces it.

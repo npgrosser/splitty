@@ -1389,6 +1389,14 @@ pub struct Workspace {
     outcome: Arc<AtomicBool>,
 }
 impl Workspace {
+    pub(crate) fn refresh_desktop_appearance(&mut self, cx: &mut Context<Self>) {
+        if self.appearance.system_style {
+            self.appearance.apply_desktop(cx);
+            self.appearance.apply_component_theme(cx);
+            cx.notify();
+        }
+    }
+
     fn selected_model(&self) -> Option<&SourceWorkspace> {
         let window = self.model.as_ref()?;
         window.source(window.shown_key()?.source_id())
@@ -1485,7 +1493,7 @@ impl Workspace {
         if self.appearance_generation == 0 {
             if let Some(remembered) = memory.stored() {
                 let available_fonts = window.text_system().all_font_names();
-                let next = NativeAppearance::from_remembered(
+                let mut next = NativeAppearance::from_remembered(
                     remembered,
                     Self::window_scheme(window),
                     &self.themes,
@@ -1494,6 +1502,7 @@ impl Workspace {
                     &self.mono_family,
                 );
                 self.zoom = PresentedZoom::new(next.zoom);
+                next.apply_desktop(cx);
                 next.apply_component_theme(cx);
                 self.appearance = next;
                 cx.notify();
@@ -1903,6 +1912,7 @@ impl Workspace {
         if self.drawer_visible {
             self.drawer_overlay_open = false;
         }
+        next.apply_desktop(cx);
         next.apply_component_theme(cx);
         let mut failure = None;
         self.scroll_to_bottom = snapshot.terminal().scroll_to_bottom();
@@ -4343,6 +4353,11 @@ impl Workspace {
                         cx.notify();
                     }
                 }
+                Update::PortCatalogResult {
+                    source,
+                    request_id,
+                    error,
+                } => self.port_catalog_result(source, request_id, error, window, cx),
                 Update::Forward(result) => self.forward_result(result, window, cx),
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),

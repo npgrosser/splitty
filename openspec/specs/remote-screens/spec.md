@@ -418,7 +418,7 @@ A new screen SHALL get its default name `Screen N` from the server that holds it
 - **AND** omitted label preserves its value, while an empty string clears it
 
 ### Requirement: Durable Forward Preferences
-The local server SHALL save `{version:1,forwards:[{target,remote,local,label,enabled}]}` in `remote-forwards.json` in its private configuration directory with atomic, owner-only writes. Successful mutations SHALL survive reconstruction and preserve unrelated entries. Missing, unreadable or invalid documents SHALL yield an empty list without starting SSH or rewriting the file. Runtime failures SHALL NOT be persisted.
+The local server SHALL save `{version:1,forwards:[{target,remote,local,bind,autoLocal,label,enabled}]}` in `remote-forwards.json` in its private configuration directory with atomic, owner-only writes. Successful mutations SHALL survive reconstruction and preserve unrelated entries. Missing, unreadable or invalid documents SHALL yield an empty list without starting SSH or rewriting the file. Runtime failures SHALL NOT be persisted.
 
 #### Scenario: Restart and independent updates
 - **WHEN** two windows save different mappings, including frontend and API ports on the same host, and the local server is reconstructed
@@ -450,7 +450,7 @@ After successfully sending `remote.ready` for a user-requested host connection, 
 - **THEN** at most one opening attempt or supervised forward exists for that mapping at a time, and other mappings can progress independently
 
 ### Requirement: Saved Port Conflicts And Retry
-Saved mappings SHALL retain their local port on restore and retry. A port occupied on `127.0.0.1` or `::1` SHALL yield `local_port_conflict`; uncertain availability SHALL NOT count as free. An initial restore failure SHALL leave the saved rule available with runtime `lastError` in GET preferences. A later successful host connection or explicit Forward/Resume SHALL retry; reads SHALL NOT. Only an explicit successful alternate-port action SHALL change the saved port.
+Saved mappings SHALL retain their local port on restore and retry unless the client explicitly opted into `autoLocal`. Automatic mappings SHALL try the remote port and then an available alternate on initial start or restore; an explicit local port SHALL remain exact. Established tunnels SHALL retain their actual port and binding during rebuilds. A port occupied on `127.0.0.1` or `::1` SHALL yield `local_port_conflict`; uncertain availability SHALL NOT count as free. An initial restore failure SHALL leave the saved rule available with runtime `lastError` in GET preferences. A later successful host connection or explicit Forward/Resume SHALL retry; reads SHALL NOT. Fixed-port rules SHALL change their port only after an explicit successful alternate-port action.
 
 #### Scenario: IPv4 or IPv6 collision
 - **WHEN** another listener owns a saved port on either IPv4 or IPv6 loopback during restore
@@ -660,16 +660,20 @@ Native host metadata actions SHALL carry their assigned local owner, exact targe
 - **THEN** stale directory data cannot replace the latest confirmed view, terminal delivery continues, and shutdown joins the owned work without replay or late connection creation
 
 ### Requirement: Native Outbound Port Workflow
-The experimental native main workspace SHALL offer manual and detected outbound forwards through its assigned local service, with explicit local-port selection, Stop/Resume, opt-in Remember, metadata-only Save, label editing and Forget. Existing mapping, conflict, persistence and restoration rules SHALL apply. Screen detachment and closing the Ports surface SHALL NOT implicitly stop forwards.
+The experimental native main workspace SHALL offer manual and detected outbound forwards through its assigned local service, with explicit or automatic local-port selection, interface binding, Stop/Resume, client-local restoration, local-settings Save and Forget. Shared service names and manual catalog entries SHALL be managed on the connected host. Legacy local labels MAY be offered for explicit migration without overwriting shared names on connection. Existing mapping, conflict, persistence and restoration rules SHALL apply. Screen detachment and closing the Ports surface SHALL NOT implicitly stop forwards.
 
 #### Scenario: Native manual mapping without a Screen
 - **WHEN** a user enters a valid target and port without discovery or an open Screen, and explicitly starts it with Remember
 - **THEN** the assigned local service opens that exact mapping and saves its actual local port only after confirmed opening
 - **AND** another mapping can progress independently, while starting without Remember creates no saved preference
 
-#### Scenario: Native save and label without connection
-- **WHEN** a native user saves a mapping without starting it, or edits or clears its saved label
-- **THEN** only the selected mapping's metadata is changed, omitted fields and paused state are preserved, and no SSH connection or forward starts
+#### Scenario: Native local settings without connection
+- **WHEN** a native user saves local forwarding settings without starting a tunnel
+- **THEN** only that mapping's local port, binding, automatic allocation and restoration choices change, with omitted fields preserved and no SSH connection or forward started
+
+#### Scenario: Native shared service names
+- **WHEN** a native user saves or removes a service name
+- **THEN** the mutation goes to the connected host catalog, is acknowledged after persistence, and is visible on every connected client without starting a tunnel
 
 #### Scenario: Native Stop Forget and alternate port
 - **WHEN** a native user stops or forgets a mapping, or explicitly selects an alternate local port after a conflict
@@ -775,3 +779,24 @@ While a host is connected and its live catalog of the current connection is comp
 #### Scenario: Observation without pane counts
 - **WHEN** the hub has stored `s1` with three panes for `vm1` and an observation lists `s1` renamed and a new `s2`, both without `panes`
 - **THEN** the stored directory lists `s1` under its new name with three panes and does not list `s2` until an observation gives its pane count
+
+### Requirement: Shared Host Port Catalog
+Servers SHALL advertise `port-catalog-v1` and durably store port numbers and names in `port-catalog.json`. All clients SHALL receive the full `ports.catalog` after welcome and after each successful `ports.save` or `ports.remove`. Mutations SHALL be acknowledged by `ports.result` after persistence. Names SHALL be at most 200 characters without control characters, ports 1–65535, and catalogs at most 256 unique ports. Invalid writes SHALL leave the prior catalog intact. Shared metadata SHALL never authorize forwarding.
+
+#### Scenario: A second computer connects
+- **WHEN** a client saves a named port on the host and another client connects
+- **THEN** both see that port and name, including without a detected listener
+- **AND** the second client does not inherit the first client's local forwarding preferences
+
+#### Scenario: Shared rename and removal
+- **WHEN** a client renames or removes a catalog entry
+- **THEN** all clients receive the new catalog and a restart preserves it
+- **AND** active tunnels and local restoration preferences remain unchanged
+
+#### Scenario: Failed storage
+- **WHEN** a catalog write fails
+- **THEN** the request reports failure and no changed catalog is published
+
+#### Scenario: Older host
+- **WHEN** a host lacks `port-catalog-v1`
+- **THEN** shared mutations are refused with an update message and local forwarding remains available

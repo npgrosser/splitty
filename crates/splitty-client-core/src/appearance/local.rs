@@ -28,6 +28,10 @@ pub(crate) struct HomeAppearance {
 impl HomeAppearance {
     pub(crate) fn validate(&self) -> io::Result<()> {
         if [
+            &self.appearance.interface_style,
+            &self.appearance.window_decoration,
+            &self.appearance.window_buttons,
+            &self.appearance.title_bar_style,
             &self.appearance.theme,
             &self.appearance.theme_dark,
             &self.appearance.theme_light,

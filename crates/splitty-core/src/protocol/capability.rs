@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 
+pub const PORT_CATALOG: &str = "port-catalog-v1";
+
 /// Managed jobs (`managed-jobs`); also listed by `GET /api/jobs`.
 pub const MANAGED_JOBS: &str = "managed-jobs-v1";
 /// Per-session scratchpads (`session-scratchpad`).
@@ -103,7 +105,7 @@ const LOCAL_HUB: [&str; 4] = [
 ];
 
 /// What every connection is told after the hub's capabilities.
-const SESSION: [&str; 14] = [
+const SESSION: [&str; 15] = [
     SERVER_DERIVED_PANE_STATE,
     EDITOR_OPEN,
     FILE_OFFER,
@@ -118,6 +120,7 @@ const SESSION: [&str; 14] = [
     SCRATCHPAD_VERSIONS,
     VIEWER_REVIEWS,
     TAB_GROUP_TRANSFER,
+    PORT_CATALOG,
 ];
 
 /// The capabilities of `mux.welcome`, in the order servers send them;

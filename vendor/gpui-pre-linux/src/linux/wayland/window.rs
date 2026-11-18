@@ -2023,6 +2023,17 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
+        let frame = inset_by_tiling(
+            state.bounds.map_origin(|_| px(0.0)),
+            state.inset(),
+            state.tiling,
+        );
+        let scale = state.scale;
+        let radii = if state.decorations == WindowDecorations::Client {
+            state.client_corner_radii
+        } else {
+            Corners::default()
+        };
         let state = &mut *state;
         let Some(renderer) = &mut state.renderer else {
             return;
@@ -2049,6 +2060,8 @@ impl PlatformWindow for WaylandWindow {
             state.redraw_requested = true;
             return;
         }
+
+        renderer.set_client_frame(frame.scale(scale), radii.scale(scale));
 
         // Surface state changed during this GPUI tick is included in this presentation.
         state.redraw_requested = false;

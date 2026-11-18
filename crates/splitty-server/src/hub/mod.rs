@@ -527,6 +527,33 @@ impl Hub {
             .await
     }
 
+    pub async fn open_forward_at(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        automatic: bool,
+        preserve_restore: bool,
+        options: splitty_core::native_api::forwards::ForwardOptions,
+    ) -> Result<ForwardInfo, ForwardError> {
+        self.forwards
+            .open_with_bind(target, port, local, automatic, preserve_restore, options)
+            .await
+    }
+    pub async fn save_forward_at(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        label: Option<String>,
+        enabled: Option<bool>,
+        options: splitty_core::native_api::forwards::ForwardOptions,
+    ) -> Result<SavedForward, ForwardError> {
+        self.forwards
+            .save_with_bind(target, port, local, label, enabled, options)
+            .await
+    }
+
     pub fn forward_preferences(&self) -> Preferences {
         self.forwards.preferences()
     }
@@ -950,6 +977,7 @@ mod tests {
                 target: "vm1".into(),
                 remote: 3000,
                 local: 4173,
+                bind: splitty_core::native_api::forwards::default_bind(),
                 url: "http://localhost:4173/".into(),
                 state: ForwardState::Up,
             }]),
@@ -961,17 +989,21 @@ mod tests {
                 version: 1,
                 forwards: vec![
                     SavedForward {
+                        auto_local: false,
                         target: "vm1".into(),
                         remote: 3000,
                         local: 4173,
+                        bind: splitty_core::native_api::forwards::default_bind(),
                         label: "App".into(),
                         enabled: true,
                         last_error: Some(error.clone()),
                     },
                     SavedForward {
+                        auto_local: false,
                         target: "vm1".into(),
                         remote: 3001,
                         local: 3001,
+                        bind: splitty_core::native_api::forwards::default_bind(),
                         label: String::new(),
                         enabled: false,
                         last_error: None,

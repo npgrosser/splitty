@@ -78,7 +78,7 @@ model {
     }
 
     client_ports = component 'client_ports' {
-      description 'Explicit local-owner outbound forwarding with bounded independent per-mapping API jobs, independent charged active/saved snapshots, authoritative acknowledgement revisions, and exact-source revocable browser continuations; no tunnel ownership or automatic forwarding. Native one-off forwarding preserves restoration; explicit saves carry an independently validated enabled choice and labels remain personal local metadata.'
+      description 'Explicit local-owner outbound forwarding with bounded independent per-mapping API jobs, independent charged active/saved snapshots, authoritative acknowledgement revisions, and exact-source revocable browser continuations; no tunnel ownership or automatic forwarding. Native one-off forwarding preserves restoration; explicit saves carry an independently validated enabled choice and shared names come from the host port catalog. Local bindings and automatic port selection remain local preferences.'
       metadata { module 'splitty_client_core::ports' }
     }
     native_workspace -> splitty.server.hub 'Gate the real forwarding service adapter for worker concurrency tests'

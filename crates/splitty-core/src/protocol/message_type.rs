@@ -37,6 +37,10 @@ pub enum MessageType {
     SessionExited,
     #[serde(rename = "ports.changed")]
     PortsChanged,
+    #[serde(rename = "ports.catalog")]
+    PortCatalog,
+    #[serde(rename = "ports.result")]
+    PortCatalogResult,
     #[serde(rename = "program_status.changed")]
     ProgramStatusChanged,
     #[serde(rename = "mux.welcome")]
@@ -157,6 +161,8 @@ mod tests {
             ProcessFinished => event(ServerEvent::process_finished("s1", "make".into(), None)),
             ProcessIdle => event(ServerEvent::process_idle("s1", "make".into(), None, false)),
             SessionExited => event(ServerEvent::session_exited("s1", 0, None, None, false)),
+            PortCatalog => event(ServerEvent::port_catalog(vec![], None, 0)),
+            PortCatalogResult => json!({"type":"ports.result","requestId":"r","error":null}),
             PortsChanged => event(ServerEvent::ports_changed(vec![])),
             ProgramStatusChanged => {
                 event(ServerEvent::program_status_changed("s1", None, None, None))
@@ -247,6 +253,8 @@ mod tests {
             ProcessIdle,
             SessionExited,
             PortsChanged,
+            PortCatalog,
+            PortCatalogResult,
             ProgramStatusChanged,
             MuxWelcome,
             MuxScreenSnapshot,

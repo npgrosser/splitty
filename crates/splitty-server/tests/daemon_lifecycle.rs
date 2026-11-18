@@ -3105,7 +3105,7 @@ fn rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs() {
                 tokio::task::yield_now().await;
             }
         }).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), owner.close_result()).await.unwrap().unwrap();
+        tokio::time::timeout(READ_TIMEOUT, owner.close_result()).await.unwrap().unwrap();
         assert!(kill(Pid::from_raw(pid), None).is_err(), "owner completion observes helper exit");
         assert!(kill(Pid::from_raw(job_pid), None).is_err(), "owner exit includes its managed job; remaining process: {:?}", fs::read_to_string(format!("/proc/{job_pid}/stat")));
         second.finish().await.unwrap();

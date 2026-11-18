@@ -189,15 +189,20 @@ A client showing screens of several servers SHALL resolve every screen, pane and
 - **THEN** the client does not read the clipboard and sends nothing to the host
 
 ### Requirement: Hub Port Forwards
-A forward opened by the hub MUST be bound to `127.0.0.1` explicitly, whatever the user's SSH configuration says. It MUST be announced only as `http://localhost:<port>`, never as `http://127.0.0.1:<port>`, so that a browser does not send it cookies it holds for `127.0.0.1`. Its `ssh` MUST run non-interactively, with no agent forwarding, no remote forwards and no terminal, to a target that passed the target validation of Remote Access Through SSH Tunnel, and remote and explicit local ports MUST be integers from 1 to 65535.
+A forward opened by the hub MUST default to an explicit `127.0.0.1` binding, regardless of SSH configuration. Only an explicit local `bind` preference or action MAY select a numeric LAN/VPN address or wildcard binding. Shared host catalog metadata MUST NOT select a local binding or start a forward. Changing the binding of an active forward MUST require stopping it first. Browser addresses MUST derive from the confirmed binding. The default IPv4 loopback and IPv4 wildcard bindings MUST use `localhost`. Its `ssh` MUST run non-interactively, with no agent forwarding, no remote forwards and no terminal, to a target that passed the target validation of Remote Access Through SSH Tunnel, and remote and explicit local ports MUST be integers from 1 to 65535.
 
 A forward MUST NOT be opened without the user's forward action or remote loopback-link click, unless the user turned on `remote.autoForwardPorts`, or previously opted to remember an enabled mapping and now connects that host successfully. Saving preferences, starting the local server, connecting a client, reading state and observing ports MUST NOT by themselves authorize saved restoration. A disabled saved rule MUST override automatic forwarding. `/api/remote/forwards` and `/api/remote/forward-preferences` MUST NOT be served on the control socket.
 
-A selected local port MUST be checked for availability on both `127.0.0.1` and `::1`, including explicit and saved ports and automatically chosen candidates. A busy address or an unexplained failure to establish availability MUST NOT be treated as free; an unavailable IPv6 stack alone MUST NOT disable IPv4 forwarding. Rebuilds MUST retain the selected port. Forward URLs MUST contain no Splitty credential. Labels MUST NOT affect SSH arguments, destinations or URLs.
+A selected local port MUST be reserved on its selected binding, including explicit and saved ports and automatically chosen candidates. Default IPv4 loopback and IPv4 wildcard bindings MUST additionally be checked on `::1` to ensure localhost browser access cannot reach an unrelated listener. A busy address or an unexplained failure to establish availability MUST NOT be treated as free; an unavailable IPv6 stack alone MUST NOT disable IPv4 forwarding. Rebuilds MUST retain the selected port. Forward URLs MUST contain no Splitty credential. Labels MUST NOT affect SSH arguments, destinations or URLs.
 
 #### Scenario: GatewayPorts in the SSH configuration
 - **WHEN** the user's SSH configuration sets `GatewayPorts yes` and the hub forwards port 3000 of a host
 - **THEN** the forward listens on `127.0.0.1` only
+
+#### Scenario: Explicit local network access
+- **WHEN** a user selects a numeric LAN/VPN address or wildcard binding locally
+- **THEN** the listener uses that address, replies expose the confirmed address and local port, and a rebuild retains both
+- **AND** another client receiving the shared port name does not inherit network exposure
 
 #### Scenario: Forwards in the SSH configuration
 - **WHEN** the user's SSH configuration sets `RemoteForward` for `vm1` and the UI requests a forward of a port of `vm1`

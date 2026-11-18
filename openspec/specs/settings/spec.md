@@ -298,3 +298,46 @@ Every window SHALL choose the name of its terminal palette by one rule, the serv
 #### Scenario: Palette the server does not have
 - **WHEN** `terminal.theme` names a palette that only the native catalog has
 - **THEN** the theme answer carries the UI theme's own terminal colors and its identifier as `terminalPalette`, and the setting keeps its value
+
+### Requirement: Independent Native Window Chrome
+The native desktop app SHALL support `appearance.titleBarStyle` with values `system` and `theme`, defaulting to `theme` when absent. This setting SHALL be independent of application and terminal themes, and editable only when local service metadata advertises it.
+
+#### Scenario: Independent colors
+- **WHEN** a user selects system window chrome while named application and terminal themes are active
+- **THEN** both theme selections remain effective and unchanged, and the title bar follows the system appearance
+
+#### Scenario: Unsupported selection or older service
+- **WHEN** an update names an unsupported title-bar selection or the local service does not advertise the setting
+- **THEN** the server rejects the unsupported update atomically, or the native editor leaves the unadvertised setting uneditable
+
+### Requirement: Native Decoration Ownership
+`appearance.windowDecoration` SHALL select `system` (default) or `splitty`, independently of title-bar colors. System decoration with system colors SHALL use native decoration where available and desktop-style client decoration otherwise. Splitty SHALL use application-owned geometry. Compositor-owned frames MAY retain their colors. All close controls SHALL follow the existing close policy.
+
+#### Scenario: Client and server decoration
+- **WHEN** the desktop supplies a title bar or requires the application to draw one
+- **THEN** the native app shows only the supplied title bar or its own resolved title bar, respectively
+
+#### Scenario: Close control
+- **WHEN** the user activates a client title bar's close control
+- **THEN** the window follows its existing workspace close policy
+
+### Requirement: Native Decoration Startup Selection
+The native app SHALL remember its last confirmed interface, decoration, color and button selections with the startup appearance and restore them for window creation. Absent selections SHALL use their declared defaults. A change requiring restart SHALL disclose that requirement and take effect at the next normal start. Reading settings SHALL NOT write them or recreate terminal sessions.
+
+#### Scenario: Persisted selection and old settings
+- **WHEN** the app starts with a previously confirmed title-bar selection, or reads a startup cache from before the selection existed
+- **THEN** it restores the confirmed selection for window creation, or defaults to theme mode when absent
+
+### Requirement: Independent Native Interface Style
+The native app SHALL support `appearance.interfaceStyle` (`system` or `theme`, default `theme`). System style SHALL follow the desktop light/dark preference and its typography and interface conventions through a local desktop profile. Selecting it SHALL preserve saved named-theme and font preferences so returning to theme style restores them. Terminal palette selection and window decoration SHALL remain independent.
+
+#### Scenario: System interface and named theme restoration
+- **WHEN** a user switches to system interface style and then back to theme style
+- **THEN** the system profile is shown first, and the saved named-theme and font choices become effective again without rewriting them
+
+### Requirement: Native Window Button Policy
+The native app SHALL support `appearance.windowButtons` (`system` or `all`, default `all`) for client decorations. System policy SHALL respect desktop button arrangement; all SHALL expose minimize, maximize/restore and close, disabling actions unavailable on the platform. Native OS-owned decorations MAY retain their own controls.
+
+#### Scenario: Complete client controls
+- **WHEN** the user selects all window buttons on a client-decorated window
+- **THEN** minimize, maximize/restore and close are available independently of the desktop's button arrangement, subject to platform capabilities

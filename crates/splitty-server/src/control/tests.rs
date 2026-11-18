@@ -1732,6 +1732,7 @@ async fn without_a_port_scan_no_ports_are_sent() {
     .await;
     let mut socket = served.open_local().await;
     assert_eq!(json_of(next(&mut socket).await)["type"], "mux.welcome");
+    assert_eq!(json_of(next(&mut socket).await)["type"], "ports.catalog");
     socket
         .send(Message::text(
             json!({"type":"mux.workspace_resync"}).to_string(),
@@ -2961,4 +2962,80 @@ async fn failed_host_setup_never_restores_saved_reverse_forwards() {
         .iter()
         .all(|call| !call.starts_with("reverse ")));
     assert!(served.hub.reverses().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_port_catalog_is_shared_durable_and_independent_of_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = ScriptedHost::new(dir.path());
+    let catalog_dir = dir.path().join("catalog");
+    let served = Served::start_with(hub(&host, dir.path()), |addr| {
+        state_with(
+            addr,
+            dir.path(),
+            Some(PortWatch::with_scan(false, Arc::new(Vec::new)).with_catalog(catalog_dir.clone())),
+        )
+    })
+    .await;
+    async fn until(socket: &mut Socket, kind: &str) -> serde_json::Value {
+        loop {
+            let value = json_of(next(socket).await);
+            if value["type"] == kind {
+                return value;
+            }
+        }
+    }
+    let mut first = served.open_local().await;
+    assert_eq!(until(&mut first, "ports.catalog").await["ports"], json!([]));
+    first
+        .send(Message::text(
+            json!({"type":"ports.save","requestId":"save","port":8080,"name":"API"}).to_string(),
+        ))
+        .await
+        .unwrap();
+    // The direct acknowledgement and broadcast can arrive in either order.
+    let mut ack = false;
+    let mut changed = false;
+    while !ack || !changed {
+        let value = json_of(next(&mut first).await);
+        if value["type"] == "ports.result" {
+            assert_eq!(value["error"], serde_json::Value::Null);
+            ack = true;
+        }
+        if value["type"] == "ports.catalog" {
+            assert_eq!(value["ports"], json!([{"port":8080,"name":"API"}]));
+            changed = true;
+        }
+    }
+    let mut second = served.open_local().await;
+    assert_eq!(
+        until(&mut second, "ports.catalog").await["ports"],
+        json!([{"port":8080,"name":"API"}])
+    );
+    second
+        .send(Message::text(
+            json!({"type":"ports.save","requestId":"rename","port":8080,"name":"Backend"})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        until(&mut first, "ports.catalog").await["ports"][0]["name"],
+        "Backend"
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(catalog_dir.join("port-catalog.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored["ports"][0]["name"], "Backend");
+    assert!(
+        host.asked().is_empty(),
+        "metadata must not open SSH tunnels"
+    );
+    first
+        .send(Message::text(
+            json!({"type":"ports.remove","requestId":"remove","port":8080}).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(until(&mut first, "ports.catalog").await["ports"], json!([]));
 }

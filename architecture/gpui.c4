@@ -7,6 +7,11 @@ model {
       metadata { module 'splitty_gpui' }
     }
 
+    gpui_chrome = component 'gpui_chrome' {
+      description 'Render resolved System or Splitty window chrome with independent colors, explicit control layout and delegated close intent; no independent settings authority.'
+      metadata { module 'splitty_gpui::chrome' }
+    }
+
     gpui_askpass = component 'gpui_askpass' {
       description 'Native SSH authentication and explicit host-key confirmation windows, one per question the local service (embedded or the WSL backend) waits on, as the workspace reads them; an answer or a dismissal goes back once.'
       metadata { module 'splitty_gpui::askpass' }
@@ -43,7 +48,7 @@ model {
     }
 
     gpui_appearance = component 'gpui_appearance' {
-      description 'Theme catalog of bundled and user files (toolkit theme sets, Ghostty-format terminal palettes), workspace chrome derived from the toolkit theme and its optional splitty block, terminal palette selection, and the bounded UI font and zoom projection from service-owned settings or, before the local service answered, from the selection the last window applied; palette changes preserve terminal typography and history.'
+      description 'Independent system interface profile and desktop typography, window decoration profiles and independent colors/control policy, bounded local symbolic icon-theme lookup, and theme catalog of bundled and user files (toolkit theme sets, Ghostty-format terminal palettes), workspace chrome derived from the toolkit theme and its optional splitty block, terminal palette selection, and the bounded UI font and zoom projection from service-owned settings or, before the local service answered, from the selection the last window applied; palette changes preserve terminal typography and history.'
       metadata { module 'splitty_gpui::appearance' }
     }
 
@@ -65,6 +70,10 @@ model {
     gpui_main -> splitty.client_core.owned_service 'Replace the default backend with the prepared WSL launch target on Windows'
     gpui_startup -> splitty.client_core.owned_service 'Construct the explicit platform backend configuration'
     gpui_main -> gpui_workspace 'Construct the native multi-source workspace window'
+    gpui_main -> gpui_chrome 'Render resolved window decorations'
+    gpui_main -> gpui_appearance 'Resolve window chrome independently of application colors'
+    gpui_main -> splitty.client_core.appearance 'Read the remembered decoration selection before window creation'
+    gpui_chrome -> gpui_appearance 'Consume resolved title bar geometry and colors'
     gpui_main -> terminal 'Install focused PTY key context after Kit key bindings'
     gpui_main -> splitty.client_core.native_workspace 'Join the native workspace runtime'
     gpui_main -> splitty.client_core.client_workspace 'Construct the canonical title model in OS window observation tests'

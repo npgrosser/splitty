@@ -81,6 +81,8 @@ pub struct ForwardRequest {
     key: MappingKey,
     action: ForwardAction,
     local: Option<u16>,
+    bind: Option<std::net::IpAddr>,
+    auto_local: Option<bool>,
     remember: bool,
     restore: Option<bool>,
     label: Option<String>,
@@ -99,6 +101,8 @@ impl ForwardRequest {
             key,
             action: ForwardAction::Start,
             local,
+            bind: None,
+            auto_local: None,
             remember,
             restore: None,
             label,
@@ -131,6 +135,17 @@ impl ForwardRequest {
         Ok(request)
     }
     /// Saving restoration is independent of starting or stopping a tunnel.
+    pub fn with_auto_local(mut self, enabled: bool) -> Self {
+        self.auto_local = Some(enabled);
+        self
+    }
+    pub fn with_bind(mut self, bind: std::net::IpAddr) -> io::Result<Self> {
+        if !splitty_core::native_api::forwards::valid_bind(bind) {
+            return Err(invalid("Invalid bind address"));
+        }
+        self.bind = Some(bind);
+        Ok(self)
+    }
     pub fn with_restore(mut self, enabled: bool) -> Self {
         self.restore = Some(enabled);
         self
@@ -140,6 +155,8 @@ impl ForwardRequest {
             key,
             action: ForwardAction::Stop,
             local: None,
+            bind: None,
+            auto_local: None,
             remember: false,
             restore: None,
             label: None,
@@ -315,13 +332,27 @@ impl ForwardSnapshot {
             let Some(source) = window.source(host.action_target().source_id()) else {
                 continue;
             };
-            let Some(observation) = source.port_observation() else {
-                continue;
-            };
             let Some(target) = source.target() else {
                 continue;
             };
-            for observed in observation.ports() {
+            if let Some(catalog) = source.port_catalog() {
+                for saved in catalog.ports() {
+                    let Ok(key) = MappingKey::new(target, saved.port) else {
+                        continue;
+                    };
+                    let row = rows
+                        .entry(key.clone())
+                        .or_insert_with(|| ForwardRow::new(key));
+                    row.label = Some(saved.name.clone());
+                    row.catalog_saved = true;
+                    row.state = ForwardState::Saved;
+                }
+            }
+            for observed in source
+                .port_observation()
+                .into_iter()
+                .flat_map(|o| o.ports())
+            {
                 let Ok(key) = MappingKey::new(target, observed.port()) else {
                     continue;
                 };
@@ -341,7 +372,11 @@ impl ForwardSnapshot {
                     .entry(key.clone())
                     .or_insert_with(|| ForwardRow::new(key));
                 row.local = Some(saved.local);
-                row.label = Some(saved.label.clone());
+                row.bind = saved.bind;
+                row.auto_local = saved.auto_local;
+                if !row.catalog_saved {
+                    row.label = Some(saved.label.clone());
+                }
                 row.saved = true;
                 row.restore = saved.enabled;
                 row.state = if !saved.enabled {
@@ -364,6 +399,7 @@ impl ForwardSnapshot {
                     .entry(key.clone())
                     .or_insert_with(|| ForwardRow::new(key));
                 row.local = Some(active.local);
+                row.bind = active.bind;
                 row.state = if active.state == ActiveState::Up {
                     ForwardState::Up
                 } else {
@@ -372,16 +408,27 @@ impl ForwardSnapshot {
                 row.error = None;
             }
         }
-        rows.into_values().collect()
+        let mut rows: Vec<_> = rows.into_values().collect();
+        rows.sort_by(|a, b| {
+            (a.key.target(), a.sort_group(), a.key.remote()).cmp(&(
+                b.key.target(),
+                b.sort_group(),
+                b.key.remote(),
+            ))
+        });
+        rows
     }
 }
 #[derive(Clone, Debug)]
 pub struct ForwardRow {
+    auto_local: bool,
+    bind: std::net::IpAddr,
     key: MappingKey,
     local: Option<u16>,
     label: Option<String>,
     process: Option<String>,
     saved: bool,
+    catalog_saved: bool,
     restore: bool,
     state: ForwardState,
     error: Option<String>,
@@ -390,10 +437,13 @@ impl ForwardRow {
     fn new(key: MappingKey) -> Self {
         Self {
             key,
+            auto_local: false,
+            bind: splitty_core::native_api::forwards::default_bind(),
             local: None,
             label: None,
             process: None,
             saved: false,
+            catalog_saved: false,
             restore: false,
             state: ForwardState::Detected,
             error: None,
@@ -405,11 +455,44 @@ impl ForwardRow {
     pub fn local(&self) -> Option<u16> {
         self.local
     }
+    pub fn auto_local(&self) -> bool {
+        self.auto_local
+    }
+    pub fn bind(&self) -> std::net::IpAddr {
+        self.bind
+    }
+    pub fn address(&self) -> Option<String> {
+        self.local.map(|port| {
+            format!(
+                "{}:{port}",
+                splitty_core::native_api::forwards::browser_host(self.bind)
+            )
+        })
+    }
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
     pub fn process(&self) -> Option<&str> {
         self.process.as_deref()
+    }
+    pub fn is_catalog_saved(&self) -> bool {
+        self.catalog_saved
+    }
+    pub fn sort_group(&self) -> u8 {
+        if matches!(self.state, ForwardState::Up | ForwardState::Rebuilding) {
+            0
+        } else if self.catalog_saved || self.saved {
+            1
+        } else {
+            2
+        }
+    }
+    pub fn group_label(&self) -> &'static str {
+        match self.sort_group() {
+            0 => "Forwarded on this computer",
+            1 => "Saved ports",
+            _ => "Detected ports",
+        }
     }
     pub fn is_saved(&self) -> bool {
         self.saved
@@ -424,14 +507,30 @@ impl ForwardRow {
         self.error.as_deref()
     }
 }
+#[cfg(any(test, feature = "ui-test-support"))]
 fn rewritten_url(request: &ForwardRequest, local: u16) -> Option<WebUrl> {
+    rewritten_url_at(
+        request,
+        local,
+        splitty_core::native_api::forwards::default_bind(),
+    )
+}
+fn rewritten_url_at(
+    request: &ForwardRequest,
+    local: u16,
+    bind: std::net::IpAddr,
+) -> Option<WebUrl> {
     let mut parsed = match &request.link {
         Some((_, url)) => url::Url::parse(url.as_str()).ok()?,
         None => url::Url::parse("http://localhost").ok()?,
     };
     parsed.set_username("").ok()?;
     parsed.set_password(None).ok()?;
-    parsed.set_host(Some("localhost")).ok()?;
+    parsed
+        .set_host(Some(&splitty_core::native_api::forwards::browser_host(
+            bind,
+        )))
+        .ok()?;
     parsed.set_port(Some(local)).ok()?;
     WebUrl::parse(parsed.as_str())
 }

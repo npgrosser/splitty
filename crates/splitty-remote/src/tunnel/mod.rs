@@ -6,8 +6,8 @@ mod reverse;
 mod supervisor;
 
 pub use forward::{
-    check_forward_address, reserve, reserve_exact, Forward, PortForward, PortTunnel,
-    PortTunnelError,
+    check_forward_address, parse_forwards, reserve, reserve_exact, reserve_free_at, Forward,
+    ForwardError, PortForward, PortTunnel, PortTunnelError,
 };
 pub use reverse::{
     parse_prepared, prepare_command, socket_path, ReverseTunnel, ReverseTunnelError, HEARTBEAT,
@@ -314,6 +314,7 @@ fn ssh_retryable(error: &SshError) -> bool {
 /// before spawning `ssh`, which is the shortest window achievable without socket
 /// hand-off; while a dropped tunnel is rebuilt, the supervisor holds one again.
 pub struct PortReservation {
+    bind: std::net::IpAddr,
     listener: Option<TcpListener>,
     port: u16,
 }
@@ -330,17 +331,36 @@ impl PortReservation {
     }
 
     fn bind(port: u16) -> io::Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", port))?;
+        Self::acquire_at(std::net::Ipv4Addr::LOCALHOST.into(), port)
+    }
+
+    pub fn acquire_at(bind: std::net::IpAddr, port: u16) -> io::Result<Self> {
+        let listener = TcpListener::bind((bind, port))?;
         let port = listener.local_addr()?.port();
         Ok(Self {
             listener: Some(listener),
+            bind,
             port,
         })
     }
 
     /// Recheck IPv6 while the IPv4 reservation stays held (including rebuilds).
     pub fn check_forward_address(&self) -> io::Result<()> {
-        forward::check_forward_address(self.port)
+        Self::check_bind(self.bind, self.port)
+    }
+
+    pub fn bind_address(&self) -> std::net::IpAddr {
+        self.bind
+    }
+    pub fn check_bind(bind: std::net::IpAddr, port: u16) -> io::Result<()> {
+        if bind.is_ipv4()
+            && (bind.is_unspecified()
+                || bind == std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+        {
+            forward::check_forward_address(port)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn port(&self) -> u16 {
@@ -361,7 +381,20 @@ impl PortReservation {
 
 const EXIT_GRACE: Duration = Duration::from_secs(2);
 
-async fn wait_for_forward(child: &mut Worker, local_port: u16) -> io::Result<()> {
+async fn wait_for_forward_at(
+    child: &mut Worker,
+    local_port: u16,
+    bind: std::net::IpAddr,
+) -> io::Result<()> {
+    let bind = if bind.is_unspecified() {
+        if bind.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        }
+    } else {
+        bind
+    };
     use tokio::net::TcpStream;
     use tokio::time::{sleep, timeout, Instant};
 
@@ -376,7 +409,7 @@ async fn wait_for_forward(child: &mut Worker, local_port: u16) -> io::Result<()>
             )));
         }
 
-        let connect = TcpStream::connect(("127.0.0.1", local_port));
+        let connect = TcpStream::connect((bind, local_port));
         if let Ok(Ok(_)) = timeout(Duration::from_millis(250), connect).await {
             // Re-check liveness: something else could be listening on that port.
             // With ExitOnForwardFailure set, a live ssh means the forward bound.
