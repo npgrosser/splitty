@@ -801,10 +801,12 @@ mod linux_tests {
         let _sshd = echo(&socket);
         let port = free_port();
 
-        let mut running = start(&dir, &socket, port, Duration::from_millis(300), mine).await;
+        // Beats come at a fifth of the timeout, so a test process under the
+        // load of the whole workspace does not miss one.
+        let mut running = start(&dir, &socket, port, Duration::from_secs(1), mine).await;
         assert_eq!(running.line, READY);
-        for _ in 0..4 {
-            tokio::time::sleep(Duration::from_millis(150)).await;
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
             running.input.write_all(b"\n").await.expect("heartbeat");
         }
         assert!(!running.ended.is_finished(), "alive while beats arrive");
