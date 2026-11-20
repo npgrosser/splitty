@@ -125,3 +125,7 @@ SCENES = [
     Scene("pointer", pointer, setup=pointer_setup),
     Scene("screens", screens, setup=screens_setup, drawer=True),
 ]
+
+from scenes_remote import SCENES as _REMOTE  # noqa: E402
+
+SCENES += _REMOTE

@@ -533,6 +533,10 @@ def main():
     parser.add_argument("--font-file", default="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                         help="a TrueType file for the key chips, with arrows")
     parser.add_argument("--keep", action="store_true", help="keep the scene's directory")
+    parser.add_argument("--sshd-root", default=os.environ.get("SPLITTY_DEMO_SSHD_ROOT"),
+                        help="an unpacked openssh-server for the remote scenes; sshd from PATH without")
+    parser.add_argument("--server", type=Path,
+                        help="the splitty server for the remote host; next to --app without")
     args = parser.parse_args()
     known = {scene.name: scene for scene in scenes.SCENES}
     unknown = [name for name in args.names if name not in known]
