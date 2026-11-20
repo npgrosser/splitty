@@ -1,0 +1,181 @@
+#!/usr/bin/python3
+"""A coding agent for the clips: it prints made-up steps of work and reports
+its state with the program status protocol (OSC 7501), as agents in Splitty
+terminals can.
+
+  agent <task>     works on one of the tasks below; it waits at a step until
+                   the file ~/.agent/<task>.<event> exists, so a scene decides
+                   when it asks or finishes
+"""
+import base64
+import random
+import shutil
+import sys
+import termios
+import time
+import tty
+from pathlib import Path
+
+SIGNALS = Path.home() / ".agent"
+rng = random.Random(sys.argv[-1])
+
+
+def status(state: str, msg: str | None = None, kind: str | None = None):
+    fields = [f"state={state}", "app=agent"]
+    if kind:
+        fields.append(f"kind={kind}")
+    if msg:
+        fields.append("msg=" + base64.b64encode(msg.encode()).decode())
+    sys.stdout.write("\033]7501;" + ":".join(fields) + "\a")
+    sys.stdout.flush()
+
+
+def fit(text: str) -> str:
+    """The line cut to the terminal's width, so a narrow pane does not wrap it."""
+    columns = shutil.get_terminal_size((100, 30)).columns
+    shown, out, index = 0, [], 0
+    while index < len(text) and shown < columns - 1:
+        if text[index] == "\033":
+            end = text.index("m", index) + 1
+            out.append(text[index:end])
+            index = end
+        else:
+            out.append(text[index])
+            shown += 1
+            index += 1
+    return "".join(out) + "\033[0m"
+
+
+def say(text: str, pause: float = 0.0):
+    print(fit(text), flush=True)
+    if pause:
+        time.sleep(pause)
+
+
+def step(verb: str, what: str, note: str = "", pause: float | None = None):
+    """One step of work: a verb, its object and a dim note."""
+    tail = f"  \033[2m{note}\033[0m" if note else ""
+    say(f"\033[36m●\033[0m \033[1m{verb}\033[0m {what}{tail}",
+        rng.uniform(0.35, 0.8) if pause is None else pause)
+
+
+def wait_for(event: str, task: str):
+    flag = SIGNALS / f"{task}.{event}"
+    while not flag.exists():
+        time.sleep(0.1)
+
+
+def key() -> str:
+    """One key from the terminal, without Enter."""
+    descriptor = sys.stdin.fileno()
+    saved = termios.tcgetattr(descriptor)
+    try:
+        tty.setcbreak(descriptor)
+        return sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
+
+
+def header(task: str, title: str):
+    # The terminal's title names the task, for the tab.
+    sys.stdout.write(f"\033]2;agent: {task}\a")
+    say(f"\033[1;35m◆ agent\033[0m \033[2m·\033[0m {title}")
+    say(f"\033[2m  task {task} · model local-2 · ~/project\033[0m\n")
+
+
+# The tasks of the agents. An agent works through its
+# steps, round again if the scene needs longer, until an event.
+TASKS = {
+    "search": ("add the search route", [
+        ("Read", "src/router.rs", "212 lines"), ("Read", "src/store.rs", "148 lines"),
+        ("Edit", "src/router.rs", "+31 −4"), ("Write", "src/index.rs", "+58"),
+        ("Run", "cargo check", "ok"), ("Edit", "src/index.rs", "+12 −3"),
+        ("Run", "cargo test search", "6 passed"), ("Edit", "src/store.rs", "+8 −1"),
+        ("Run", "cargo clippy", "ok"), ("Edit", "README.md", "+9")]),
+    "queue": ("retry failed jobs", [
+        ("Read", "src/queue.rs", "301 lines"), ("Search", "\"fn enqueue\"", "4 matches"),
+        ("Edit", "src/queue.rs", "+44 −12"), ("Write", "src/queue/backoff.rs", "+27"),
+        ("Run", "cargo check", "ok"), ("Edit", "src/config.rs", "+6"),
+        ("Edit", "src/queue.rs", "+9 −2"), ("Write", "tests/retry.rs", "+41")]),
+    "docs": ("document the API", [
+        ("Read", "src/router.rs", "212 lines"), ("Read", "src/handlers.rs", "187 lines"),
+        ("Write", "docs/api.md", "+120"), ("Run", "cargo doc", "ok"),
+        ("Edit", "docs/api.md", "+18 −4"), ("Edit", "README.md", "+14 −3")]),
+    "deps": ("update the dependencies", [
+        ("Run", "cargo update", "14 packages"), ("Run", "cargo build", "ok"),
+        ("Read", "CHANGELOG of tokio", "1.41"), ("Edit", "src/main.rs", "+2 −2"),
+        ("Run", "cargo test", "212 passed"), ("Edit", "Cargo.lock", "+212 −198")]),
+}
+AFTER_TESTS = [("Edit", "src/queue.rs", "+3 −1"), ("Edit", "docs/queue.md", "+12"),
+               ("Run", "cargo clippy", "ok"), ("Edit", "src/config.rs", "+2")]
+
+
+def happened(name: str, *events: str) -> bool:
+    return any((SIGNALS / f"{name}.{event}").exists() for event in events)
+
+
+def work(steps, name: str, *until: str):
+    """Steps, slowly, until one of the events."""
+    index = 0
+    while not happened(name, *until):
+        verb, what, note = steps[index % len(steps)]
+        step(verb, what, note, pause=0)
+        index += 1
+        # Waits in small pieces, so an event shows at once.
+        rest = time.monotonic() + rng.uniform(1.0, 2.0)
+        while time.monotonic() < rest and not happened(name, *until):
+            time.sleep(0.05)
+
+
+def task(name: str):
+    title, steps = TASKS[name]
+    header(name, title)
+    status("working", title[0].upper() + title[1:])
+    work(steps, name, "ask", "finish")
+    if happened(name, "ask"):
+        ask(name)
+        work(AFTER_TESTS, name, "finish")
+    finish(title)
+
+
+def ask(name: str):
+    command = "cargo test --workspace"
+    say("")
+    say(f"\033[33m?\033[0m \033[1mRun\033[0m {command}?")
+    sys.stdout.write(fit("  \033[1m[y]\033[0m yes   \033[1m[n]\033[0m no ") + " ")
+    sys.stdout.flush()
+    status("blocked", f"Allow {command}?", "permission")
+    while key().lower() not in ("y", "\n"):
+        pass
+    say("yes\n")
+    status("working", "Running the tests")
+    step("Run", command, "", pause=0.4)
+    for module in ("queue::retry", "queue::backoff", "store", "router", "handlers"):
+        say(f"  \033[2mtest\033[0m {module} \033[32mok\033[0m", rng.uniform(0.2, 0.4))
+    say(f"  \033[32m212 passed\033[0m", 0.5)
+
+
+def finish(title: str):
+    say("")
+    say(f"\033[32m✓\033[0m \033[1mDone:\033[0m {title}. \033[2m4 files changed.\033[0m")
+    # The window's notice says "Done" itself.
+    status("done", f"{title[0].upper() + title[1:]}, 4 files changed")
+    while True:
+        time.sleep(60)
+
+
+def main():
+    SIGNALS.mkdir(exist_ok=True)
+    name = sys.argv[1] if len(sys.argv) > 1 else "search"
+    try:
+        if name in TASKS:
+            task(name)
+        else:
+            sys.exit(f"agent: no task {name}; there are {', '.join(TASKS)}")
+    except KeyboardInterrupt:
+        status("clear")
+        print()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,81 @@
+#!/usr/bin/python3
+"""A development server for the clips: it listens on its port on loopback,
+answers GET with a little JSON and logs its requests among made-up ones."""
+import http.server
+import json
+import random
+import shutil
+import signal
+import sys
+import threading
+import time
+
+
+def fit(line: str) -> str:
+    """The line cut to the terminal's width, so a narrow pane does not wrap it."""
+    columns = shutil.get_terminal_size((100, 30)).columns
+    shown, out, index = 0, [], 0
+    while index < len(line) and shown < columns:
+        if line[index] == "\033":
+            end = line.index("m", index) + 1
+            out.append(line[index:end])
+            index = end
+        else:
+            out.append(line[index])
+            shown += 1
+            index += 1
+    return "".join(out) + "\033[0m"
+
+
+ROUTES = [("GET", "/api/items", 200), ("GET", "/api/items/{}", 200), ("POST", "/api/items", 201),
+          ("GET", "/api/users/{}", 200), ("PUT", "/api/items/{}", 200), ("GET", "/healthz", 200),
+          ("GET", "/api/search?q=router", 200), ("DELETE", "/api/items/{}", 204),
+          ("GET", "/api/items/{}", 404), ("GET", "/assets/app.js", 304)]
+COLORS = {"GET": "32", "POST": "33", "PUT": "34", "DELETE": "31"}
+
+ITEMS = [{"id": 1, "title": "Write the plan", "done": True},
+         {"id": 2, "title": "Sketch the search route", "done": True},
+         {"id": 3, "title": "Retry failed jobs", "done": False}]
+lock = threading.Lock()
+
+
+def log(method: str, status: int, millis: int, path: str, real: bool = False):
+    color = "32" if status < 300 else "36" if status < 400 else "31"
+    # A request that really came in stands out from the made-up traffic.
+    shown = f"\033[1;97m{path}\033[0m" if real else path
+    with lock:
+        print(fit(f"\033[2m{time.strftime('%H:%M:%S')}\033[0m \033[{COLORS[method]}m{method:6}\033[0m "
+                  f"\033[{color}m{status}\033[0m \033[2m{millis:3d} ms\033[0m  {shown}"), flush=True)
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        found = self.path.split("?")[0] in ("/api/items", "/api/items/")
+        body = json.dumps(ITEMS if found else {"error": "not found"}, separators=(",", ":")).encode() + b"\n"
+        self.send_response(200 if found else 404)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        log("GET", 200 if found else 404, 2, self.path, real=True)
+
+    def log_message(self, *args):
+        pass
+
+
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+port = sys.argv[1] if len(sys.argv) > 1 else "8080"
+try:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+except OSError:
+    # The port is taken: the log goes on all the same.
+    pass
+rng = random.Random(3)
+print(f"\033[1;36mdemo\033[0m v0.4.2 ready in 212 ms")
+print(f"  \033[32m➜\033[0m  Local:   \033[36mhttp://localhost:{port}/\033[0m\n", flush=True)
+while True:
+    time.sleep(rng.uniform(0.25, 1.1))
+    method, path, status = rng.choice(ROUTES)
+    path = path.format(rng.randint(1, 480))
+    log(method, status, rng.randint(1, 48), path)

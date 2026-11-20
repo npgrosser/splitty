@@ -204,6 +204,36 @@ on macOS `/Applications/Splitty.app` when it is that app (bundle identifier
 `~/.local/share/icons/hicolor/128x128/apps/splitty.png` (`~/.local/bin/splitty`
 goes with `make uninstall-no-gui`).
 
+## The README's clips
+
+The clips of the README are recorded from scripted scenes, so they can be made
+again after the interface changes:
+
+```sh
+python3 scripts/demo/record.py --app target/release/splitty-gpui --out build/clips
+```
+
+records every scene of `scripts/demo/scenes*.py` (or the scenes named on the
+command line) as an animated WebP and a GIF. Each scene starts the app in a
+private X server with a home, configuration and shell of its own (a copy of
+`scripts/demo/home/`, with stand-in programs for a server, a test run, a
+process monitor and a coding agent), sets its window up off camera and then
+plays keys, text and pointer movement. Nothing of the recording machine shows.
+
+It needs Xvfb, xdotool, libX11, libXtst, Pillow (`python3-pil`), Git and the
+DejaVu fonts, and release builds of `splitty-gpui` and `splitty-server` side by
+side. The scenes with a remote host (`remote`, `reconnect`, `ports`) also need
+`sshd`, `ssh`, `unshare`, `nsenter`, `ip`, `curl` and unprivileged user
+namespaces: they reach a host in a network namespace of its own
+(`scripts/demo/remote.py`); `--sshd-root` names an unpacked OpenSSH server
+where none is installed. Pointer positions in the scenes are pixels of the
+clip for the default theme at the scenes' zoom; after a change of the layout,
+`--keep` and a look at the frames show where they have to move.
+
+The clips live on the branch `media`, which holds nothing else, and the README
+names them by URL, so the history of `main` does not grow with every
+recording.
+
 ## Continuous integration
 
 [CI](../.github/workflows/ci.yml) and [CodeQL](../.github/workflows/codeql.yml)
