@@ -1,17 +1,18 @@
-"""A machine to reach as `ssh devbox`, for the scenes of remote screens.
+"""Machines to reach over SSH, such as `ssh devbox`, for the scenes of remote
+screens.
 
-The host is an OpenSSH server in an unprivileged user, mount, network and UTS
+Each host is an OpenSSH server in an unprivileged user, mount, network and UTS
 namespace of its own, as the SSH lab of the server's smoke tests builds it:
 
 - a holder process keeps the namespace: its own loopback (so the host's
-  daemon binds its ports apart from the app's), the host name `devbox`, and a
+  daemon binds its ports apart from the app's), the host's name, and a
   root of bind mounts with the system's trees and the lab directory;
 - `sshd -i`, one per connection, started in that namespace by the client's
   `ProxyCommand` through `nsenter`, with throwaway keys and a `ForceCommand`
   that gives the host a HOME of its own, `/home/demo` in its namespace;
 - a wrapper `ssh` first in the app's `PATH` that adds `-F ~/.ssh/config`
   (OpenSSH reads the account's home, not `HOME`), so the app runs the plain
-  `ssh` it always runs, and `~/.ssh/config` names `devbox` for the Hosts list;
+  `ssh` it always runs, and `~/.ssh/config` names the hosts for the Hosts list;
 - the host's HOME is a copy of the demo home (stand-in programs, project)
   with a prompt that names the host, and the app's `splitty` in its `PATH`.
 
@@ -34,7 +35,6 @@ import tempfile
 import time
 from pathlib import Path
 
-HOST = "devbox"
 # In the environment of the host's processes: which lab they belong to.
 MARK = "DEMO_HOST_LAB"
 
@@ -47,7 +47,7 @@ lab=$1
 package=$2
 rootfs="$lab/rootfs"
 ip link set lo up
-hostname devbox
+hostname "$3"
 python3 - "$rootfs" "$lab" "$package" <<'MOUNTS'
 import ctypes, os, sys
 rootfs, lab, package = sys.argv[1:]
@@ -117,7 +117,30 @@ class Host:
         shutil.rmtree(self.lab, ignore_errors=True)
 
 
-def start(root: Path, home: Path, environment: dict, args) -> Host:
+class Hosts:
+    """The hosts of a scene, stopped together."""
+
+    def __init__(self, hosts: list[Host]):
+        self.hosts = hosts
+
+    def stop(self):
+        for host in self.hosts:
+            host.stop()
+
+
+def start(root: Path, home: Path, environment: dict, args, names=("devbox",)) -> Hosts:
+    """Start a host per name; the demo home's SSH configuration names them."""
+    started = []
+    try:
+        for name in names:
+            started.append(start_one(root, home, environment, args, name))
+    except BaseException:
+        Hosts(started).stop()
+        raise
+    return Hosts(started)
+
+
+def start_one(root: Path, home: Path, environment: dict, args, name: str) -> Host:
     sshd_root = Path(getattr(args, "sshd_root", None) or os.environ.get("SPLITTY_DEMO_SSHD_ROOT")
                      or "/")
     if sshd_root == Path("/"):
@@ -144,7 +167,7 @@ def start(root: Path, home: Path, environment: dict, args) -> Host:
         host_home = lab / "home"
         shutil.copytree(home, host_home, symlinks=True)
         (host_home / ".bashrc").write_text(
-            "PS1='\\[\\e[1;32m\\]demo@devbox\\[\\e[0m\\] \\[\\e[1;34m\\]\\w\\[\\e[0m\\] \\$ '\n"
+            f"PS1='\\[\\e[1;32m\\]demo@{name}\\[\\e[0m\\] \\[\\e[1;34m\\]\\w\\[\\e[0m\\] \\$ '\n"
             "alias ls='ls --color=auto'\n"
             "export PATH=\"$HOME/bin:$PATH\"\n"
             "[ \"$PWD\" = \"$HOME\" ] && cd ~/project 2>/dev/null\n")
@@ -152,12 +175,15 @@ def start(root: Path, home: Path, environment: dict, args) -> Host:
 
         ssh_dir = home / ".ssh"
         ssh_dir.mkdir(mode=0o700, exist_ok=True)
+        # One key of the client for every host, one host key each.
         for key in (lab / "hostkey", ssh_dir / "id_ed25519"):
-            subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "demo", "-f",
-                            str(key)], check=True, stdout=subprocess.DEVNULL)
+            if not key.exists():
+                subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "demo",
+                                "-f", str(key)], check=True, stdout=subprocess.DEVNULL)
         shutil.copy(ssh_dir / "id_ed25519.pub", lab / "authorized_keys")
         host_key = " ".join((lab / "hostkey.pub").read_text().split()[:2])
-        (ssh_dir / "known_hosts").write_text(f"{HOST} {host_key}\n")
+        with open(ssh_dir / "known_hosts", "a") as known:
+            known.write(f"{name} {host_key}\n")
 
         executable(lab / "host-env.sh",
                    "#!/bin/sh\n"
@@ -190,22 +216,24 @@ def start(root: Path, home: Path, environment: dict, args) -> Host:
                    f"exec env LD_LIBRARY_PATH={':'.join(libraries)} nsenter --target "
                    f"\"$(cat {lab}/ns.pid)\" --user --net --uts --mount --root --wd "
                    f"--preserve-credentials {sshd} -i -f {lab}/sshd_config\n")
-        (ssh_dir / "config").write_text(
-            f"Host {HOST}\n  User {getpass.getuser()}\n"
-            f"  IdentityFile {ssh_dir}/id_ed25519\n  IdentitiesOnly yes\n"
-            f"  UserKnownHostsFile {ssh_dir}/known_hosts\n  StrictHostKeyChecking yes\n"
-            f"  ProxyCommand {lab}/proxy.sh\n  LogLevel ERROR\n")
+        with open(ssh_dir / "config", "a") as client:
+            client.write(
+                f"Host {name}\n  User {getpass.getuser()}\n"
+                f"  IdentityFile {ssh_dir}/id_ed25519\n  IdentitiesOnly yes\n"
+                f"  UserKnownHostsFile {ssh_dir}/known_hosts\n  StrictHostKeyChecking yes\n"
+                f"  ProxyCommand {lab}/proxy.sh\n  LogLevel ERROR\n")
         # OpenSSH reads ~/.ssh of the account, not of HOME: a wrapper first
         # in the app's PATH names the demo home's configuration.
         wrapper = root / "ssh-bin"
-        wrapper.mkdir()
-        executable(wrapper / "ssh",
-                   f"#!/bin/sh\nexec {shutil.which('ssh')} -F \"$HOME/.ssh/config\" \"$@\"\n")
-        environment["PATH"] = f"{wrapper}:{environment['PATH']}"
+        if not wrapper.exists():
+            wrapper.mkdir()
+            executable(wrapper / "ssh",
+                       f"#!/bin/sh\nexec {shutil.which('ssh')} -F \"$HOME/.ssh/config\" \"$@\"\n")
+            environment["PATH"] = f"{wrapper}:{environment['PATH']}"
 
         holder = subprocess.Popen(
             ["unshare", "--user", "--map-current-user", "--keep-caps", "--mount", "--net",
-             "--uts", "sh", "-c", HOLDER, "splitty-demo-host", str(lab), str(sshd_root)],
+             "--uts", "sh", "-c", HOLDER, "splitty-demo-host", str(lab), str(sshd_root), name],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         line = holder.stdout.readline().decode().strip()
         if line != "ready":
@@ -214,7 +242,7 @@ def start(root: Path, home: Path, environment: dict, args) -> Host:
         (lab / "ns.pid").write_text(str(holder.pid))
         # The host's daemon runs before the scene, as on a machine in use.
         started = subprocess.run(
-            [str(wrapper / "ssh"), "-o", "BatchMode=yes", HOST, "--", "splitty", "daemon", "start"],
+            [str(wrapper / "ssh"), "-o", "BatchMode=yes", name, "--", "splitty", "daemon", "start"],
             env=environment, capture_output=True, text=True, timeout=60)
         if started.returncode != 0:
             raise RuntimeError(f"the host does not answer: {started.stderr.strip()}")

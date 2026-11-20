@@ -21,8 +21,8 @@ class Scene:
     zoom: float = 1.25
     theme: str = "splitty-classic"
     size: tuple[int, int] | None = None
-    # Whether the scene needs a machine to reach over SSH.
-    host: bool = False
+    # The machines the scene reaches over SSH, by name.
+    hosts: tuple[str, ...] = ()
     # Whether the window shows the app's own title bar.
     decorated: bool = False
     # More of the app's `config.toml`, such as a `[notifications]` table.
@@ -90,41 +90,11 @@ def pointer(stage):
     stage.move(width * 0.5, height * 0.45)
 
 
-def screens_setup(stage):
-    """Four screens with work in them; the clip starts on the first."""
-    stage.run("serve")
-    stage.key("alt+d")
-    stage.run("logs")
-    rename(stage, "api")
-    stage.key("ctrl+shift+space")
-    stage.run("monitor")
-    rename(stage, "system")
-    stage.key("ctrl+shift+space")
-    stage.run("tests")
-    stage.key("alt+shift+d")
-    stage.run("git log --graph --oneline --all")
-    rename(stage, "review")
-    stage.key("alt+1")
-
-
 def rename(stage, name: str):
     stage.key("alt+shift+r", pause=0.6)
     stage.key("ctrl+a", label="", pause=0.15)
     stage.type(name, pause=0.25)
     stage.key("Return", label="", pause=0.7)
-
-
-def screens(stage):
-    stage.wait(0.6)
-    stage.key("ctrl+Tab", pause=1.3)
-    stage.key("ctrl+Tab", pause=1.3)
-    stage.key("alt+1", pause=1.1)
-    # The drawer lists every screen with what runs in it.
-    stage.click(70, 208, pause=1.2)
-    stage.key("ctrl+shift+space", pause=1.0)
-    stage.run("build", pause=1.2)
-    rename(stage, "release")
-    stage.wait(1.4)
 
 
 SETTINGS = (70, 768)
@@ -165,7 +135,6 @@ SCENES = [
     Scene("terminal", terminal),
     Scene("splits", splits),
     Scene("pointer", pointer, setup=pointer_setup),
-    Scene("screens", screens, setup=screens_setup, drawer=True),
     Scene("customize", customize, setup=customize_setup, drawer=True, decorated=True),
 ]
 

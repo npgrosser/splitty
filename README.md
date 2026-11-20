@@ -24,22 +24,13 @@ Every key can be changed: [Keyboard](docs/keyboard.md).
 
 ![Tabs dragged out of a group into splits, splits resized](https://github.com/npgrosser/splitty/raw/media/pointer.webp)
 
-## Multiple screens, each with its own layout
+## Multiple screens on local and remote machines
 
-![Named screens in the drawer, switched from the keyboard and the pointer](https://github.com/npgrosser/splitty/raw/media/screens.webp)
+![Named screens on this computer and a screen of an SSH host beside them](https://github.com/npgrosser/splitty/raw/media/screens.webp)
 
-## Remote hosts beside your local screens
-
-![A screen of an SSH host opened next to the local ones](https://github.com/npgrosser/splitty/raw/media/remote.webp)
-
-Splitty connects with your `ssh` and installs itself on the host:
-[Remote development](docs/remote.md).
-
-## Remote sessions survive a disconnect
-
-![A host is closed and opened again; its programs kept running](https://github.com/npgrosser/splitty/raw/media/reconnect.webp)
-
-Sessions on the host keep running without tmux or screen.
+Splitty connects with your `ssh` and installs itself on the host. Remote
+sessions keep running when you disconnect or close the app, without tmux or
+screen: [Remote development](docs/remote.md).
 
 ## Remote ports are detected and forwarded with a click
 

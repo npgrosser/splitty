@@ -24,11 +24,25 @@ PORT_8080 = (340, 411)
 MENU_AT = (700, 500)
 OPEN_FOLDER_IN = (790, 690)
 LOCAL_SCREEN = (80, 114)
+# Seconds the stand-in test run and build take, with a margin.
+FINISH = 4.0
+
+
+def connect(stage, host: str):
+    """Off camera: open a host from the Hosts list by its name and start a
+    screen on it."""
+    stage.click(*HOSTS)
+    stage.type(host)
+    stage.key("Return", label="")
+    # Connecting takes the host's time, not the stage's.
+    time.sleep(3)
+    stage.click(*NEW_SCREEN)
+    time.sleep(2)
 
 
 def overview_setup(stage):
-    """Two local screens and one on the host, all at work; the clip starts
-    on the first."""
+    """Two local screens and one on each of two hosts, all at work; the clip
+    starts on the first."""
     stage.run("monitor")
     stage.key("alt+d")
     stage.run("serve")
@@ -39,34 +53,37 @@ def overview_setup(stage):
     stage.run("git log --graph --oneline --all")
     stage.key("alt+d")
     stage.run("tests")
+    # A program that ends in a pane nobody looks at leaves an unread mark;
+    # these end while their pane has the focus.
+    time.sleep(FINISH)
     stage.key("alt+shift+d")
     stage.run("build")
+    time.sleep(FINISH)
     rename(stage, "review")
-    stage.click(*HOSTS)
-    stage.click(*DEVBOX)
-    # Connecting takes the host's time, not the stage's.
-    time.sleep(3)
-    stage.click(*NEW_SCREEN)
-    time.sleep(2)
+    connect(stage, "devbox")
     stage.run("serve")
     stage.key("alt+d")
     stage.run("monitor")
-    stage.key("alt+shift+d")
+    rename(stage, "backend")
+    connect(stage, "staging")
     stage.run("logs")
-    rename(stage, "staging")
+    stage.key("alt+d")
+    stage.run("serve 9000")
+    rename(stage, "deploy")
     time.sleep(1)
     stage.key("alt+1")
     stage.move(900, 620)
 
 
 def overview(stage):
-    """The whole window in a few seconds: local screens, a host's screen
-    beside them, splits and tabs."""
+    """The whole window in a few seconds: local screens and the screens of
+    two hosts beside them, in splits and tabs."""
     stage.wait(1.0)
-    stage.key("ctrl+Tab", pause=1.4)
-    stage.key("ctrl+Tab", pause=2.0)
-    stage.key("alt+m", pause=1.4)
-    stage.key("alt+m", pause=1.0)
+    stage.key("ctrl+Tab", pause=1.2)
+    stage.key("ctrl+Tab", pause=1.7)
+    stage.key("ctrl+Tab", pause=1.7)
+    stage.key("alt+m", pause=1.2)
+    stage.key("alt+m", pause=0.8)
     stage.key("ctrl+Tab", pause=1.0)
 
 
@@ -75,6 +92,8 @@ def local_setup(stage):
     stage.run("logs")
     stage.key("alt+d")
     stage.run("tests")
+    # Ended while it has the focus, the test run leaves no unread mark.
+    time.sleep(FINISH)
     rename(stage, "api")
     stage.key("ctrl+shift+space")
     stage.run("monitor")
@@ -82,17 +101,35 @@ def local_setup(stage):
     stage.key("alt+1")
 
 
-def remote(stage):
-    """A remote screen next to the local ones."""
+def screens_setup(stage):
+    """Two local screens at work; the clip starts on the first."""
+    stage.run("serve")
+    stage.key("alt+d")
+    stage.run("logs")
+    rename(stage, "api")
+    stage.key("ctrl+shift+space")
+    stage.run("monitor")
+    rename(stage, "system")
+    stage.key("alt+1")
+
+
+def screens(stage):
+    """Screens on this computer, a new one, and one on a host beside them."""
     stage.wait(0.8)
-    stage.click(*HOSTS, pause=0.8)
+    stage.key("ctrl+Tab", pause=1.2)
+    stage.key("alt+1", pause=1.0)
+    stage.key("ctrl+shift+space", pause=0.9)
+    stage.run("git log --graph --oneline --all", pause=0.8)
+    rename(stage, "review")
+    # A host's screens open beside the local ones.
+    stage.click(*HOSTS, pause=0.7)
     stage.click(*DEVBOX, pause=1.6)
     stage.click(*NEW_SCREEN, pause=1.2)
-    stage.run("monitor", pause=1.2)
+    stage.run("monitor", pause=1.0)
     stage.key("alt+d")
-    stage.run("serve", pause=1.6)
-    stage.key("alt+1", pause=1.4)
-    stage.click(*REMOTE_SCREEN, pause=1.8)
+    stage.run("serve", pause=1.4)
+    stage.key("ctrl+Tab", pause=1.3)
+    stage.key("ctrl+shift+Tab", pause=1.6)
 
 
 def reconnect_setup(stage):
@@ -155,8 +192,8 @@ def ports(stage):
 
 
 SCENES = [
-    Scene("overview", overview, setup=overview_setup, drawer=True, host=True),
-    Scene("remote", remote, setup=local_setup, drawer=True, host=True),
-    Scene("reconnect", reconnect, setup=reconnect_setup, drawer=True, host=True),
-    Scene("ports", ports, setup=ports_setup, drawer=True, host=True),
+    Scene("overview", overview, setup=overview_setup, drawer=True, hosts=("devbox", "staging")),
+    Scene("screens", screens, setup=screens_setup, drawer=True, hosts=("devbox",)),
+    Scene("reconnect", reconnect, setup=reconnect_setup, drawer=True, hosts=("devbox",)),
+    Scene("ports", ports, setup=ports_setup, drawer=True, hosts=("devbox",)),
 ]

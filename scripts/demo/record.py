@@ -522,10 +522,10 @@ def record(scene, args, out: Path, display: str):
             "DISPLAY": display, "GPUI_BACKEND": "x11", "XDG_RUNTIME_DIR": str(runtime),
             "SPLITTY_CONFIG_DIR": str(root / "config"), "LD_LIBRARY_PATH": library_path,
         }
-        if scene.host:
-            # A machine to reach over SSH, for the scenes of remote screens.
+        if scene.hosts:
+            # Machines to reach over SSH, for the scenes of remote screens.
             import remote
-            host = remote.start(root, home, environment, args)
+            host = remote.start(root, home, environment, args, scene.hosts)
         hands = Screen(display, size)
         if scene.decorated:
             hands.pretend_desktop()
