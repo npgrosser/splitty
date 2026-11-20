@@ -796,8 +796,13 @@ server, gets a generic `info` notice ("Activity in <process>") governed by
 plain text with window-supplied remote host attribution; bodies, arbitrary JSON
 and transport leases are never retained. The UI supplies the watched pane and
 reads source-qualified count, newest-title and severity projections. The GPUI
-window supplies actual focus and visibility observations, marks its displayed
-active pane read on return or activation, and projects count/title summaries and
+window supplies actual focus and visibility observations. A pane is in view
+while it is displayed on the shown Screen of the focused, visible window; after
+a second in view it is seen (`ViewWatch` in `workspace/unread.rs`), which marks
+its records read, and it starts over when it leaves the view, so a Screen passed
+on the way and a window in the background read nothing. The watched pane is the
+seen pane with the focus; a notice for a seen pane beside it stays unread until
+that pane is focused or seen anew. The window projects count/title summaries and
 severity dots in the Drawer. Pure read-state changes send no workspace command.
 
 Notification switches use an independent coalesced `home.get` job on the same

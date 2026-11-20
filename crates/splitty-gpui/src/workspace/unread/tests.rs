@@ -3,24 +3,39 @@ use crate::workspace::chrome::view_tests::with_view;
 use crate::workspace::{Command, Destination, Update, WorkerCommand, Workspace};
 use gpui_kit::{Entity, Modifiers, VisualTestContext, WindowVisibility};
 use serde_json::json;
-use splitty_client_core::workspace::{SourceId, SourceToken, WindowWorkspace};
+use splitty_client_core::workspace::{ScreenKey, SourceId, SourceToken, WindowWorkspace};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 fn model(owner: Uuid) -> WindowWorkspace {
+    model_with(owner, &[])
+}
+
+/// Two panes side by side, `p0` focused; `behind` are more tabs of the right
+/// group, behind `p1`.
+fn model_with(owner: Uuid, behind: &[&str]) -> WindowWorkspace {
     let mut model = WindowWorkspace::new(owner);
     model.ui_test_local_screen_fixture("Work").unwrap();
     let source = model.lifecycle_token();
+    let right: Vec<&str> = ["p1"].into_iter().chain(behind.iter().copied()).collect();
+    let mut panes = serde_json::Map::new();
+    let mut sessions = serde_json::Map::new();
+    for pane in ["p0"].into_iter().chain(right.iter().copied()) {
+        let session = format!("s-{pane}");
+        panes.insert(pane.into(), json!({"id":pane,"sessionId":session}));
+        sessions.insert(session.clone(), json!({"id":session,"status":"running"}));
+    }
     model.source_mut(source.source_id()).unwrap().apply_snapshot(owner, &json!({
         "type":"mux.screen_snapshot","screen":{
             "id":"work","revision":2,
             "root":{"type":"split","id":"split","axis":"horizontal","sizes":[0.5,0.5],"children":[
                 {"type":"slot","id":"left","paneIds":["p0"]},
-                {"type":"slot","id":"right","paneIds":["p1"]}
+                {"type":"slot","id":"right","paneIds":right,"activePaneId":"p1"}
             ]},
-            "panes":{"p0":{"id":"p0","sessionId":"s-p0"},"p1":{"id":"p1","sessionId":"s-p1"}},
-            "sessions":{"s-p0":{"id":"s-p0","status":"running"},"s-p1":{"id":"s-p1","status":"running"}}
+            "panes":panes,
+            "sessions":sessions
         }
     })).unwrap();
     model
@@ -105,8 +120,21 @@ fn redraw(window: &mut VisualTestContext) {
     window.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+/// Let time pass, as the panes in view count as seen only after a moment.
+fn pass(window: &mut VisualTestContext, millis: u64) {
+    window
+        .executor()
+        .advance_clock(Duration::from_millis(millis));
+    window.executor().run_until_parked();
+    redraw(window);
+}
+
+fn unread(window: &mut VisualTestContext, view: &Entity<Workspace>, screen: &ScreenKey) -> usize {
+    window.update(|_, cx| view.read(cx).notifications.unread_count(screen))
+}
+
 #[test]
-fn notification_badges_follow_watched_focus_and_deliberate_pane_activation() {
+fn notification_badges_follow_panes_in_view_and_deliberate_pane_activation() {
     let rt = Runtime::new().unwrap();
     with_view(|window, view| {
         let mut model = model(Uuid::new_v4());
@@ -145,10 +173,27 @@ fn notification_badges_follow_watched_focus_and_deliberate_pane_activation() {
             "incoming badges do not send workspace commands"
         );
 
+        // The focused window brings both panes into view. They count as seen
+        // only after a moment, and a pane that left the view starts over.
         window.update(|window, _| window.activate_window());
-        window.executor().run_until_parked();
-        redraw(window);
-        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 1));
+        pass(window, 600);
+        assert_eq!(unread(window, &view, &screen), 3);
+        window.deactivate_window();
+        pass(window, 1000);
+        assert_eq!(
+            unread(window, &view, &screen),
+            3,
+            "a window in the background reads nothing"
+        );
+        window.update(|window, _| window.activate_window());
+        pass(window, 600);
+        assert_eq!(unread(window, &view, &screen), 3);
+        pass(window, 400);
+        assert_eq!(
+            unread(window, &view, &screen),
+            0,
+            "the pane beside the focused one is seen too"
+        );
         assert!(
             commands.try_recv().is_err(),
             "focus return only changes local read state"
@@ -161,15 +206,27 @@ fn notification_badges_follow_watched_focus_and_deliberate_pane_activation() {
             &view,
             Some(event(&rt, owner, "Hidden", "s-p0", "info")),
         );
-        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 2));
+        pass(window, 1000);
+        assert_eq!(unread(window, &view, &screen), 1);
         window.simulate_visibility_change(WindowVisibility::Visible);
-        window.executor().run_until_parked();
+        pass(window, 1000);
+        assert_eq!(unread(window, &view, &screen), 0);
+
+        // Of the seen panes the focused one is watched: its notice is read as
+        // it arrives. One beside it stays until the user turns to that pane.
         deliver(
             window,
             &view,
             Some(event(&rt, owner, "Watched", "s-p0", "info")),
         );
-        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 1));
+        assert_eq!(unread(window, &view, &screen), 0);
+        deliver(
+            window,
+            &view,
+            Some(event(&rt, owner, "Beside", "s-p1", "info")),
+        );
+        pass(window, 1000);
+        assert_eq!(unread(window, &view, &screen), 1);
         assert!(
             commands.try_recv().is_err(),
             "visibility and watched arrival are local read observations"
@@ -201,6 +258,86 @@ fn notification_badges_follow_watched_focus_and_deliberate_pane_activation() {
             .focus_pane("p1");
         deliver(window, &view, Some(Update::Workspace(Box::new(model))));
         window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 0));
+    });
+}
+
+#[test]
+fn a_screen_passed_on_the_way_stays_unread_and_one_stayed_on_is_read() {
+    let rt = Runtime::new().unwrap();
+    with_view(|window, view| {
+        let mut model = model(Uuid::new_v4());
+        let local = model.lifecycle_token();
+        let work = model.local_source().screen_key("work");
+        let (host, _) = model.ui_test_remote_terminal_fixture("badge.test").unwrap();
+        model.select(local, &host).unwrap();
+        let _commands = setup(window, &view, model.clone());
+        window.update(|window, _| window.activate_window());
+        pass(window, 1000);
+        // Both panes of the other Screen report while the host's is shown.
+        for (id, session) in [("Left", "s-p0"), ("Right", "s-p1")] {
+            deliver(window, &view, Some(event(&rt, local, id, session, "info")));
+        }
+        let mut show = |window: &mut VisualTestContext, screen: &ScreenKey| {
+            model.select(local, screen).unwrap();
+            deliver(
+                window,
+                &view,
+                Some(Update::Workspace(Box::new(model.clone()))),
+            );
+        };
+
+        show(window, &work);
+        pass(window, 600);
+        show(window, &host);
+        pass(window, 1000);
+        assert_eq!(
+            unread(window, &view, &work),
+            2,
+            "a Screen passed on the way reads nothing"
+        );
+
+        show(window, &work);
+        pass(window, 600);
+        assert_eq!(unread(window, &view, &work), 2);
+        pass(window, 400);
+        assert_eq!(
+            unread(window, &view, &work),
+            0,
+            "both panes are seen, not only the focused one"
+        );
+    });
+}
+
+#[test]
+fn a_tab_behind_another_stays_unread_until_it_comes_into_view() {
+    let rt = Runtime::new().unwrap();
+    with_view(|window, view| {
+        let mut model = model_with(Uuid::new_v4(), &["p2"]);
+        let owner = model.lifecycle_token();
+        let screen = model.local_source().screen_key("work");
+        let _commands = setup(window, &view, model.clone());
+        for (id, session) in [("Shown", "s-p1"), ("Behind", "s-p2")] {
+            deliver(window, &view, Some(event(&rt, owner, id, session, "info")));
+        }
+        window.update(|window, _| window.activate_window());
+        pass(window, 1000);
+        window.update(|_, cx| {
+            assert_eq!(
+                view.read(cx).screen_unread_summary(&screen).as_deref(),
+                Some("1 unread: Behind"),
+                "only what the Screen displays is seen"
+            );
+        });
+
+        // The tab comes into view and is seen after its own moment.
+        model
+            .source_mut(owner.source_id())
+            .unwrap()
+            .select_tab("p2");
+        deliver(window, &view, Some(Update::Workspace(Box::new(model))));
+        assert_eq!(unread(window, &view, &screen), 1);
+        pass(window, 1000);
+        assert_eq!(unread(window, &view, &screen), 0);
     });
 }
 
@@ -568,7 +705,7 @@ fn has(window: &mut VisualTestContext, selector: String) -> bool {
 }
 
 #[test]
-fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
+fn program_status_marks_tabs_by_state_and_drops_a_seen_done() {
     let rt = Runtime::new().unwrap();
     with_view(|window, view| {
         let mut model = model(Uuid::new_v4());
@@ -685,10 +822,28 @@ fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
         assert_eq!(marks(window, "p1"), ["done"]);
         window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 0));
 
-        // An active window watches its focused pane only.
+        // In a focused window a pane's done is seen after a moment in view,
+        // whether or not the pane has the focus.
         window.update(|window, _| window.activate_window());
-        window.executor().run_until_parked();
-        redraw(window);
+        pass(window, 600);
+        assert_eq!(marks(window, "p1"), ["done"]);
+        pass(window, 400);
+        assert!(marks(window, "p1").is_empty(), "a seen done loses its mark");
+        assert!(
+            has(window, "tab-status-p1-rest".into()),
+            "a seen done shows as a program at rest"
+        );
+        // A newer done beside the focused pane shows until the user turns to
+        // that pane.
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            owner,
+            status_event("s-p1", "p1", "work", json!({"state":"done","updatedAt":7})),
+        );
+        pass(window, 1000);
         assert_eq!(marks(window, "p1"), ["done"]);
         model.source_mut(local).unwrap().focus_pane("p1");
         deliver(
@@ -699,10 +854,6 @@ fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
         assert!(
             marks(window, "p1").is_empty(),
             "a watched done loses its mark"
-        );
-        assert!(
-            has(window, "tab-status-p1-rest".into()),
-            "a seen done shows as a program at rest"
         );
         window.deactivate_window();
         window.executor().run_until_parked();
@@ -718,7 +869,7 @@ fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
             &view,
             &mut model,
             owner,
-            status_event("s-p1", "p1", "work", json!({"state":"error","updatedAt":7})),
+            status_event("s-p1", "p1", "work", json!({"state":"error","updatedAt":8})),
         );
         assert_eq!(marks(window, "p1"), ["error"], "a newer record shows again");
         while let Ok(command) = commands.try_recv() {

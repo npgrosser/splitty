@@ -1,4 +1,8 @@
 //! Window observations and Drawer presentation over the shared unread policy.
+//!
+//! What counts as seen is the window's to say: a pane is seen after it has
+//! stayed in view for a moment (`ViewWatch`), and the seen pane with the
+//! focus is the watched one, whose notices are read as they arrive.
 #[cfg(all(test, feature = "ui-test-support"))]
 mod tests;
 use super::*;
@@ -6,7 +10,79 @@ use splitty_client_core::{
     local_service::NotificationSettingsRead, notifications::Severity, Event,
 };
 
+/// How long a pane stays in view before what it holds counts as seen, so
+/// that passing through a Screen marks nothing read.
+const VIEW_DWELL: Duration = Duration::from_millis(1000);
+
+/// The panes in view and which of them the user has seen. A pane is seen
+/// once it has stayed in view for `VIEW_DWELL`; one that leaves the view
+/// starts over when it returns.
+#[derive(Debug, Default)]
+pub(super) struct ViewWatch {
+    /// Per pane the round it came into view in, `None` once it is seen.
+    panes: HashMap<PaneKey, Option<u64>>,
+    round: u64,
+}
+
+impl ViewWatch {
+    /// Take the panes in view now. Returns the round to settle after the
+    /// dwell when a pane came into view.
+    fn observe(&mut self, in_view: &[PaneKey]) -> Option<u64> {
+        self.panes.retain(|pane, _| in_view.contains(pane));
+        let came: Vec<_> = in_view
+            .iter()
+            .filter(|pane| !self.panes.contains_key(*pane))
+            .cloned()
+            .collect();
+        if came.is_empty() {
+            return None;
+        }
+        self.round += 1;
+        for pane in came {
+            self.panes.insert(pane, Some(self.round));
+        }
+        Some(self.round)
+    }
+
+    /// The panes that stayed in view since `round` or longer, seen from now.
+    fn settle(&mut self, round: u64) -> Vec<PaneKey> {
+        let mut seen = Vec::new();
+        for (pane, since) in &mut self.panes {
+            if since.is_some_and(|since| since <= round) {
+                *since = None;
+                seen.push(pane.clone());
+            }
+        }
+        seen
+    }
+
+    fn seen(&self, pane: &PaneKey) -> bool {
+        self.panes.get(pane) == Some(&None)
+    }
+}
+
 impl Workspace {
+    /// The panes the user can see: those displayed on the shown Screen while
+    /// the window is focused, visible and shows its Screens.
+    fn panes_in_view(&self) -> Vec<PaneKey> {
+        if !self.notification_window_active
+            || !self.notification_window_visible
+            || self.destination != Destination::Screens
+        {
+            return Vec::new();
+        }
+        let Some(source) = self.selected_model() else {
+            return Vec::new();
+        };
+        source
+            .displayed_panes()
+            .iter()
+            .map(|pane| source.pane_key(pane))
+            .filter(|key| self.panes.contains_key(key))
+            .collect()
+    }
+
+    /// The seen pane with the focus: what arrives for it is read at once.
     fn watched_notification_pane(&self) -> Option<PaneKey> {
         if !self.notification_window_active
             || !self.notification_window_visible
@@ -15,21 +91,38 @@ impl Workspace {
             return None;
         }
         let source = self.selected_model()?;
-        let pane = source.focused_pane()?;
-        if !source.is_displayed_pane(pane) {
-            return None;
-        }
-        let key = source.pane_key(pane);
-        self.panes.contains_key(&key).then_some(key)
+        let key = source.pane_key(source.focused_pane()?);
+        self.view_watch.seen(&key).then_some(key)
     }
 
     pub(super) fn refresh_notification_watch(&mut self, cx: &mut Context<Self>) {
+        let in_view = self.panes_in_view();
+        if let Some(round) = self.view_watch.observe(&in_view) {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(VIEW_DWELL).await;
+                let _ = this.update(cx, |this, cx| {
+                    let mut changed = false;
+                    for pane in this.view_watch.settle(round) {
+                        changed |= this.see_pane(&pane);
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         if let Some(pane) = self.watched_notification_pane() {
-            let read = self.notifications.mark_read(&pane);
-            if read | self.see_program_status(&pane) {
+            if self.see_pane(&pane) {
                 cx.notify();
             }
         }
+    }
+
+    /// Mark what a pane holds as read and its `done` or failed record as seen.
+    fn see_pane(&mut self, pane: &PaneKey) -> bool {
+        let read = self.notifications.mark_read(pane);
+        read | self.see_program_status(pane)
     }
 
     pub(super) fn apply_notification_settings(
@@ -234,5 +327,48 @@ pub(super) fn severity_label(severity: Severity) -> &'static str {
         Severity::Success => "success",
         Severity::Warning => "warning",
         Severity::Error => "error",
+    }
+}
+
+#[cfg(test)]
+mod view_watch_tests {
+    use super::ViewWatch;
+    use splitty_client_core::workspace::{PaneKey, WindowWorkspace};
+    use uuid::Uuid;
+
+    fn panes<const N: usize>(ids: [&str; N]) -> [PaneKey; N] {
+        let window = WindowWorkspace::new(Uuid::new_v4());
+        ids.map(|id| window.local_source().pane_key(id))
+    }
+
+    #[test]
+    fn a_pane_is_seen_after_its_own_dwell_and_starts_over_when_it_returns() {
+        let [a, b, c] = panes(["a", "b", "c"]);
+        let mut watch = ViewWatch::default();
+        let first = watch.observe(&[a.clone(), b.clone()]).unwrap();
+        assert!(!watch.seen(&a) && !watch.seen(&b));
+        assert_eq!(watch.observe(&[a.clone(), b.clone()]), None);
+
+        // `c` comes into view later and `b` leaves before its dwell ends.
+        let second = watch.observe(&[a.clone(), c.clone()]).unwrap();
+        assert_eq!(watch.settle(first), std::slice::from_ref(&a));
+        assert!(watch.seen(&a) && !watch.seen(&b) && !watch.seen(&c));
+        assert!(watch.settle(first).is_empty(), "a pane is seen once");
+
+        // `b` returns: the dwell of its first stay does not count.
+        let third = watch.observe(&[a.clone(), b.clone(), c.clone()]).unwrap();
+        assert_eq!(watch.settle(second), std::slice::from_ref(&c));
+        assert!(!watch.seen(&b));
+        assert_eq!(watch.settle(third), std::slice::from_ref(&b));
+
+        // Out of view nothing is seen, and a later dwell covers earlier ones.
+        assert_eq!(watch.observe(&[]), None);
+        assert!(!watch.seen(&a));
+        let fourth = watch.observe(std::slice::from_ref(&a)).unwrap();
+        let fifth = watch.observe(&[a.clone(), b.clone()]).unwrap();
+        let mut seen = watch.settle(fifth);
+        seen.sort_by(|x, y| x.pane_id().cmp(y.pane_id()));
+        assert_eq!(seen, [a, b]);
+        assert!(watch.settle(fourth).is_empty());
     }
 }

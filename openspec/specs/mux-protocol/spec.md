@@ -542,7 +542,7 @@ A session SHALL exit user-initiated when the server closed it while its program 
 - **THEN** its notice's title starts with `Unnamed Screen: `, not with `Screen 2: `
 
 ### Requirement: Notifications in the Window
-A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the focused pane of the shown screen, in a focused window) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back.
+A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the seen pane that has the focus, see Seen Panes) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back.
 
 #### Scenario: Own pane closed
 - **WHEN** the user closes a pane whose shell still runs
@@ -717,3 +717,26 @@ A supporting service SHALL announce `screen-placement-v1` in `mux.welcome.capabi
 #### Scenario: Invalid anchor representation
 - **WHEN** a recognized `move_screen` request supplies a non-string non-null insertion anchor
 - **THEN** it changes no workspace state and is not treated as an omitted anchor or end placement
+
+### Requirement: Seen Panes
+A pane is in view while it is displayed on the shown screen of a focused, visible window that shows its screens. A window SHALL count a pane as seen once it has stayed in view for one second, SHALL then mark the notifications it holds for that pane as read, and SHALL count it as unseen again when it leaves the view. A notification added later for a seen pane that is not the watched one SHALL stay unread until the pane gets the focus or is seen anew.
+
+#### Scenario: Screen with marks on two panes
+- **WHEN** the user switches to a screen that displays two panes with unread notifications and stays for a second
+- **THEN** the notifications of both panes are read, whichever of them has the focus
+
+#### Scenario: Screen passed on the way
+- **WHEN** the user switches to a screen whose panes hold unread notifications and on to another screen within a second
+- **THEN** those notifications stay unread
+
+#### Scenario: Tab behind another tab
+- **WHEN** a shown screen holds an unread notification for a tab that is not the selected one of its group, or for a pane hidden by a maximized one
+- **THEN** it stays unread until that pane is displayed for a second
+
+#### Scenario: Window in the background
+- **WHEN** a window that is not focused shows a screen whose panes hold unread notifications
+- **THEN** they stay unread, and are read a second after the window gets the focus
+
+#### Scenario: Notice beside the focused pane
+- **WHEN** a notice that is not suppressed arrives for a seen pane that does not have the focus
+- **THEN** the window adds it unread and shows its notice, and marks it read when that pane gets the focus

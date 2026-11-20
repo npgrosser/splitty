@@ -1272,6 +1272,7 @@ pub struct Workspace {
     notification_settings_error: Option<String>,
     notification_window_active: bool,
     notification_window_visible: bool,
+    view_watch: unread::ViewWatch,
     /// The window's visibility and focus, shared with the worker.
     presence: WindowPresenceCell,
     /// The latest PTY size of each session a route shows, by its connection.
@@ -1764,6 +1765,7 @@ impl Workspace {
                 notification_settings_error: None,
                 notification_window_active: window.is_window_active(),
                 notification_window_visible: window.is_visible(),
+                view_watch: unread::ViewWatch::default(),
                 presence,
                 pty_sizes: HashMap::new(),
                 _drawer_bounds_subscription: drawer_bounds_subscription,

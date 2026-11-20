@@ -291,8 +291,10 @@ notice takes the place of the title's icon (`title_mark`). The glyphs come from
 the terminal face the app carries. A Drawer Screen and a host group caption show
 a waiting pane, also for a host's Screens the window has not opened; the host's
 panel and the Hosts list word such a Screen as "Waiting". A done or failed mark
-goes once the pane is watched, the same rule as for unread notifications, and
-returns only for a newer record; what was seen is kept in memory per window.
+goes once the pane is seen (a second in view on the shown Screen of the focused
+window, or at once in the watched pane), the same rule as for unread
+notifications, and returns only for a newer record; what was seen is kept in
+memory per window.
 Reports the server marked `notify` carry the server's notice and become
 notifications under `notifications.programStatus` (a row in the notification
 settings); the server suppresses the finished-command notices of a session that

@@ -1,7 +1,7 @@
 //! Program status marks over the records each connection reports: a pane's
 //! tab and its row in the Drawer show its program's state before the title, a
-//! Screen and a host group show that a pane in them waits for the user. A `done` or failed mark goes once the pane is
-//! watched, as an unread notification does.
+//! Screen and a host group show that a pane in them waits for the user. A `done`
+//! or failed mark goes once the pane is seen, as an unread notification does.
 use super::*;
 use gpui_kit::{pulsating_between, Animation, AnimationExt};
 use splitty_client_core::{
@@ -146,7 +146,7 @@ impl Workspace {
             .is_some_and(|source| source.blocked_screens().contains(screen))
     }
 
-    /// The watched pane's `done` or failed record counts as seen.
+    /// A seen pane's `done` or failed record counts as seen.
     pub(super) fn see_program_status(&mut self, pane: &PaneKey) -> bool {
         let Some(source) = self
             .model

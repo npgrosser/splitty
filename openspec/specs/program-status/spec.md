@@ -195,15 +195,19 @@ The server SHALL mark an event for a session's root record `notify` when the rec
 - **THEN** the event for it is not marked `notify`
 
 ### Requirement: Status in the Window
-A native window SHALL keep the root records each connection reports, scoped to that connection, and SHALL show on a pane's tab and on the pane's row in the drawer whether its program works, is blocked (with the kind), is done or failed. For an idle record both places SHALL show that the pane holds a program that reports its status, unless the pane's title starts with an icon of its own, which then stays. A screen and a host group SHALL show that a pane in them is blocked, also for a host's screens the window has not opened. A `done` or `error` mark SHALL go once the user has seen the pane and return only for a newer record; the pane then shows as an idle one does. A host that is not connected or does not announce `program-status-v1` shows no status.
+A native window SHALL keep the root records each connection reports, scoped to that connection, and SHALL show on a pane's tab and on the pane's row in the drawer whether its program works, is blocked (with the kind), is done or failed. For an idle record both places SHALL show that the pane holds a program that reports its status, unless the pane's title starts with an icon of its own, which then stays. A screen and a host group SHALL show that a pane in them is blocked, also for a host's screens the window has not opened. A `done` or `error` mark SHALL go once the pane is seen (see `mux-protocol`, Seen Panes), at once in the pane the user watches, and return only for a newer record; the pane then shows as an idle one does. A host that is not connected or does not announce `program-status-v1` shows no status.
 
 #### Scenario: Blocked pane on a screen not opened
 - **WHEN** a window is connected to a host, has not opened one of its screens, and a pane on that screen becomes `blocked`
 - **THEN** the host group in the drawer shows that a pane is blocked, and the host's list of screens marks that screen
 
 #### Scenario: Done seen
-- **WHEN** a pane on another screen shows `done` and the user switches to that screen, where that pane has the focus
-- **THEN** the mark goes and does not return when the connection is replaced and reports the same record again
+- **WHEN** a pane on another screen shows `done` and the user switches to that screen, which displays the pane, and stays for a second
+- **THEN** the mark goes, whether or not that pane has the focus, and does not return when the connection is replaced and reports the same record again
+
+#### Scenario: Done beside the focused pane
+- **WHEN** a seen pane that does not have the focus reports `done`
+- **THEN** its mark shows until the pane gets the focus or is seen anew
 
 #### Scenario: The same session id on two connections
 - **WHEN** a host and the local server each report a record for a session with the same id
