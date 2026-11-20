@@ -45,6 +45,14 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **RTS-10:** the Tauri Make targets go without aliases, `uninstall-tauri` included; `docs/development.md` names the files an earlier `make install-tauri` left. Alternative: keep `uninstall-tauri` for a release or two.
   - **RTS-11:** entries of this file that concern only the Tauri shell are removed, as RES-3 did for Electron; `docs/security/findings.md` keeps its entries with a dated note; `deny.toml` keeps `unmaintained = "workspace"` with a comment without Tauri. Alternative: keep the entries marked as moot, or check unmaintained crates for all dependencies.
   - **RTS-12:** CI keeps building the frontend in the macOS job and in `server-payloads.yml` while the server embeds it; `remove-browser-access` removes those steps. Alternative: an empty `frontend/dist` as the release's version-skew job uses.
+- **`native-key-bindings` NKB-1 to NKB-7** (2026-11-20, provisional, tbd; recorded in the change's design, behavior in the `key-bindings` spec):
+  - **NKB-1:** key bindings are a local file of the application (`keybindings.json` in its configuration directory), not a server setting. Alternative: a settings section stored by the local service and shared by its clients.
+  - **NKB-2:** one chord per binding, no key sequences. Alternative: a prefix key followed by a second key.
+  - **NKB-3:** a user binding replaces a command's defaults and takes a chord away from the command that has it by default. Alternative: refuse a chord in use until the other command is rebound.
+  - **NKB-4:** resizing and moving a pane by keyboard happen in an arrange mode (one key, then arrows). Alternative: direct chords with a third modifier, which collide with desktop keys.
+  - **NKB-5:** history scrolling takes Shift with PageUp, PageDown, Home and End only on the terminal's normal screen. Alternative: always, or leave them to the terminal.
+  - **NKB-6:** Mod+Shift+1 to 9 stays as a second default for Screens on Linux and Windows beside Mod+1 to 9. Alternative: remove it.
+  - **NKB-7:** chords that are plain typing cannot be bound; chords terminal programs commonly use can, with a note. Alternative: refuse both, or allow both.
 - **`expressive-native-themes` ENT-1 to ENT-8** (2026-11-20, provisional, tbd; recorded in the change's design, behavior in the `settings` spec):
   - **ENT-1:** a theme's title-bar colors follow `titleBarStyle: theme`, its title-bar shape (height, alignment, weight, window buttons, frame corner) follows `windowDecoration: splitty`; NWC-1 stays. Alternative: a theme that names a title-bar shape shows it under system decoration too.
   - **ENT-2:** the theme's radius bounds every control corner, so the square bundled themes are square throughout. Alternative: keep fixed control radii and let a theme opt in.
