@@ -19,7 +19,7 @@ class Scene:
     setup: Callable | None = None
     drawer: bool = False
     zoom: float = 1.25
-    theme: str = "splitty-dark"
+    theme: str = "splitty-classic"
     size: tuple[int, int] | None = None
     # Whether the scene needs a machine to reach over SSH.
     host: bool = False
@@ -69,18 +69,20 @@ def pointer_setup(stage):
 def pointer(stage):
     """Five tabs become a layout by dragging them out of their group."""
     width, height = stage.hands.size
-    bar = 20
+    # The tab bar's height, and where the five tabs of the setup are.
+    bar = 17
+    monitor, serve, logs, tests, graph = 55, 175, 285, 440, 650
     stage.wait(0.4)
     quick = dict(pause=0.35, pace=0.95)
     # The last tab takes the right half, two more the lower halves.
-    stage.drag((560, bar), (width - 110, height * 0.5), **quick)
-    stage.drag((258, bar), (width * 0.25, height - 70), **quick)
-    stage.drag((158, bar), (width * 0.75, height - 70), **quick)
+    stage.drag((graph, bar), (width - 110, height * 0.5), **quick)
+    stage.drag((logs, bar), (width * 0.25, height - 70), **quick)
+    stage.drag((serve, bar), (width * 0.75, height - 70), **quick)
     # The splits take the sizes their content needs.
     stage.drag((width * 0.5, height * 0.3), (width * 0.56, height * 0.33), pause=0.3, pace=0.9)
     stage.drag((width * 0.2, height * 0.5), (width * 0.21, height * 0.62), pause=0.3, pace=0.9)
     # A tab moves over to another group, beside the tab that is there.
-    stage.drag((150, bar), (width * 0.56 + 120, bar), **quick)
+    stage.drag((monitor + 180, bar), (width * 0.56 + 160, bar), **quick)
     stage.move(width * 0.5, height * 0.45)
 
 
@@ -114,11 +116,44 @@ def screens(stage):
     stage.key("ctrl+Tab", pause=1.3)
     stage.key("alt+1", pause=1.1)
     # The drawer lists every screen with what runs in it.
-    stage.click(70, 232, pause=1.2)
+    stage.click(70, 208, pause=1.2)
     stage.key("ctrl+shift+space", pause=1.0)
     stage.run("build", pause=1.2)
     rename(stage, "release")
     stage.wait(1.4)
+
+
+def overview_setup(stage):
+    """Three screens at work; the clip starts on the first."""
+    stage.run("monitor")
+    stage.key("alt+d")
+    stage.run("serve")
+    stage.key("alt+shift+d")
+    stage.run("logs")
+    rename(stage, "api")
+    stage.key("ctrl+shift+space")
+    stage.run("git log --graph --oneline --all")
+    stage.key("alt+d")
+    stage.run("tests")
+    stage.key("alt+shift+d")
+    stage.run("build")
+    rename(stage, "review")
+    stage.key("ctrl+shift+space")
+    stage.run("logs")
+    stage.key("alt+d")
+    stage.run("monitor")
+    rename(stage, "ops")
+    stage.key("alt+1")
+
+
+def overview(stage):
+    """The whole window in a few seconds: screens, splits and tabs."""
+    stage.wait(1.0)
+    stage.key("ctrl+Tab", pause=1.5)
+    stage.key("ctrl+Tab", pause=1.5)
+    stage.key("ctrl+Tab", pause=1.2)
+    stage.key("alt+m", pause=1.3)
+    stage.key("alt+m", pause=0.8)
 
 
 SETTINGS = (70, 768)
@@ -132,7 +167,7 @@ def customize_setup(stage):
     stage.run("tests")
 
 
-THEME_SELECT = (437, 379)
+THEME_SELECT = (430, 537)
 
 
 def customize(stage):
@@ -153,6 +188,7 @@ def customize(stage):
 
 
 SCENES = [
+    Scene("overview", overview, setup=overview_setup, drawer=True),
     Scene("terminal", terminal),
     Scene("splits", splits),
     Scene("pointer", pointer, setup=pointer_setup),
