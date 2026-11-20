@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn test_bundled_dark_parses() {
         let theme = splitty_dark();
-        assert_eq!(theme.name, "Splitty Dark");
+        assert_eq!(theme.name, "Splitty Modern");
         assert_eq!(theme.palette.gray_900, "#0f0f0f");
         assert_eq!(theme.palette.accent, "#63a0ff");
     }
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn test_bundled_light_parses() {
         let theme = splitty_light();
-        assert_eq!(theme.name, "Splitty Light");
+        assert_eq!(theme.name, "Splitty Modern Light");
         assert_eq!(theme.palette.gray_0, "#f0f0f0");
     }
 

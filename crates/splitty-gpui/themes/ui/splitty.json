@@ -3,9 +3,10 @@
   "author": "Splitty",
   "themes": [
     {
-      "name": "Splitty Dark",
+      "name": "Splitty Modern",
       "mode": "dark",
       "splitty": {
+        "id": "splitty-dark",
         "surface": "#0f0f0f",
         "raised": "#1a1a1a",
         "overlay": "#1e1e1e",
@@ -161,9 +162,10 @@
       }
     },
     {
-      "name": "Splitty Light",
+      "name": "Splitty Modern Light",
       "mode": "light",
       "splitty": {
+        "id": "splitty-light",
         "surface": "#f0f0f0",
         "raised": "#e6e6e6",
         "overlay": "#d4d4d4",
@@ -1295,9 +1297,10 @@
       }
     },
     {
-      "name": "Splitty Light Gray",
+      "name": "Splitty Modern Light Gray",
       "mode": "light",
       "splitty": {
+        "id": "splitty-light-gray",
         "surface": "#e4e4e4",
         "raised": "#dadada",
         "overlay": "#cacaca",

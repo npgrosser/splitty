@@ -1,16 +1,20 @@
 //! Terminal palettes in Ghostty's theme file format: `key = value` lines with
 //! `palette = N=#rrggbb`, `background`, `foreground`, `cursor-color`,
 //! `selection-background` and `selection-foreground`. Other keys of a Ghostty
-//! configuration are ignored.
+//! configuration are ignored. A comment line `# name: …` gives the palette a
+//! display name other than its file's.
 use crate::terminal::TerminalColors;
 
 /// A file larger than this is not a palette.
 pub const MAX_PALETTE_BYTES: usize = 16 * 1024;
+/// A display name longer than this is not taken.
+const MAX_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TerminalPalette {
     pub id: String,
-    /// The file name, which is how the format names a palette.
+    /// The file name, which is how the format names a palette, or the name
+    /// its `# name:` comment gives it.
     pub name: String,
     pub colors: TerminalColors,
     pub selection_background: Option<u32>,
@@ -28,9 +32,21 @@ impl TerminalPalette {
         let mut colors = TerminalColors::default();
         let (mut background, mut foreground, mut cursor) = (None, None, None);
         let (mut selection_background, mut selection_foreground) = (None, None);
+        let mut shown = None;
         for line in text.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
+            if let Some(comment) = line.strip_prefix('#') {
+                // The identifier stays the file's, so settings keep finding
+                // a palette whose display name changed.
+                if let Some(value) = comment.trim_start().strip_prefix("name:") {
+                    let value = value.trim();
+                    if !value.is_empty() && value.len() <= MAX_NAME_BYTES {
+                        shown = Some(value);
+                    }
+                }
+                continue;
+            }
+            if line.is_empty() {
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
@@ -65,7 +81,7 @@ impl TerminalPalette {
         colors.cursor = cursor.unwrap_or(colors.foreground);
         Some(Self {
             id: slug(name),
-            name: name.to_owned(),
+            name: shown.unwrap_or(name).to_owned(),
             colors,
             selection_background,
             selection_foreground,
@@ -145,6 +161,28 @@ mod tests {
             TerminalPalette::parse("Day", "background = #ffffff\nforeground = #000000\n").unwrap();
         assert_eq!(palette.colors.cursor, 0x000000);
         assert!(!palette.is_dark());
+    }
+
+    /// settings, Native Theme Catalog: a display name beside the identifier.
+    #[test]
+    fn a_name_comment_renames_a_palette_and_keeps_its_identifier() {
+        let text = "# name: Splitty Modern\nbackground = #0f0f0f\nforeground = #c8c8c8\n";
+        let palette = TerminalPalette::parse("Splitty Dark", text).unwrap();
+        assert_eq!(
+            (palette.id.as_str(), palette.name.as_str()),
+            ("splitty-dark", "Splitty Modern")
+        );
+        // Other comments, an empty name and an overlong one leave the file's.
+        let long = format!(
+            "# name: {}\nbackground = #000000\nforeground = #ffffff\n",
+            "x".repeat(65)
+        );
+        for text in [
+            "# named: no\n# name:\nbackground = #000000\nforeground = #ffffff\n",
+            &long,
+        ] {
+            assert_eq!(TerminalPalette::parse("Mine", text).unwrap().name, "Mine");
+        }
     }
 
     #[test]

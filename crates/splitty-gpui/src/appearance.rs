@@ -1295,7 +1295,7 @@ mod tests {
         assert_eq!(shown.scheme, ColorScheme::Light);
         assert_eq!(
             shown.surface,
-            resolve(&selection("splitty-light"), &catalog).surface
+            resolve(&selection("splitty-classic-light"), &catalog).surface
         );
         assert!(shown.notice.unwrap().contains("no-such-theme"));
     }
