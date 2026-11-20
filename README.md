@@ -21,17 +21,17 @@ rpm, tar.gz). The notes for each system are in [Install](docs/install.md).
 A native app written in Rust and drawn on the GPU, without a browser engine.
 Terminal emulation is [libghostty-vt](https://ghostty.org), Ghostty's library.
 
-## Splits and tabs from the keyboard
+## Full keyboard control over splits and tabs
 
 ![Splits and tabs opened with keys, a pane maximized and restored](https://github.com/npgrosser/splitty/raw/media/splits.webp)
 
 Every key can be changed: [Keyboard](docs/keyboard.md).
 
-## Drag tabs into a layout
+## Or arrange them with the mouse
 
 ![Tabs dragged out of a group into splits, splits resized](https://github.com/npgrosser/splitty/raw/media/pointer.webp)
 
-## A screen per task
+## Multiple screens, each with its own layout
 
 ![Named screens in the drawer, switched from the keyboard and the pointer](https://github.com/npgrosser/splitty/raw/media/screens.webp)
 
@@ -42,27 +42,18 @@ Every key can be changed: [Keyboard](docs/keyboard.md).
 Splitty connects with your `ssh` and installs itself on the host:
 [Remote development](docs/remote.md).
 
-## Disconnect, and the host keeps working
+## Remote sessions survive a disconnect
 
 ![A host is closed and opened again; its programs kept running](https://github.com/npgrosser/splitty/raw/media/reconnect.webp)
 
-## Forward a remote port with a click
+Sessions on the host keep running without tmux or screen.
+
+## Remote ports are detected and forwarded with a click
 
 ![A port a program opened on the host is forwarded and reached locally](https://github.com/npgrosser/splitty/raw/media/ports.webp)
 
 A remote terminal's folder also opens in VS Code or Zed on your computer:
 [Files and editors](docs/files-and-editors.md).
-
-## See which agent needs you
-
-![Marks on tabs and screens show which agent works, waits or is done](https://github.com/npgrosser/splitty/raw/media/agents.webp)
-
-A program reports its status with an escape sequence; each terminal has a
-scratchpad for the next prompt. To let a coding agent open tabs and splits
-itself, add to your `CLAUDE.md` or `AGENTS.md`:
-
-> Use Splitty to run commands and launch other agents in tabs and splits;
-> first read `splitty agent guide`.
 
 ## Themes and keys
 
