@@ -1034,7 +1034,7 @@ impl Workspace {
         let colors = &self.appearance;
         let in_transfer = menu.keyboard_in_transfer();
         let in_editor = menu.keyboard_in_editor();
-        let mut panel = menu_style::panel(colors)
+        let mut panel = menu_style::scrolling_panel(colors)
             .id("terminal-context-menu")
             .when(cfg!(all(test, feature = "ui-test-support")), |panel| {
                 panel.debug_selector(|| "terminal-context-menu".into())
@@ -1137,11 +1137,11 @@ impl Workspace {
         let panel = menu_style::placed(
             menu_style::Placement::Pointer(menu.position),
             Some(menu.panel_bounds.clone()),
-            panel,
+            menu_style::framed(colors, panel),
         );
 
         let transfer_submenu = menu.transfer.as_ref().map(|transfer| {
-            let mut sub = menu_style::submenu_panel(colors)
+            let mut sub = menu_style::scrolling_panel(colors)
                 .id("terminal-context-move-menu")
                 .when(cfg!(all(test, feature = "ui-test-support")), |sub| {
                     sub.debug_selector(|| "terminal-context-move-menu".into())
@@ -1196,7 +1196,7 @@ impl Workspace {
                     row: menu.move_row_bounds.clone(),
                 },
                 None,
-                sub,
+                menu_style::framed(colors, sub),
             )
         });
 

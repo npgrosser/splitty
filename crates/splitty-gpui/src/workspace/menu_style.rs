@@ -33,15 +33,14 @@ const META_GAP: f32 = 6.;
 const SUBMENU_GAP: f32 = 4.;
 const VIEWPORT_MARGIN: f32 = 8.;
 
-pub(super) fn panel(appearance: &NativeAppearance) -> Div {
+/// A panel's surface without its edge.
+fn surface(appearance: &NativeAppearance) -> Div {
     div()
         .flex()
         .flex_col()
         .p(chrome_rems(PANEL_PADDING))
         .min_w(chrome_rems(PANEL_MIN_WIDTH))
         .bg(rgb(appearance.overlay))
-        .border_1()
-        .border_color(rgb(appearance.border))
         .rounded(chrome_rems(appearance.radius))
         .shadow(vec![BoxShadow {
             color: rgba(appearance.shadow).into(),
@@ -53,6 +52,38 @@ pub(super) fn panel(appearance: &NativeAppearance) -> Div {
         .text_color(rgb(appearance.text))
         .text_size(chrome_rems(ITEM_TEXT))
         .font_weight(FontWeight::MEDIUM)
+}
+
+pub(super) fn panel(appearance: &NativeAppearance) -> Div {
+    surface(appearance).edged(appearance, Relief::Frame)
+}
+
+/// A panel that scrolls its rows itself. A bevel would scroll away with
+/// them, so a bevel theme leaves it to `framed`; a flat theme draws the
+/// border on the panel as `panel` does.
+pub(super) fn scrolling_panel(appearance: &NativeAppearance) -> Div {
+    if appearance.bevel.is_some() {
+        surface(appearance)
+    } else {
+        panel(appearance)
+    }
+}
+
+/// `scrolling` in the frame a bevel theme draws around it; a flat theme's
+/// panel already has its border.
+pub(super) fn framed(appearance: &NativeAppearance, scrolling: impl IntoElement) -> AnyElement {
+    if appearance.bevel.is_some() {
+        div()
+            .flex()
+            .flex_col()
+            .bg(rgb(appearance.overlay))
+            .rounded(chrome_rems(appearance.radius))
+            .edged(appearance, Relief::Frame)
+            .child(scrolling)
+            .into_any_element()
+    } else {
+        scrolling.into_any_element()
+    }
 }
 
 /// The group every row forms, so its secondary text follows the pointer's
@@ -152,14 +183,16 @@ pub(super) fn disabled_item(appearance: &NativeAppearance) -> Div {
         .opacity(0.4)
 }
 
+/// A line between groups of rows; a groove in a bevel theme.
 pub(super) fn separator(appearance: &NativeAppearance) -> Div {
-    div()
+    let line = div()
         .flex_none()
         .mt(chrome_rems(SEPARATOR_ABOVE))
         .mb(chrome_rems(SEPARATOR_BELOW))
-        .mx(chrome_rems(SEPARATOR_INSET))
-        .h(px(1.))
-        .bg(rgb(appearance.subtle_border))
+        .mx(chrome_rems(SEPARATOR_INSET));
+    line.edged_or(appearance, Relief::Etched, Sides::TOP, |line| {
+        line.h(px(1.)).bg(rgb(appearance.subtle_border))
+    })
 }
 
 /// Muted secondary text under or beside a label, of a row the keyboard

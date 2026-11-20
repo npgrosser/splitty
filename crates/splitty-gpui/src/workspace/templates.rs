@@ -1168,8 +1168,7 @@ impl Workspace {
                     .gap_2()
                     .px_4()
                     .py_3()
-                    .border_b_1()
-                    .border_color(rgb(colors.subtle_border))
+                    .edged_sides(colors, Relief::Etched, Sides::BOTTOM, colors.subtle_border)
                     .child(
                         div()
                             .text_size(chrome_rems(12.5))
@@ -1259,8 +1258,7 @@ impl Workspace {
                     .size_full()
                     .min_w_0()
                     .min_h_0()
-                    .border_1()
-                    .border_color(rgb(self.appearance.border))
+                    .edged(&self.appearance, Relief::Etched)
                     .child(header)
                     .child(
                         div()
@@ -1397,7 +1395,7 @@ impl Workspace {
 }
 
 /// A button of the template panel; the primary one carries the accent.
-fn action_style<E: Styled + StatefulInteractiveElement>(
+fn action_style<E: Styled + ParentElement + StatefulInteractiveElement>(
     button: E,
     colors: &NativeAppearance,
     primary: bool,
@@ -1411,12 +1409,16 @@ fn action_style<E: Styled + StatefulInteractiveElement>(
         .items_center()
         .justify_center()
         .rounded(chrome_rems(colors.corner(5.)))
-        .border_1()
-        .border_color(rgb(if primary {
-            colors.accent
-        } else {
-            colors.subtle_border
-        }))
+        .edged_sides(
+            colors,
+            Relief::Raised,
+            Sides::ALL,
+            if primary {
+                colors.accent
+            } else {
+                colors.subtle_border
+            },
+        )
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(if primary {
             colors.accent
@@ -1469,16 +1471,15 @@ fn quiet_style<E: Styled + StatefulInteractiveElement>(button: E, colors: &Nativ
 }
 
 /// The frame of a text field.
-fn field_box<E: Styled>(field: E, colors: &NativeAppearance) -> E {
+fn field_box<E: Styled + ParentElement>(field: E, colors: &NativeAppearance) -> E {
     field
         .h(chrome_rems(30.))
         .px(chrome_rems(4.))
         .flex()
         .items_center()
         .rounded(chrome_rems(colors.corner(5.)))
-        .border_1()
-        .border_color(rgb(colors.subtle_border))
-        .bg(rgb(colors.surface))
+        .edged_sides(colors, Relief::Sunken, Sides::ALL, colors.subtle_border)
+        .bg(rgb(colors.field.unwrap_or(colors.surface)))
 }
 
 fn field_label(colors: &NativeAppearance, text: &'static str) -> Div {

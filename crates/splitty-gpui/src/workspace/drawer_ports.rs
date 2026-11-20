@@ -299,8 +299,12 @@ impl Workspace {
             .mx(chrome_rems(super::drawer::CARD_INSET))
             .mt(chrome_rems(HOST_MARGIN_TOP))
             .pt(chrome_rems(HOST_CAPTION_PADDING_TOP))
-            .border_t_1()
-            .border_color(rgb(self.appearance.subtle_border))
+            .edged_sides(
+                &self.appearance,
+                Relief::Etched,
+                Sides::TOP,
+                self.appearance.subtle_border,
+            )
             .child(
                 div()
                     .id(SharedString::from(format!("drawer-host-caption-{source}")))

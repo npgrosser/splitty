@@ -16,12 +16,15 @@ pub(super) const TAB_CLOSE_BOX: f32 = 17.;
 pub(super) const TAB_CLOSE_ICON: f32 = 9.;
 /// The selected tab's accent line in a group without focus.
 const UNFOCUSED_ACCENT_OPACITY: f32 = 0.4;
+/// The space between tabs that a bevel theme draws as buttons.
+const BEVEL_TAB_GAP: f32 = 2.;
 /// Group actions appear while the pointer is over their tab bar.
 pub(super) const TAB_BAR_GROUP: &str = "group-tab-bar";
 
 /// Shared tab geometry and colors; interaction is attached only by the live
 /// projection. `selected` is the group's visible tab, `group_focused` whether
 /// the group holds the focused pane, `first` whether the tab starts its strip.
+/// A bevel theme draws each tab as a button, the selected one pressed in.
 pub(super) fn tab_surface(
     appearance: &NativeAppearance,
     selected: bool,
@@ -48,16 +51,30 @@ pub(super) fn tab_surface(
         .font_weight(FontWeight::MEDIUM)
         .bg(rgb(background))
         .text_color(rgb(text))
-        .when(!first, |tab| {
-            tab.child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .top_0()
-                    .h_full()
-                    .w(px(1.))
-                    .bg(rgb(appearance.subtle_border)),
-            )
+        .edged_or(
+            appearance,
+            if selected {
+                Relief::Sunken
+            } else {
+                Relief::Raised
+            },
+            Sides::ALL,
+            |tab| {
+                tab.when(!first, |tab| {
+                    tab.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top_0()
+                            .h_full()
+                            .w(px(1.))
+                            .bg(rgb(appearance.subtle_border)),
+                    )
+                })
+            },
+        )
+        .when(appearance.bevel.is_some() && !first, |tab| {
+            tab.ml(px(BEVEL_TAB_GAP))
         })
         .when_some(appearance.tab_accent.filter(|_| selected), |tab, accent| {
             tab.child(
@@ -673,8 +690,7 @@ impl Workspace {
             .flex_col()
             .overflow_hidden()
             // The web client's floating group frame.
-            .border_1()
-            .border_color(rgb(self.appearance.border))
+            .edged(&self.appearance, Relief::Frame)
             .shadow_lg()
             .bg(rgb(self.appearance.surface))
             .child(

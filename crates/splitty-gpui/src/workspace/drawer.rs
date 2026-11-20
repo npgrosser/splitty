@@ -166,6 +166,25 @@ pub(super) fn drawer_control_on(
         .focus_ring(focus_visible(cx))
 }
 
+/// A Drawer control of `size` with a button face: a bevel theme raises it
+/// in a frame of that size, a flat theme draws `button` as it is.
+pub(super) fn raised_control(
+    appearance: &NativeAppearance,
+    size: f32,
+    button: Button,
+) -> AnyElement {
+    if appearance.bevel.is_some() {
+        div()
+            .flex_none()
+            .size(chrome_rems(size))
+            .edged(appearance, Relief::Raised)
+            .child(button.size_full())
+            .into_any_element()
+    } else {
+        button.into_any_element()
+    }
+}
+
 fn pane_list_transition() -> Transition {
     Transition::new(Duration::from_millis(150)).easing(Easing::CubicBezier {
         x1: 0.25,
@@ -799,6 +818,61 @@ mod view_tests {
                 "a stacked pane sits past the indent and the rail",
             );
             assert_near(single.left(), first.left(), "a single pane indents inside");
+        });
+    }
+
+    #[test]
+    fn a_bevel_theme_edges_the_drawer_and_selects_in_its_own_text_color() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B")], None)
+                .unwrap();
+            let shown = model.shown_key().expect("a Screen is shown");
+            let other = keys.iter().find(|key| **key != shown).unwrap().clone();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let flat = block_bounds(window, &shown);
+            let bevel = crate::appearance::edges::bevel_test_appearance();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.appearance = bevel.clone();
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let beveled = block_bounds(window, &shown);
+            assert_near(
+                beveled.size.width,
+                flat.size.width - px(1.),
+                "the Drawer's etched edge is 2 px where the flat line is 1",
+            );
+            assert_near(beveled.left(), flat.left(), "the edge is on the right");
+            let selected: &'static str = Box::leak(
+                format!("drawer-screen-text-{shown}-{:06x}", bevel.active_text).into_boxed_str(),
+            );
+            assert!(
+                window.debug_bounds(selected).is_some(),
+                "the selected Screen's name is drawn in active-text"
+            );
+            let unselected: &'static str = Box::leak(
+                format!("drawer-screen-text-{other}-{:06x}", bevel.secondary).into_boxed_str(),
+            );
+            assert!(
+                window.debug_bounds(unselected).is_some(),
+                "an unselected Screen keeps the secondary text"
+            );
+            let create = window.debug_bounds("drawer-create").unwrap();
+            assert_near(
+                create.size.width,
+                px(26. - 4.),
+                "the new Screen button sits inside its raised edge",
+            );
         });
     }
 
@@ -2659,6 +2733,14 @@ impl Workspace {
         .px(chrome_rems(NAV_ITEM_PADDING_X))
         .child(
             div()
+                .when(cfg!(all(test, feature = "ui-test-support")), |row| {
+                    let text = if active {
+                        self.appearance.active_text
+                    } else {
+                        self.appearance.secondary
+                    };
+                    row.debug_selector(move || format!("drawer-nav-{label}-{text:06x}"))
+                })
                 .w_full()
                 .min_w_0()
                 .flex()
@@ -2706,7 +2788,9 @@ impl Workspace {
             .text_color(rgb(self.appearance.secondary))
             .child(Icon::new(IconName::Monitor).size(chrome_rems(14.)))
             .child(div().flex_1().child("This computer"))
-            .child(
+            .child(raised_control(
+                &self.appearance,
+                26.,
                 drawer_control(
                     "drawer-create",
                     rgb(self.appearance.secondary).into(),
@@ -2727,7 +2811,7 @@ impl Workspace {
                         this.create_screen(window, cx);
                     }
                 })),
-            )
+            ))
             .into_any_element()
     }
 
@@ -2936,8 +3020,19 @@ impl Workspace {
                 } else {
                     actions as f32 * ICON_BUTTON + (actions - 1) as f32 * ACTION_GAP + ROW_GAP
                 };
+                let label_color = if active || actions_visible {
+                    card_text
+                } else {
+                    on_card(self.appearance.secondary)
+                };
                 let mut row = div()
                     .id(SharedString::from(format!("drawer-screen-{key}")))
+                    .when(cfg!(all(test, feature = "ui-test-support")), |row| {
+                        let key = key.clone();
+                        row.debug_selector(move || {
+                            format!("drawer-screen-text-{key}-{label_color:06x}")
+                        })
+                    })
                     .flex()
                     .relative()
                     .items_center()
@@ -3026,10 +3121,17 @@ impl Workspace {
                                 .min_w_0()
                                 .py(chrome_rems(RENAME_PADDING[0]))
                                 .px(chrome_rems(RENAME_PADDING[1]))
-                                .border_1()
-                                .border_color(rgb(self.appearance.accent))
+                                .edged_sides(
+                                    &self.appearance,
+                                    Relief::Sunken,
+                                    Sides::ALL,
+                                    self.appearance.accent,
+                                )
                                 .rounded(chrome_rems(self.appearance.corner(RENAME_RADIUS)))
-                                .bg(rgb(self.appearance.surface))
+                                .bg(rgb(self
+                                    .appearance
+                                    .field
+                                    .unwrap_or(self.appearance.surface)))
                                 .text_color(rgb(self.appearance.text))
                                 .text_size(chrome_rems(SIDEBAR_TEXT))
                                 .font_weight(FontWeight::MEDIUM)
@@ -3081,12 +3183,7 @@ impl Workspace {
                                     .text_size(chrome_rems(SIDEBAR_TEXT))
                                     .text_color(transition::<Hsla>(
                                         format!("drawer-screen-text-{key}"),
-                                        rgb(if active || actions_visible {
-                                            card_text
-                                        } else {
-                                            on_card(self.appearance.secondary)
-                                        })
-                                        .into(),
+                                        rgb(label_color).into(),
                                         hover_transition.clone(),
                                         window,
                                         cx,
@@ -3882,8 +3979,12 @@ impl Workspace {
             .h_full()
             .bg(rgb(self.appearance.raised))
             .occlude()
-            .border_r_1()
-            .border_color(rgb(self.appearance.subtle_border))
+            .edged_sides(
+                &self.appearance,
+                Relief::Etched,
+                Sides::RIGHT,
+                self.appearance.subtle_border,
+            )
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.has_drawer_panel() && !GlobalState::is_in_deferred_context(cx) {
                     this.close_drawer_panel(window, cx);
@@ -3988,8 +4089,12 @@ impl Workspace {
                     .pt(chrome_rems(NAV_PADDING[0]))
                     .px(chrome_rems(NAV_PADDING[1]))
                     .pb(chrome_rems(NAV_PADDING[2]))
-                    .border_t_1()
-                    .border_color(rgb(self.appearance.subtle_border))
+                    .edged_sides(
+                        &self.appearance,
+                        Relief::Etched,
+                        Sides::TOP,
+                        self.appearance.subtle_border,
+                    )
                     .child(self.render_hosts_navigation(window, cx))
                     .child(templates)
                     .child(

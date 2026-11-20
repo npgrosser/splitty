@@ -999,7 +999,7 @@ impl Workspace {
         let viewport = window.viewport_size();
         let max_height = menu_style::panel_max_height(window);
         let keyboard_in_transfer = menu.keyboard_in_transfer();
-        let mut panel = menu_style::panel(colors)
+        let mut panel = menu_style::scrolling_panel(colors)
             .id(SharedString::from(format!("tab-context-items-{pane}")))
             .debug_selector(|| "tab-context-menu".into())
             .max_w(chrome_rems(300.))
@@ -1069,7 +1069,7 @@ impl Workspace {
         let transfer = menu.transfer.as_ref().map(|transfer| {
             let choices = self.tab_menu_transfer_choices(menu);
             let separated = choices.len() > 1;
-            let mut submenu = menu_style::submenu_panel(colors)
+            let mut submenu = menu_style::scrolling_panel(colors)
                 .id(SharedString::from(format!("tab-context-move-menu-{pane}")))
                 .debug_selector(|| "tab-context-move-menu".into())
                 .max_w(chrome_rems(300.))
@@ -1115,7 +1115,7 @@ impl Workspace {
                     },
                 },
                 None,
-                submenu,
+                menu_style::framed(colors, submenu),
             )
         });
         Some(
@@ -1134,7 +1134,7 @@ impl Workspace {
                         .child(menu_style::placed(
                             menu_style::Placement::Pointer(menu.position),
                             Some(menu.panel_bounds.clone()),
-                            panel,
+                            menu_style::framed(colors, panel),
                         ))
                         .children(transfer),
                 ),

@@ -368,10 +368,9 @@ impl Workspace {
                             .px(chrome_rems(8.))
                             .flex()
                             .items_center()
-                            .border_1()
-                            .border_color(rgb(colors.border))
+                            .edged(colors, Relief::Sunken)
                             .rounded(chrome_rems(colors.corner(5.)))
-                            .bg(rgb(colors.surface))
+                            .bg(rgb(colors.field.unwrap_or(colors.surface)))
                             .line_height(relative(1.3))
                             .child(div().flex_1().min_w_0().child(Input::new(input))),
                     )

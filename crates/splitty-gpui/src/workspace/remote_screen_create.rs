@@ -342,7 +342,7 @@ impl Workspace {
         let create_weak = cx.entity().downgrade();
         // `.drawer-host-add`: a 26 px Drawer icon button with a 14 px plus,
         // the size Kit gives a small button's icon.
-        super::drawer::drawer_control(
+        let button = super::drawer::drawer_control(
             SharedString::from(format!("drawer-host-new-{source}")),
             rgb(self.appearance.muted).into(),
             self.appearance.corner(super::drawer::ICON_BUTTON_RADIUS),
@@ -366,7 +366,7 @@ impl Workspace {
                     this.create_remote_screen(Some(&create_group), target, *execution, window, cx);
                 });
             }
-        })
-        .into_any_element()
+        });
+        super::drawer::raised_control(&self.appearance, HOST_ADD_BUTTON, button)
     }
 }
