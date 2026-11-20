@@ -365,12 +365,11 @@ mod tests {
             assert!(catalog.ui(id).is_some(), "{id}");
             assert!(catalog.palette(id).is_some(), "{id}");
         }
-        // The Windows 11 themes leave the terminal to the default palette;
-        // the colors of the Windows console are palettes to choose.
-        for id in ["windows-11-dark", "windows-11-light"] {
-            assert!(catalog.ui(id).is_some(), "{id}");
-            assert!(catalog.palette_for_theme(id).is_none(), "{id}");
-        }
+        // Windows 11 Dark has a palette of its own, the light theme takes
+        // the default one; the colors of the Windows console are palettes
+        // to choose.
+        assert!(catalog.palette_for_theme("windows-11-dark").is_some());
+        assert!(catalog.palette_for_theme("windows-11-light").is_none());
         for id in ["campbell", "campbell-light"] {
             assert!(catalog.palette(id).is_some(), "{id}");
         }
