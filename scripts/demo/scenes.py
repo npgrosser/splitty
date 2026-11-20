@@ -19,10 +19,12 @@ class Scene:
     setup: Callable | None = None
     drawer: bool = False
     zoom: float = 1.25
-    theme: str = "splitty-dark"
+    theme: str = "splitty-classic"
     size: tuple[int, int] | None = None
     # Whether the scene needs a machine to reach over SSH.
     host: bool = False
+    # More of the app's `config.toml`, such as a `[notifications]` table.
+    config: str = ""
     # Seconds the window gets before the setup and after the last step.
     settle: float = 2.5
     tail: float = 1.4
@@ -131,3 +133,7 @@ SCENES = [
 from scenes_remote import SCENES as _REMOTE  # noqa: E402
 
 SCENES += _REMOTE
+
+from scenes_agents import SCENES as _AGENTS  # noqa: E402
+
+SCENES += _AGENTS

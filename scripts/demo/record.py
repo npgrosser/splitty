@@ -166,6 +166,8 @@ class Stage:
         self.position = (float(hands.size[0] - 4), float(hands.size[1] - 4))
         self.fast = True
         self.random = random.Random(seed)
+        # The demo home, for a scene that leaves a signal to a stand-in program.
+        self.home: Path | None = None
 
     def now(self) -> float:
         return time.monotonic() - self.recorder.started_at
@@ -349,7 +351,8 @@ def app_config(directory: Path, scene, font: str):
         f'zoom = {scene.zoom}\nzoom_scope = "window"\n\n'
         "[drawer]\n"
         f"pinned = {'true' if scene.drawer else 'false'}\n"
-        "edge_reveal = false\nshow_tips = false\nsidebar_width = 200\n")
+        "edge_reveal = false\nshow_tips = false\nsidebar_width = 200\n"
+        + (f"\n{scene.config}" if scene.config else ""))
 
 
 def wait_for(check, what: str, seconds: float = 30):
@@ -487,6 +490,7 @@ def record(scene, args, out: Path, display: str):
         hands.point(size[0] - 4, size[1] - 4)
         time.sleep(scene.settle)
         stage = Stage(hands, None, args.xdotool, tools, scene.name)
+        stage.home = home
         if scene.setup:
             scene.setup(stage)
             time.sleep(1.2)
@@ -530,7 +534,8 @@ def main():
     parser.add_argument("--xdotool", default="xdotool")
     parser.add_argument("--display", type=int, default=87,
                         help="the first private display number")
-    parser.add_argument("--font", default="Ubuntu Sans", help="the interface font, installed")
+    parser.add_argument("--font", default="",
+                        help="an interface font for every theme; each theme's own without it")
     parser.add_argument("--font-file", default="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                         help="a TrueType file for the key chips, with arrows")
     parser.add_argument("--theme", help="record in this UI theme instead of the scenes' own; "
