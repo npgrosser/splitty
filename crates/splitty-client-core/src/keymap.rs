@@ -6,6 +6,8 @@ mod chord;
 mod command;
 mod file;
 #[cfg(test)]
+mod reference;
+#[cfg(test)]
 mod tests;
 
 pub use chord::{Chord, ChordError, Platform, Reserved};
