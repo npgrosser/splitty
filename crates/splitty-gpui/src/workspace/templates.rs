@@ -1407,7 +1407,7 @@ fn action_style<E: Styled + StatefulInteractiveElement>(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(chrome_rems(5.))
+        .rounded(chrome_rems(colors.corner(5.)))
         .border_1()
         .border_color(rgb(if primary {
             colors.accent
@@ -1433,7 +1433,7 @@ fn row_style<E: Styled + StatefulInteractiveElement>(
     let hover: Hsla = rgb(colors.hover).into();
     row.px(chrome_rems(10.))
         .py(chrome_rems(7.))
-        .rounded(chrome_rems(4.))
+        .rounded(chrome_rems(colors.corner(4.)))
         .cursor_pointer()
         .bg(if chosen {
             rgb(colors.active).into()
@@ -1454,7 +1454,7 @@ fn quiet_style<E: Styled + StatefulInteractiveElement>(button: E, colors: &Nativ
     button
         .px(chrome_rems(8.))
         .py(chrome_rems(5.))
-        .rounded(chrome_rems(4.))
+        .rounded(chrome_rems(colors.corner(4.)))
         .text_size(chrome_rems(11.))
         .text_color(rgb(colors.muted))
         .cursor_pointer()
@@ -1468,7 +1468,7 @@ fn field_box<E: Styled>(field: E, colors: &NativeAppearance) -> E {
         .px(chrome_rems(4.))
         .flex()
         .items_center()
-        .rounded(chrome_rems(5.))
+        .rounded(chrome_rems(colors.corner(5.)))
         .border_1()
         .border_color(rgb(colors.subtle_border))
         .bg(rgb(colors.surface))

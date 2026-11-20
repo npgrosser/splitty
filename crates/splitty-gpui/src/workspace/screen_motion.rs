@@ -584,7 +584,7 @@ impl Workspace {
                             .text_sm()
                             .border_1()
                             .border_color(cx.theme().input)
-                            .rounded(cx.theme().radius)
+                            .rounded(chrome_rems(self.appearance.corner(self.appearance.radius)))
                             .bg(cx.theme().input_background())
                             .text_color(cx.theme().button_foreground)
                             .child(Icon::new(IconName::Minimize).small())

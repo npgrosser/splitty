@@ -1,6 +1,6 @@
 //! The web client's context menu look and placement, shared by the tab menu
-//! and the new-tab profile picker. Colors and the panel radius come from the
-//! theme (`NativeAppearance`); the sizes here are the web client's fixed values.
+//! and the new-tab profile picker. Colors and corners come from the theme
+//! (`NativeAppearance`); the sizes here are the web client's fixed values.
 use super::*;
 
 /// Inner padding of the panel and its minimum width.
@@ -18,6 +18,7 @@ const ITEM_META_GAP: f32 = 20.;
 /// Secondary text: details, section captions, shortcuts and badges.
 const DETAIL_TEXT: f32 = 10.;
 const BADGE_TEXT: f32 = 9.;
+const BADGE_RADIUS: f32 = 3.;
 /// A separator line inset from the panel edge, with its space above and below.
 const SEPARATOR_INSET: f32 = 6.;
 const SEPARATOR_ABOVE: f32 = 4.;
@@ -72,7 +73,7 @@ pub(super) fn item(appearance: &NativeAppearance, highlighted: bool, danger: boo
         .gap(chrome_rems(ITEM_META_GAP))
         .px(chrome_rems(ITEM_PADDING_X))
         .py(chrome_rems(ITEM_PADDING_Y))
-        .rounded(chrome_rems(ITEM_RADIUS))
+        .rounded(chrome_rems(appearance.corner(ITEM_RADIUS)))
         .cursor_pointer()
         .when(highlighted, |row| row.bg(rgb(focus)))
         .hover(move |row| row.bg(rgb(background)).text_color(rgb(text)))
@@ -181,7 +182,7 @@ pub(super) fn badge(appearance: &NativeAppearance, text: impl Into<SharedString>
         .py(px(1.))
         .border_1()
         .border_color(rgb(appearance.border))
-        .rounded(chrome_rems(3.))
+        .rounded(chrome_rems(appearance.corner(BADGE_RADIUS)))
         .text_size(chrome_rems(BADGE_TEXT))
         .text_color(rgb(appearance.muted))
         .child(text.into())

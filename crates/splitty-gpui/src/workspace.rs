@@ -6756,7 +6756,7 @@ impl Render for Workspace {
                             .id("hosts-browser")
                             .w(chrome_rems(width))
                             .h(chrome_rems(height))
-                            .rounded(cx.theme().radius_lg)
+                            .rounded(chrome_rems(self.appearance.radius))
                             .overflow_hidden()
                             .border_1()
                             .border_color(cx.theme().border)

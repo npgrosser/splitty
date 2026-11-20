@@ -1019,7 +1019,7 @@ impl Workspace {
             .px(chrome_rems(10.))
             .flex()
             .items_center()
-            .rounded(chrome_rems(5.))
+            .rounded(chrome_rems(colors.corner(5.)))
             .border_1()
             .border_color(rgb(if primary {
                 colors.accent

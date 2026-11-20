@@ -91,7 +91,7 @@ impl Render for ThemedPrompt {
                 .px(chrome_rems(12.))
                 .flex()
                 .items_center()
-                .rounded(chrome_rems(5.))
+                .rounded(chrome_rems(colors.corner(5.)))
                 .border_1()
                 .border_color(rgb(if primary {
                     confirm
@@ -119,7 +119,7 @@ impl Render for ThemedPrompt {
             .bg(rgb(colors.overlay))
             .border_1()
             .border_color(rgb(colors.border))
-            .rounded(chrome_rems(colors.radius.max(6.)))
+            .rounded(chrome_rems(colors.radius))
             .shadow(vec![BoxShadow {
                 color: rgba(colors.shadow).into(),
                 offset: point(px(0.), px(12.)),

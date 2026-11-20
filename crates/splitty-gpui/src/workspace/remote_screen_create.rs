@@ -345,7 +345,7 @@ impl Workspace {
         super::drawer::drawer_control(
             SharedString::from(format!("drawer-host-new-{source}")),
             rgb(self.appearance.muted).into(),
-            super::drawer::ICON_BUTTON_RADIUS,
+            self.appearance.corner(super::drawer::ICON_BUTTON_RADIUS),
             &self.appearance,
             window,
             cx,

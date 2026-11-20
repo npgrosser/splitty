@@ -1125,7 +1125,7 @@ impl Workspace {
             .flex_none()
             .px(chrome_rems(6.))
             .py(chrome_rems(2.))
-            .rounded(chrome_rems(4.))
+            .rounded(chrome_rems(colors.corner(4.)))
             .cursor_pointer()
             .text_size(chrome_rems(NOTE_META))
             .text_color(rgb(if primary {
@@ -1308,7 +1308,7 @@ impl Workspace {
                     .py(chrome_rems(4.))
                     .border_1()
                     .border_color(rgb(colors.border))
-                    .rounded(chrome_rems(5.))
+                    .rounded(chrome_rems(colors.corner(5.)))
                     .bg(rgb(colors.surface))
                     .child(
                         Textarea::new(state)
@@ -1458,7 +1458,7 @@ impl Workspace {
                                     div()
                                         .px(chrome_rems(6.))
                                         .py(chrome_rems(3.))
-                                        .rounded(chrome_rems(4.))
+                                        .rounded(chrome_rems(colors.corner(4.)))
                                         .bg(rgb(colors.surface))
                                         .font_family(crate::terminal::terminal_family(cx))
                                         .text_size(chrome_rems(NOTE_META))

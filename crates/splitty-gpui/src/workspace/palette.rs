@@ -363,7 +363,7 @@ impl Workspace {
                             .items_center()
                             .border_1()
                             .border_color(rgb(colors.border))
-                            .rounded(chrome_rems(5.))
+                            .rounded(chrome_rems(colors.corner(5.)))
                             .bg(rgb(colors.surface))
                             .line_height(relative(1.3))
                             .child(div().flex_1().min_w_0().child(Input::new(input))),

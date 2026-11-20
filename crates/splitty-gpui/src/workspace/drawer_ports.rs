@@ -119,7 +119,7 @@ impl Workspace {
             super::drawer::drawer_control(
                 SharedString::from(format!("drawer-host-close-{source}")),
                 muted,
-                super::drawer::ICON_BUTTON_RADIUS,
+                self.appearance.corner(super::drawer::ICON_BUTTON_RADIUS),
                 &self.appearance,
                 window,
                 cx,
@@ -151,7 +151,7 @@ impl Workspace {
             super::drawer::drawer_control(
                 SharedString::from(format!("drawer-host-{source}")),
                 rgb(self.appearance.secondary).into(),
-                super::drawer::ICON_BUTTON_RADIUS,
+                self.appearance.corner(super::drawer::ICON_BUTTON_RADIUS),
                 &self.appearance,
                 window,
                 cx,

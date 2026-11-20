@@ -654,7 +654,7 @@ impl Workspace {
                     .flex_none()
                     .px(chrome_rems(6.))
                     .py(chrome_rems(2.))
-                    .rounded(chrome_rems(4.))
+                    .rounded(chrome_rems(colors.corner(4.)))
                     .cursor_pointer()
                     .text_color(rgb(colors.secondary))
                     .hover(|style| style.bg(rgba(colors.hover_overlay)))
@@ -675,7 +675,7 @@ impl Workspace {
                     .flex_none()
                     .px(chrome_rems(6.))
                     .py(chrome_rems(2.))
-                    .rounded(chrome_rems(4.))
+                    .rounded(chrome_rems(colors.corner(4.)))
                     .cursor_pointer()
                     .text_color(rgb(if open > 0 || waiting {
                         colors.warning
@@ -719,7 +719,7 @@ impl Workspace {
                                 .ml(chrome_rems(14.))
                                 .px(chrome_rems(8.))
                                 .py(chrome_rems(4.))
-                                .rounded(chrome_rems(4.))
+                                .rounded(chrome_rems(colors.corner(4.)))
                                 .border_1()
                                 .border_color(rgb(colors.border))
                                 .text_size(chrome_rems(12.))

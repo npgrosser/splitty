@@ -36,7 +36,8 @@ pub(super) const CARD_INSET: f32 = 8.;
 const CARD_GAP: f32 = 1.;
 const CARD_PADDING_TOP: f32 = 1.;
 const CARD_PADDING_BOTTOM: f32 = 3.;
-/// `.drawer-screen`: `border-radius: 6px`, fixed rather than themed.
+/// `.drawer-screen`: `border-radius: 6px`, bounded by the theme's control
+/// radius.
 const CARD_RADIUS: f32 = 6.;
 /// `.drawer-screen.unreachable:not(.active)`: a Screen of a host that failed
 /// or went offline.
@@ -124,6 +125,8 @@ pub(super) struct NavItem {
 /// A Drawer control in the web client's `.drawer-icon-btn` manner: `rest` at
 /// rest; on hover the primary text color over one `hover-bg` layer, which
 /// stacks over a hovered or active card as the translucent web color does.
+/// `radius` applies as given: a control passes `NativeAppearance::corner`
+/// of its own, a pill its half height.
 pub(super) fn drawer_control(
     id: impl Into<ElementId>,
     rest: Hsla,
@@ -2625,7 +2628,7 @@ impl Workspace {
                 self.appearance.secondary
             })
             .into(),
-            NAV_ITEM_RADIUS,
+            self.appearance.corner(NAV_ITEM_RADIUS),
             &self.appearance,
             window,
             cx,
@@ -2684,7 +2687,7 @@ impl Workspace {
                 drawer_control(
                     "drawer-create",
                     rgb(self.appearance.secondary).into(),
-                    CARD_RADIUS,
+                    self.appearance.corner(CARD_RADIUS),
                     &self.appearance,
                     window,
                     cx,
@@ -2988,7 +2991,7 @@ impl Workspace {
                                 .px(chrome_rems(RENAME_PADDING[1]))
                                 .border_1()
                                 .border_color(rgb(self.appearance.accent))
-                                .rounded(chrome_rems(RENAME_RADIUS))
+                                .rounded(chrome_rems(self.appearance.corner(RENAME_RADIUS)))
                                 .bg(rgb(self.appearance.surface))
                                 .text_color(rgb(self.appearance.text))
                                 .text_size(chrome_rems(SIDEBAR_TEXT))
@@ -3154,7 +3157,7 @@ impl Workspace {
                         drawer_control(
                             SharedString::from(format!("drawer-collapse-{key}")),
                             muted,
-                            ICON_BUTTON_RADIUS,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3207,7 +3210,7 @@ impl Workspace {
                         drawer_control(
                             SharedString::from(format!("drawer-more-{key}")),
                             muted,
-                            ICON_BUTTON_RADIUS,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3246,7 +3249,7 @@ impl Workspace {
                         drawer_control(
                             SharedString::from(format!("drawer-close-{key}")),
                             muted,
-                            ICON_BUTTON_RADIUS,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3347,7 +3350,7 @@ impl Workspace {
                     .relative()
                     .top(px(offset))
                     .when(opacity < 1., |block| block.opacity(opacity))
-                    .rounded(chrome_rems(CARD_RADIUS))
+                    .rounded(chrome_rems(self.appearance.corner(CARD_RADIUS)))
                     .bg(block_background)
                     .when(!editing, |block| {
                         let select = key.clone();
@@ -3482,7 +3485,9 @@ impl Workspace {
                                         .top(chrome_rems(STACK_RAIL_INSET))
                                         .bottom(chrome_rems(STACK_RAIL_INSET))
                                         .w(chrome_rems(STACK_RAIL_WIDTH))
-                                        .rounded(chrome_rems(STACK_RAIL_RADIUS))
+                                        .rounded(chrome_rems(
+                                            self.appearance.corner(STACK_RAIL_RADIUS),
+                                        ))
                                         .bg(rgb(self.appearance.border)),
                                 );
                         }
@@ -3900,7 +3905,7 @@ impl Workspace {
                             } else {
                                 muted
                             },
-                            ICON_BUTTON_RADIUS,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
