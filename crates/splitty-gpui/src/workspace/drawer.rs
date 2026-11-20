@@ -2200,6 +2200,13 @@ impl WheelNavigation {
             self.reset();
             return 0;
         }
+        if target == WheelTarget::Screens && event.touch_phase == TouchPhase::Started {
+            // New finger contact is a new gesture. macOS reports trackpad
+            // momentum as ordinary moves, so the idle gap alone would keep
+            // the next swipe blocked until the momentum has died out.
+            self.screen_switched = false;
+            self.screen_last_scroll = None;
+        }
         if target == WheelTarget::Screens
             && event.touch_phase == TouchPhase::Ended
             && x == 0.
@@ -4210,6 +4217,53 @@ mod tests {
                 "sample at {ms}ms"
             );
         }
+    }
+
+    #[test]
+    fn drawer_new_contact_rearms_during_trackpad_momentum() {
+        let mut wheel = WheelNavigation::default();
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let pixels = |y: f32, phase| event(ScrollDelta::Pixels(point(px(0.), px(y))), phase);
+        assert_eq!(
+            wheel.steps(
+                WheelTarget::Screens,
+                &pixels(-20., TouchPhase::Moved),
+                at(0)
+            ),
+            -1
+        );
+        let end = pixels(0., TouchPhase::Ended);
+        assert_eq!(wheel.steps(WheelTarget::Screens, &end, at(40)), 0);
+        // Momentum arrives as moves without gaps and must not switch again.
+        for ms in (56..=1500).step_by(16) {
+            let y = -(30. - ms as f32 / 60.).max(1.);
+            assert_eq!(
+                wheel.steps(WheelTarget::Screens, &pixels(y, TouchPhase::Moved), at(ms)),
+                0,
+                "momentum at {ms}ms"
+            );
+        }
+        // The next finger contact interrupts momentum and swipes at once.
+        let touch = pixels(0., TouchPhase::Started);
+        assert_eq!(wheel.steps(WheelTarget::Screens, &touch, at(1510)), 0);
+        assert_eq!(
+            wheel.steps(
+                WheelTarget::Screens,
+                &pixels(-6., TouchPhase::Moved),
+                at(1520)
+            ),
+            -1
+        );
+        assert_eq!(
+            wheel.steps(
+                WheelTarget::Screens,
+                &pixels(-9., TouchPhase::Moved),
+                at(1536)
+            ),
+            0,
+            "one switch per contact"
+        );
     }
 
     #[test]
