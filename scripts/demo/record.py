@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import dataclasses
 import math
 import os
 import random
@@ -532,6 +533,8 @@ def main():
     parser.add_argument("--font", default="Ubuntu Sans", help="the interface font, installed")
     parser.add_argument("--font-file", default="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                         help="a TrueType file for the key chips, with arrows")
+    parser.add_argument("--theme", help="record in this UI theme instead of the scenes' own; "
+                        "the clips are named after it")
     parser.add_argument("--keep", action="store_true", help="keep the scene's directory")
     parser.add_argument("--sshd-root", default=os.environ.get("SPLITTY_DEMO_SSHD_ROOT"),
                         help="an unpacked openssh-server for the remote scenes; sshd from PATH without")
@@ -545,8 +548,11 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
     args.app = args.app.resolve()
     for index, name in enumerate(args.names or list(known)):
+        scene = known[name]
+        if args.theme:
+            scene = dataclasses.replace(scene, theme=args.theme, name=f"{name}-{args.theme}")
         # A display of its own per scene: the one before may not be gone yet.
-        record(known[name], args, args.out, f":{args.display + index}")
+        record(scene, args, args.out, f":{args.display + index}")
 
 
 if __name__ == "__main__":
