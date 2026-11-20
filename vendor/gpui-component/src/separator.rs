@@ -1,4 +1,4 @@
-use crate::{ActiveTheme, StyledExt};
+use crate::{ActiveTheme, StyledExt, bevel::Bevel};
 use gpui::{
     App, Axis, Div, Hsla, IntoElement, ParentElement, PathBuilder, RenderOnce, SharedString,
     StyleRefinement, Styled, Window, canvas, div, point, prelude::FluentBuilder as _, px,
@@ -87,6 +87,25 @@ impl Separator {
         Self::render_base(axis).bg(color)
     }
 
+    /// The groove a theme with a bevel draws: a shadow line, then a lit one.
+    fn render_etched(axis: Axis, bevel: Bevel) -> impl IntoElement {
+        let line = |color: Hsla| {
+            div().flex_none().bg(color).map(|this| match axis {
+                Axis::Vertical => this.w(px(1.)).h_full(),
+                Axis::Horizontal => this.h(px(1.)).w_full(),
+            })
+        };
+        div()
+            .absolute()
+            .flex()
+            .map(|this| match axis {
+                Axis::Vertical => this.flex_row().w(px(2.)).h_full(),
+                Axis::Horizontal => this.flex_col().h(px(2.)).w_full(),
+            })
+            .child(line(bevel.shadow))
+            .child(line(bevel.highlight))
+    }
+
     fn render_dashed(axis: Axis, color: Hsla) -> impl IntoElement {
         Self::render_base(axis).child(
             canvas(
@@ -126,6 +145,11 @@ impl Styled for Separator {
 impl RenderOnce for Separator {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let color = self.color.unwrap_or(cx.theme().border);
+        // A line in its own color stays flat; the theme's line is etched.
+        let etched = cx
+            .theme()
+            .bevel
+            .filter(|_| self.color.is_none() && self.line_style == SeparatorStyle::Solid);
         let axis = self.axis;
         let line_style = self.line_style;
 
@@ -135,9 +159,12 @@ impl RenderOnce for Separator {
             .items_center()
             .justify_center()
             .refine_style(&self.style)
-            .child(match line_style {
-                SeparatorStyle::Solid => Self::render_solid(axis, color).into_any_element(),
-                SeparatorStyle::Dashed => Self::render_dashed(axis, color).into_any_element(),
+            .child(match (etched, line_style) {
+                (Some(bevel), _) => Self::render_etched(axis, bevel).into_any_element(),
+                (None, SeparatorStyle::Solid) => Self::render_solid(axis, color).into_any_element(),
+                (None, SeparatorStyle::Dashed) => {
+                    Self::render_dashed(axis, color).into_any_element()
+                }
             })
             .when_some(self.label, |this, label| {
                 this.child(

@@ -33,7 +33,12 @@ const POPOVER_RING_INK: f32 = 0.1;
 /// (`oklch(1 0 0 / 10%)`), so it follows the foreground rather than the border
 /// token: a fixed black ring would all but vanish on a dark surface.
 ///
+/// With the theme's bevel the surface draws its frame instead, and the ring is
+/// transparent.
 pub(crate) fn popover_ring(cx: &App) -> Hsla {
+    if cx.theme().bevel.is_some() {
+        return Hsla::transparent_black();
+    }
     cx.theme().foreground.alpha(POPOVER_RING_INK)
 }
 
@@ -152,7 +157,12 @@ pub trait ThemeStyled: Styled + Sized {
     /// This is the one surface every popup shares — Popover, PopupMenu, Select,
     /// Combobox, DatePicker and the editor's hover popovers — so they cannot
     /// drift apart. See [`popover_shadow`] for what the shadow is modelled on.
-    fn popover_style(self, cx: &App) -> Self;
+    ///
+    /// With the theme's bevel the edge is the frame relief, drawn in a border
+    /// of its own; styling a surface twice draws it once.
+    fn popover_style(self, cx: &App) -> Self
+    where
+        Self: ParentElement;
 
     /// Round this element as far as its size allows — a circle if it is square,
     /// a pill if it is not — unless the theme squares its corners.
@@ -183,14 +193,25 @@ impl<T: Styled + Sized> ThemeStyled for T {
         focus_style(self, FocusLine::Edge, window, cx)
     }
 
-    fn popover_style(self, cx: &App) -> Self {
+    fn popover_style(self, cx: &App) -> Self
+    where
+        Self: ParentElement,
+    {
         let theme = cx.theme();
         // No border: the edge is the ring inside `popover_shadow`, which is how
         // shadcn draws it and the only way the shadow can show through it.
-        self.bg(theme.popover)
+        let mut this = self
+            .bg(theme.popover)
             .text_color(theme.popover_foreground)
             .shadow(popover_shadow(popover_ring(cx), 1.))
-            .rounded(theme.radius)
+            .rounded(theme.radius);
+        if theme.bevel.is_none()
+            || border_widths(this.style(), px(16.)).any(|width| *width > Pixels::ZERO)
+        {
+            return this;
+        }
+        this = this.border_2();
+        crate::bevel::bevel_border(this, crate::bevel::Relief::Frame, cx)
     }
 }
 

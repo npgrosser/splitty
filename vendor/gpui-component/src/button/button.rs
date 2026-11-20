@@ -1,8 +1,9 @@
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 use crate::{
     ActiveTheme, Colorize as _, Disableable, Icon, Placement, RoleOverride, Selectable, Sizable,
     Size, StyleSized, StyledExt,
+    bevel::{Relief, bevel_border},
     button::ButtonIcon,
     h_flex,
     select::Caret,
@@ -10,7 +11,7 @@ use crate::{
     tooltip::{ManagedTooltipExt as _, Tooltip},
 };
 use gpui::{
-    AnyElement, App, Background, ClickEvent, Corners, Edges, ElementId, FocusHandle, Hsla,
+    AnyElement, App, Background, ClickEvent, Corners, Edges, ElementId, Entity, FocusHandle, Hsla,
     InteractiveElement, Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce,
     Role, SharedString, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
     prelude::FluentBuilder as _, relative, transparent_white,
@@ -657,6 +658,31 @@ impl RenderOnce for Button {
         });
         let is_focused = focus_handle.is_focused(window);
 
+        // With the theme's bevel, a button with a face draws a raised edge,
+        // sunken while it is pressed, selected or toggled on, and keeps its
+        // border transparent so the border cannot paint over that edge.
+        let bevel = cx.theme().bevel.is_some() && !style.is_ghost() && !style.no_padding();
+        let press = (bevel && interactive && !disabled).then(|| {
+            window.use_keyed_state(
+                ElementId::NamedChild(Arc::new(self.id.clone()), "bevel-press".into()),
+                cx,
+                |_, _| BevelPress::default(),
+            )
+        });
+        let pressed = press.as_ref().is_some_and(|press| press.read(cx).0);
+        let relief = if selected || self.toggled == Some(true) || pressed {
+            Relief::Sunken
+        } else {
+            Relief::Raised
+        };
+        let edge = move |color: Hsla| {
+            if bevel {
+                Hsla::transparent_black()
+            } else {
+                color
+            }
+        };
+
         let rounding = match self.rounded {
             ButtonRounded::Small => cx.theme().radius * 0.5,
             ButtonRounded::Medium => cx.theme().radius,
@@ -721,14 +747,14 @@ impl RenderOnce for Button {
             .when(self.border_corners.bottom_right, |this| {
                 this.rounded_br(rounding)
             })
-            .when(self.variant.is_default() || self.outline, |this| {
+            .when(self.variant.is_default() || self.outline || bevel, |this| {
                 this.when(self.border_edges.left, |this| this.border_l_1())
                     .when(self.border_edges.right, |this| this.border_r_1())
                     .when(self.border_edges.top, |this| this.border_t_1())
                     .when(self.border_edges.bottom, |this| this.border_b_1())
             })
             .when(!self.disabled && !selected, |this| {
-                this.border_color(normal_style.border)
+                this.border_color(edge(normal_style.border))
                     .bg(normal_style.bg)
                     .text_color(normal_style.fg)
                     .when(normal_style.underline, |this| this.text_decoration_1())
@@ -738,7 +764,7 @@ impl RenderOnce for Button {
                         this.active(|this| {
                             let active_style = style.active(self.outline, cx);
                             this.bg(active_style.bg)
-                                .border_color(active_style.border)
+                                .border_color(edge(active_style.border))
                                 .text_color(active_style.fg)
                         })
                         .when_some(hover_group, |this, group| {
@@ -757,11 +783,16 @@ impl RenderOnce for Button {
                 }
                 let hover_style = style.hovered(self.outline, cx);
                 this.bg(hover_style.bg)
-                    .border_color(hover_style.border)
+                    .border_color(edge(hover_style.border))
                     .text_color(hover_style.fg)
             })
             .line_height(relative(1.25))
             .refine_style(&instance_style);
+        let root = if bevel {
+            bevel_border(root, relief, cx)
+        } else {
+            root
+        };
 
         // The explicit name wins: it exists precisely for the cases where the
         // visible content is not what a listener needs to hear.
@@ -823,7 +854,7 @@ impl RenderOnce for Button {
                 .selected(|style| {
                     style
                         .bg(selected_style.bg)
-                        .border_color(selected_style.border)
+                        .border_color(edge(selected_style.border))
                         .text_color(selected_style.fg)
                         .refine_style(&instance_style)
                 })
@@ -831,7 +862,7 @@ impl RenderOnce for Button {
                     style
                         .bg(disabled_style.bg)
                         .text_color(disabled_style.fg)
-                        .border_color(disabled_style.border)
+                        .border_color(edge(disabled_style.border))
                         .shadow_none()
                         .refine_style(&instance_style)
                 })
@@ -917,9 +948,39 @@ impl RenderOnce for Button {
                 this
             }
         })
+        .when_some(press, |this, press| {
+            this.on_mouse_down(MouseButton::Left, BevelPress::listener(&press, true))
+                .capture_any_mouse_up(BevelPress::listener(&press, false))
+                .on_mouse_up_out(MouseButton::Left, BevelPress::listener(&press, false))
+        })
         .when(is_focused && self.focus_ring_enabled, |this| {
             focus_style(this, focus_line, window, cx)
         })
+        // The focus style tints the border, which would paint over the bevel.
+        .when(bevel, |this| this.border_color(Hsla::transparent_black()))
+    }
+}
+
+/// Whether the primary button is held down on a beveled button, which then
+/// draws its edge sunken.
+#[derive(Default)]
+struct BevelPress(bool);
+
+impl BevelPress {
+    /// A listener that records whether the button is held down.
+    fn listener<E>(
+        press: &Entity<Self>,
+        pressed: bool,
+    ) -> impl Fn(&E, &mut Window, &mut App) + use<E> {
+        let press = press.clone();
+        move |_, _, cx| {
+            press.update(cx, |press, cx| {
+                if press.0 != pressed {
+                    press.0 = pressed;
+                    cx.notify();
+                }
+            });
+        }
     }
 }
 
@@ -941,7 +1002,7 @@ enum ButtonStyleState {
 impl ButtonVariant {
     fn outline_background(&self, state: ButtonStyleState, cx: &mut App) -> Background {
         match (self, state) {
-            (Self::Default, ButtonStyleState::Normal) => cx.theme().input_background().into(),
+            (Self::Default, ButtonStyleState::Normal) => cx.theme().face_background().into(),
             (Self::Default, ButtonStyleState::Hovered) => cx
                 .theme()
                 .input
@@ -1375,7 +1436,7 @@ impl ButtonVariant {
             )
         } else if let Self::Default = self {
             (
-                cx.theme().input_background().opacity(0.5).into(),
+                cx.theme().face_background().opacity(0.5).into(),
                 cx.theme().input.opacity(0.5),
             )
         } else {

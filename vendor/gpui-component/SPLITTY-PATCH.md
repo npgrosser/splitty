@@ -19,3 +19,19 @@ the X11 frame-extents property, so live transitions leave no shadow padding.
 The renderer patch is required: rounding the border alone does not clip opaque
 children. Remove this override once upstream provides equivalent per-window
 shape support and the real-window checks pass.
+
+# Beveled controls
+
+Local change: `Theme` carries an optional `bevel` (highlight, light, shadow and
+dark shadow) and an optional `field` color, both unset by default and cleared
+by `apply_config`. `src/bevel.rs` paints the classic two-ring 3D edge in an
+element's own border space; with a bevel, `bevel_border` turns the border an
+element already has into that edge and leaves the border itself transparent.
+Filled and outlined buttons are raised and sink while held, selected or toggled;
+text fields, number inputs, input groups, OTP cells, select and combobox
+triggers and check boxes are sunken; `popover_style` surfaces, tooltips,
+dialogs and sheets take the frame relief; outlined group boxes, separators in
+the theme's color and menu separators are etched. A beveled check or radio box
+keeps the field color when checked and draws its mark in the text color.
+`input_background` returns `field` where it is set; button faces use the
+previous rule. Without a bevel every component renders as before.

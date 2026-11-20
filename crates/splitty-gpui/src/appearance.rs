@@ -746,6 +746,13 @@ impl NativeAppearance {
             }
             theme.font_family = self.font_family.clone().into();
             theme.font_size = px(16. * self.zoom.window_scale());
+            theme.bevel = self.bevel.map(|bevel| gpui_kit::component::bevel::Bevel {
+                highlight: rgb(bevel.highlight).into(),
+                light: rgb(bevel.light).into(),
+                shadow: rgb(bevel.shadow).into(),
+                dark_shadow: rgb(bevel.dark_shadow).into(),
+            });
+            theme.field = self.field.map(|field| rgb(field).into());
         });
     }
 }

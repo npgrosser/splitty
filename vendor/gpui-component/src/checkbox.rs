@@ -1,5 +1,6 @@
 use std::{rc::Rc, time::Duration};
 
+use crate::bevel::{Relief, bevel_border, bevel_border_color};
 use crate::{
     ActiveTheme, Disableable, IconName, RoleOverride, Selectable, Sizable, Size, icon::IconNamed,
     text::Text, tooltip::ComponentTooltip, v_flex,
@@ -199,10 +200,13 @@ pub(crate) fn checkbox_check_icon(
         window,
         cx,
     );
-    let color = if disabled {
-        cx.theme().primary_foreground.opacity(0.5)
-    } else {
-        cx.theme().primary_foreground
+    // A beveled box keeps its field color when checked, so the mark takes
+    // the text color.
+    let color = match (cx.theme().bevel.is_some(), disabled) {
+        (true, false) => cx.theme().foreground,
+        (true, true) => cx.theme().muted_foreground,
+        (false, false) => cx.theme().primary_foreground,
+        (false, true) => cx.theme().primary_foreground.opacity(0.5),
     };
 
     svg()
@@ -246,8 +250,9 @@ impl RenderOnce for Checkbox {
             .clone();
         let is_focused = focus_handle.is_focused(window);
 
-        let unchecked_border = cx.theme().input;
-        let checked_color = cx.theme().primary;
+        let bevel = cx.theme().bevel.is_some();
+        let unchecked_border = bevel_border_color(cx.theme().input, cx);
+        let checked_color = bevel_border_color(cx.theme().primary, cx);
         let disabled_indicator_color = if checked {
             checked_color.opacity(0.5)
         } else {
@@ -303,7 +308,7 @@ impl RenderOnce for Checkbox {
                     .flex_shrink_0()
                     .border_1()
                     .rounded(radius)
-                    .when(!checked, |this| {
+                    .when(!checked || bevel, |this| {
                         this.bg(cx.theme().input_background())
                             .when(!self.disabled, |this| this.border_color(unchecked_border))
                     })
@@ -312,14 +317,17 @@ impl RenderOnce for Checkbox {
                             .checked(|style| {
                                 style
                                     .border_color(checked_color)
-                                    .bg(cx.theme().tokens.primary)
+                                    .when(!bevel, |style| style.bg(cx.theme().tokens.primary))
                             })
                             .disabled(|style| {
                                 style
                                     .border_color(disabled_indicator_color)
-                                    .when(checked, |style| style.bg(disabled_indicator_color))
+                                    .when(checked && !bevel, |style| {
+                                        style.bg(disabled_indicator_color)
+                                    })
                             })
                     })
+                    .map(|this| bevel_border(this, Relief::Sunken, cx))
                     .child(checkbox_check_icon(
                         self.id,
                         self.size,

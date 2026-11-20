@@ -216,6 +216,16 @@ pub struct Theme {
     /// Application-wide caret blink behavior.
     #[serde(skip)]
     pub cursor_blink: gpui_base::input::CursorBlink,
+    /// The 3D edge buttons, fields, check boxes and floating surfaces draw in
+    /// place of their flat border, default none. Applying a theme config
+    /// clears it.
+    #[serde(skip)]
+    pub bevel: Option<crate::bevel::Bevel>,
+    /// The background of fields that hold text and of check and radio
+    /// boxes, in place of [`Theme::input_background`]'s own choice; default
+    /// none. Applying a theme config clears it.
+    #[serde(skip)]
+    pub field: Option<Hsla>,
 }
 
 impl Default for Theme {
@@ -485,10 +495,18 @@ impl Theme {
 
     /// Get the input background color.
     ///
-    /// For dark, use a transparent color mixed with the input border: `cx.theme().input`,
-    /// otherwise use the `cx.theme().background` color.
+    /// [`Theme::field`] where it is set; else for dark, a transparent color
+    /// mixed with the input border: `cx.theme().input`, otherwise the
+    /// `cx.theme().background` color.
     #[inline]
     pub fn input_background(&self) -> Hsla {
+        self.field.unwrap_or_else(|| self.face_background())
+    }
+
+    /// The background of a control's face, such as an outlined button:
+    /// [`Theme::input_background`] without [`Theme::field`].
+    #[inline]
+    pub(crate) fn face_background(&self) -> Hsla {
         if self.is_dark() {
             self.input.mix_oklab(self.transparent, 0.3)
         } else {
@@ -792,6 +810,8 @@ impl From<&ThemeColor> for Theme {
             sheet: SheetSettings::default(),
             motion: MotionTokens::default(),
             cursor_blink: gpui_base::input::CursorBlink::default(),
+            bevel: None,
+            field: None,
         }
     }
 }

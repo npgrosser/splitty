@@ -585,6 +585,9 @@ where
                             outline_visible && self.state.appearance && self.focus_ring_enabled,
                             |this| this.focus_ring_style(window, cx),
                         )
+                        .when(self.state.appearance, |this| {
+                            crate::bevel::bevel_border(this, crate::bevel::Relief::Sunken, cx)
+                        })
                         .when(allow_open, |this| {
                             this.on_click(cx.listener(Self::toggle_menu))
                         })

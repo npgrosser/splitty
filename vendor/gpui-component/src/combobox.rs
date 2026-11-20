@@ -1021,6 +1021,9 @@ fn render_trigger_container(
             outline_visible && appearance && focus_ring_enabled,
             |this| this.focus_ring_style(window, cx),
         )
+        .when(appearance, |this| {
+            crate::bevel::bevel_border(this, crate::bevel::Relief::Sunken, cx)
+        })
         .when(allow_open, |this| {
             this.when_some(toggle_handler, |this, handler| this.on_click(handler))
         })
