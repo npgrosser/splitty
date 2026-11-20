@@ -1271,6 +1271,8 @@ pub struct Workspace {
     ui_family: String,
     mono_family: String,
     rename: Option<RenameEditor>,
+    /// Arranging the focused pane by keyboard, while on.
+    arrange: Option<arrange::ArrangeMode>,
     rename_subscription: Option<Subscription>,
     pending_close: Option<PendingClose>,
     /// A close waiting for its service's assessment, before it asks or closes.
@@ -1754,6 +1756,7 @@ impl Workspace {
                 ui_family,
                 mono_family,
                 rename: None,
+                arrange: None,
                 rename_subscription: None,
                 pending_close: None,
                 assessing_close: None,
@@ -3905,6 +3908,9 @@ impl Workspace {
         {
             // A native confirmation owns keyboard input until it settles.
             cx.stop_propagation();
+            return;
+        }
+        if self.arrange.is_some() && self.arrange_key(event, window, cx) {
             return;
         }
         let command = self.key_command(&event.keystroke, window, cx);
@@ -6276,7 +6282,8 @@ impl Workspace {
                     }
                     _ => {}
                 }
-                slot.into_any_element()
+                slot.children(self.render_arrange_mark(focused && interactive))
+                    .into_any_element()
             }
             LayoutNode::Split {
                 id,
@@ -6681,6 +6688,7 @@ impl Render for Workspace {
         if let Some(error) = &self.notification_settings_error {
             messages.push(format!("Notifications: {error}"));
         }
+        messages.extend(self.arrange_hint());
         let drawer_fraction = transition(
             "drawer-visibility",
             if self.drawer_visible || self.drawer_overlay_open || self.has_drawer_panel() {
