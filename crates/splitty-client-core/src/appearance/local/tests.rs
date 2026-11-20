@@ -144,10 +144,13 @@ async fn begin_read(reader: &mut LocalServiceClient) {
 #[test]
 fn fixed_and_automatic_theme_names_use_only_local_preference() {
     let mut settings = AppearanceSettings::default();
-    assert_eq!(theme_name(&settings, ColorScheme::Light), "splitty-dark");
+    assert_eq!(theme_name(&settings, ColorScheme::Light), "splitty-classic");
     settings.theme_mode = "auto".into();
-    assert_eq!(theme_name(&settings, ColorScheme::Light), "splitty-light");
-    assert_eq!(theme_name(&settings, ColorScheme::Dark), "splitty-dark");
+    assert_eq!(
+        theme_name(&settings, ColorScheme::Light),
+        "splitty-classic-light"
+    );
+    assert_eq!(theme_name(&settings, ColorScheme::Dark), "splitty-classic");
 }
 
 #[tokio::test]
@@ -183,7 +186,7 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
     assert!(snapshot.drawer().pinned);
     assert_eq!(snapshot.drawer().sidebar_width, 200);
     assert_eq!(snapshot.os_scheme(), ColorScheme::Light);
-    assert_eq!(snapshot.ui_theme(), "splitty-light");
+    assert_eq!(snapshot.ui_theme(), "splitty-classic-light");
     assert_eq!(snapshot.connection_id(), session.connection_id());
     let event = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -445,7 +448,7 @@ async fn terminal_palette_names_pass_through_unresolved() {
     let owner = Uuid::new_v4();
     let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     let first = snapshot(&mut reader).await;
-    assert_eq!(first.ui_theme(), "splitty-dark");
+    assert_eq!(first.ui_theme(), "splitty-classic");
     assert_eq!(first.terminal().theme(), "splitty-light");
     assert_eq!(first.terminal().theme_dark(), "default");
     assert_eq!(first.terminal().theme_light(), "default");
@@ -453,7 +456,7 @@ async fn terminal_palette_names_pass_through_unresolved() {
     reader.refresh_settings(owner).unwrap();
     let missing = snapshot(&mut reader).await;
     assert_eq!(missing.terminal().theme(), "missing-palette");
-    assert_eq!(missing.ui_theme(), "splitty-dark");
+    assert_eq!(missing.ui_theme(), "splitty-classic");
     assert!(missing.terminal_generation() > first.terminal_generation());
     {
         let mut config = service.state.config.write().unwrap();
@@ -469,7 +472,7 @@ async fn terminal_palette_names_pass_through_unresolved() {
     reader.set_scheme(owner, ColorScheme::Light).unwrap();
     let light = snapshot(&mut reader).await;
     assert_eq!(light.os_scheme(), ColorScheme::Light);
-    assert_eq!(light.ui_theme(), "splitty-light");
+    assert_eq!(light.ui_theme(), "splitty-classic-light");
     assert_eq!(light.terminal().theme_dark(), "night-palette");
     assert_eq!(light.terminal().theme_light(), "day-palette");
     assert!(light.terminal_generation() > pair.terminal_generation());

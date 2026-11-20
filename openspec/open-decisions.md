@@ -45,6 +45,11 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **RTS-10:** the Tauri Make targets go without aliases, `uninstall-tauri` included; `docs/development.md` names the files an earlier `make install-tauri` left. Alternative: keep `uninstall-tauri` for a release or two.
   - **RTS-11:** entries of this file that concern only the Tauri shell are removed, as RES-3 did for Electron; `docs/security/findings.md` keeps its entries with a dated note; `deny.toml` keeps `unmaintained = "workspace"` with a comment without Tauri. Alternative: keep the entries marked as moot, or check unmaintained crates for all dependencies.
   - **RTS-12:** CI keeps building the frontend in the macOS job and in `server-payloads.yml` while the server embeds it; `remove-browser-access` removes those steps. Alternative: an empty `frontend/dist` as the release's version-skew job uses.
+- **`classic-default-theme` CDT-1 to CDT-4** (2026-11-20, provisional, tbd; recorded in the change's proposal, behavior in the `settings` spec):
+  - **CDT-1:** the light default becomes `splitty-classic-light`, so a system that follows light and dark stays in one family. Alternative: keep `splitty-light` as the light default.
+  - **CDT-2:** settings that already store a theme keep it, including installations that never chose one, because the settings file holds the former default by name. Alternative: move unchanged installations to the new default.
+  - **CDT-3:** the themes shown as Splitty Modern keep the identifiers `splitty-dark`, `splitty-light` and `splitty-light-gray`, and a palette file gets a display name through a `# name:` comment. Alternative: new identifiers with aliases for the old ones.
+  - **CDT-4:** the server's fallback for a theme it cannot find follows the default (`splitty-classic`). Alternative: keep `splitty-dark` as the fallback.
 - **`native-key-bindings` NKB-1 to NKB-7** (2026-11-20, provisional, tbd; recorded in the change's design, behavior in the `key-bindings` spec):
   - **NKB-1:** key bindings are a local file of the application (`keybindings.json` in its configuration directory), not a server setting. Alternative: a settings section stored by the local service and shared by its clients.
   - **NKB-2:** one chord per binding, no key sequences. Alternative: a prefix key followed by a second key.
