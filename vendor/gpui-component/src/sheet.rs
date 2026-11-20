@@ -195,6 +195,7 @@ impl RenderOnce for Sheet {
                 Placement::Bottom => this.bottom_0().left_0().right_0().border_t_1(),
                 Placement::Left => this.top(top).left_0().bottom_0().border_r_1(),
             })
+            .map(|this| crate::bevel::bevel_border(this, crate::bevel::Relief::Frame, cx))
             .child(
                 // TitleBar
                 h_flex()

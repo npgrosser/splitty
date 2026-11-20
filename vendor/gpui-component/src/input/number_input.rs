@@ -12,6 +12,7 @@ use crate::{Disableable, Icon, IconName, Sizable, Size, StyleSized as _, StyledE
 
 use super::{Input, InputState, input::input_style};
 use crate::ThemeStyled as _;
+use crate::bevel::{Relief, bevel_border};
 use gpui_base::NumberInput as BaseNumberInput;
 pub use gpui_base::{NumberInputEvent, NumberStep, StepAction};
 use rust_i18n::t;
@@ -222,6 +223,7 @@ impl RenderOnce for NumberInput {
                 focused && self.appearance && self.focus_ring_enabled,
                 |this| this.focus_ring_style(window, cx),
             )
+            .map(|this| bevel_border(this, Relief::Sunken, cx))
     }
 }
 

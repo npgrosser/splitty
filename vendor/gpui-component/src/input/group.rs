@@ -238,6 +238,7 @@ impl RenderOnce for InputGroup {
             .when_some(appearance.ring.filter(|_| show_ring), |this, ring| {
                 crate::styled::focus_ring(this, window, ring)
             })
+            .map(|this| crate::bevel::bevel_border(this, crate::bevel::Relief::Sunken, cx))
             .when_some(state.filter(|_| !disabled), |this, state| {
                 this.on_mouse_down(MouseButton::Left, move |_, window, cx| {
                     // Native buttons prevent the default mouse-down focus action.

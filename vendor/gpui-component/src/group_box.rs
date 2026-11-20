@@ -175,6 +175,9 @@ impl RenderOnce for GroupBox {
                             .gap_4()
                             .rounded(cx.theme().radius)
                             .refine_style(&self.content_style)
+                            .map(|this| {
+                                crate::bevel::bevel_border(this, crate::bevel::Relief::Etched, cx)
+                            })
                             .children(self.children),
                     )
                     .when_some(self.footer, |this, footer| {

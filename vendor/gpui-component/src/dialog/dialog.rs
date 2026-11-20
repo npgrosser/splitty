@@ -790,6 +790,13 @@ impl RenderOnce for Dialog {
                                         .w(width)
                                         .when_some(self.props.max_width, |this, w| this.max_w(w))
                                         .max_h(max_height)
+                                        .map(|this| {
+                                            crate::bevel::bevel_border(
+                                                this,
+                                                crate::bevel::Relief::Frame,
+                                                cx,
+                                            )
+                                        })
                                         .child(
                                             v_flex()
                                                 .flex_1()

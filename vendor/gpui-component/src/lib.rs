@@ -31,6 +31,7 @@ pub mod alert;
 pub mod attachment;
 pub mod avatar;
 pub mod badge;
+pub mod bevel;
 pub mod breadcrumb;
 pub mod bubble;
 pub mod button;

@@ -129,6 +129,7 @@ impl Render for Tooltip {
                 .text_sm()
                 .gap_3()
                 .refine_style(&self.style)
+                .map(|this| crate::bevel::bevel_border(this, crate::bevel::Relief::Frame, cx))
                 .map(|this| {
                     this.child(div().map(|this| match self.content {
                         TooltipContext::Text(ref text) => this.child(text.clone()),
