@@ -54,7 +54,7 @@ Sessions on the host keep running without tmux or screen.
 A remote terminal's folder also opens in VS Code or Zed on your computer:
 [Files and editors](docs/files-and-editors.md).
 
-## Themes and keys
+## Customize themes and keys
 
 ![Themes change the whole window; the settings list every key](https://github.com/npgrosser/splitty/raw/media/customize.webp)
 
