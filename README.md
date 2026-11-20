@@ -2,7 +2,7 @@
 
 A graphical terminal multiplexer for Linux, macOS and Windows.
 
-![Local screens and a screen of an SSH host, with terminals in splits and tabs](https://github.com/npgrosser/splitty/raw/media/overview.webp)
+![Local screens and the screens of two SSH hosts, with terminals in splits and tabs](https://github.com/npgrosser/splitty/raw/media/overview.webp)
 
 ## Install
 
