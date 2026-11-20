@@ -742,6 +742,57 @@ impl Workspace {
         }
     }
 
+    /// Open the terminal's selection in a text viewer of `source`; nothing
+    /// without a selection.
+    pub(super) fn open_terminal_selection(
+        &mut self,
+        source: SourceToken,
+        screen: &ScreenKey,
+        pane: &str,
+        terminal: &Entity<Terminal>,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = terminal.update(cx, |terminal, _| terminal.selection());
+        // Trailing blanks of a line are the terminal's, not the text's.
+        let text = selected
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text.trim_end_matches('\n').to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if text.len() > 262_144 {
+            self.status = "The selection is too large for a viewer".into();
+            cx.notify();
+            return;
+        }
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        let title = model
+            .snapshot()
+            .and_then(|screen| {
+                screen
+                    .panes
+                    .values()
+                    .find(|entry| entry.id.as_str() == pane)
+            })
+            .and_then(|entry| entry.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Selection".to_owned());
+        let command = Command::OpenTextViewer {
+            screen: screen.screen_id().to_owned(),
+            cwd: transfer::pane_cwd(model, pane),
+            pane: pane.to_owned(),
+            title,
+            text,
+        };
+        self.send_captured(source, command, cx);
+    }
+
     pub(super) fn choose_terminal_menu_action(
         &mut self,
         action: TerminalMenuAction,
@@ -798,48 +849,13 @@ impl Workspace {
                 let Some(source) = target.authority else {
                     return;
                 };
-                let selected = target
-                    .terminal
-                    .update(cx, |terminal, _| terminal.selection());
-                // Trailing blanks of a line are the terminal's, not the text's.
-                let text = selected
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::trim_end)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let text = text.trim_end_matches('\n').to_owned();
-                if text.is_empty() {
-                    return;
-                }
-                if text.len() > 262_144 {
-                    self.status = "The selection is too large for a viewer".into();
-                    cx.notify();
-                    return;
-                }
-                let pane = target.route.pane_id().to_owned();
-                let Some(model) = self.selected_model() else {
-                    return;
-                };
-                let title = model
-                    .snapshot()
-                    .and_then(|screen| {
-                        screen
-                            .panes
-                            .values()
-                            .find(|entry| entry.id.as_str() == pane)
-                    })
-                    .and_then(|entry| entry.title.clone())
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or_else(|| "Selection".to_owned());
-                let command = Command::OpenTextViewer {
-                    screen: target.screen.screen_id().to_owned(),
-                    cwd: transfer::pane_cwd(model, &pane),
-                    pane,
-                    title,
-                    text,
-                };
-                self.send_captured(source, command, cx);
+                self.open_terminal_selection(
+                    source,
+                    &target.screen,
+                    target.route.pane_id(),
+                    &target.terminal,
+                    cx,
+                );
             }
             TerminalMenuAction::Paste => {
                 if target.authority.is_none() {

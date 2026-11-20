@@ -147,6 +147,9 @@ pub(super) struct ProfilePicker {
     source: ProfileSource,
     selected: Option<String>,
     scroll: ScrollHandle,
+    /// Opened by a key from the terminal, which takes the focus back when
+    /// the picker closes.
+    pub(super) from_key: bool,
 }
 
 impl ProfilePicker {
@@ -252,10 +255,13 @@ impl Workspace {
             .is_some_and(|picker| picker.source.slot.node_id() == slot)
     }
 
+    /// Close the picker of `slot` for `target`; whether its trigger may take
+    /// the focus back. A picker opened by a key returns it to the terminal.
     pub(super) fn dismiss_profile_picker(
         &mut self,
         slot: &str,
         target: &PaneActionTarget,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.profile_picker.as_ref().is_some_and(|picker| {
@@ -265,9 +271,15 @@ impl Workspace {
                 && picker.source.route.pane_id() == target.pane_id.as_str()
                 && picker.source.route.session_id() == target.session_id.as_str()
         }) {
-            self.profile_picker = None;
+            let from_key = self
+                .profile_picker
+                .take()
+                .is_some_and(|picker| picker.from_key);
             cx.notify();
-            return true;
+            if from_key {
+                self.focus_current(window, cx);
+            }
+            return !from_key;
         }
         false
     }
@@ -332,6 +344,7 @@ impl Workspace {
             },
             selected,
             scroll: ScrollHandle::new(),
+            from_key: false,
         });
         cx.notify();
     }

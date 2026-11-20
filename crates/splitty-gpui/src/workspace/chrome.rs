@@ -663,6 +663,7 @@ impl Workspace {
                                     if this.dismiss_profile_picker(
                                         &picker_slot,
                                         &picker_target.pane,
+                                        window,
                                         cx,
                                     ) {
                                         // Only the keyboard returns to the

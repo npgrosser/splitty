@@ -2,6 +2,8 @@
 use gpui_kit::base::FocusTrapElement as _;
 mod arrange;
 mod chrome;
+#[cfg(all(test, feature = "ui-test-support"))]
+mod command_tests;
 mod commands;
 mod drawer;
 mod drawer_ports;
@@ -1211,6 +1213,13 @@ pub struct Workspace {
     drawer_width: i32,
     drawer_edge_reveal: bool,
     drawer_overlay_open: bool,
+    /// The overlay Drawer was opened by a keyboard command and closes when
+    /// the keyboard leaves it.
+    drawer_keyboard_reveal: bool,
+    /// The keyboard focus of the Drawer's Screen list, on the row of
+    /// `drawer_focus_row` or else of the shown Screen.
+    drawer_focus: FocusHandle,
+    drawer_focus_row: Option<ScreenKey>,
     drawer_edge_last: Option<(Point<Pixels>, Instant)>,
     drawer_edge_task: Option<Task<()>>,
     drawer_collapsed: HashSet<ScreenKey>,
@@ -1702,6 +1711,9 @@ impl Workspace {
                 drawer_width: 200,
                 drawer_edge_reveal: true,
                 drawer_overlay_open: false,
+                drawer_keyboard_reveal: false,
+                drawer_focus: cx.focus_handle(),
+                drawer_focus_row: None,
                 drawer_edge_last: None,
                 drawer_edge_task: None,
                 drawer_collapsed: HashSet::new(),
@@ -2359,6 +2371,7 @@ impl Workspace {
                 }
             }
         }
+        self.end_keyboard_reveal(cx);
         self.focus_current(window, cx);
         cx.notify();
     }
@@ -4096,8 +4109,8 @@ impl Workspace {
     ) {
         match command {
             KeyCommand::NewScreen => self.create_screen(window, cx),
-            KeyCommand::NextScreen => self.next_screen(cx),
-            KeyCommand::PreviousScreen => self.previous_screen(cx),
+            KeyCommand::NextScreen => self.next_screen(window, cx),
+            KeyCommand::PreviousScreen => self.previous_screen(window, cx),
             KeyCommand::SelectScreen(number) => self.select_screen_number(number, window, cx),
             KeyCommand::CloseScreen => self.close_shown_screen(window, cx),
             KeyCommand::RenameScreen => self.rename_shown_screen(window, cx),
@@ -4140,7 +4153,7 @@ impl Workspace {
                 self.scroll_terminal(terminal::ScrollStep::Bottom, window, cx)
             }
             KeyCommand::CopyWorkingDirectory => self.copy_working_directory(cx),
-            KeyCommand::OpenSelectionInViewer => self.open_selection_in_viewer(window, cx),
+            KeyCommand::OpenSelectionInViewer => self.open_selection_in_viewer(cx),
             KeyCommand::ToggleDrawer => self.toggle_drawer_overlay(cx),
             KeyCommand::FocusDrawer => self.focus_drawer(window, cx),
             KeyCommand::Hosts => self.show_hosts(window, cx),
