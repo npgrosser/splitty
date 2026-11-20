@@ -18,8 +18,7 @@ rpm, tar.gz). The notes for each system are in [Install](docs/install.md).
 
 ![One terminal with a Git graph, a test run and a diff](https://github.com/npgrosser/splitty/raw/media/terminal.webp)
 
-A native app written in Rust and drawn on the GPU, without a browser engine.
-Terminal emulation is [libghostty-vt](https://ghostty.org), Ghostty's library.
+Written in Rust. Terminal emulation by [libghostty](https://ghostty.org).
 
 ## Full keyboard control over splits and tabs
 
