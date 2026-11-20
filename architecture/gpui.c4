@@ -37,6 +37,11 @@ model {
       metadata { module 'splitty_gpui::terminal_engine' }
     }
 
+    gpui_keys = component 'gpui_keys' {
+      description 'The application\'s keymap as every view reads it for dispatch and labels, replaced at run time, and the key combination of a key event, with Shift and a digit recognized on known layouts that turn it into a symbol.'
+      metadata { module 'splitty_gpui::keys' }
+    }
+
     gpui_workspace = component 'gpui_workspace' {
       description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references with passive exact-host navigation, bounded port menus, captured remote Screen creation and separate popup/group intent lifetimes, one captured inline rename editor for local and live remote Screens, plus global navigation, source-qualified unread count and severity projection over a shared notification ledger, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured row displacement, a dropped arrangement held until the service order arrives, and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views and one identity-bound terminal context popup with separate retained presentation and live command authority, fixed-local controlled settings with separate appearance and notification observations plus local library controls, the last applied appearance remembered for the first frames of the next window, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools. Native Hosts uses a themed searchable master-detail browser with virtualized Screens and Ports, cached connect-and-open continuations fenced by view and owner, per-group creation, within-group screen clipping and whole-host drag motion. The window title carries workspace identity without an extra terminal header. Connecting, the Screens of a host and its ports open as small panels beside the Drawer that share the look of the context menus and one keyboard model; the Hosts browser is the manager behind them. Images and files pasted or dropped into a terminal or scratchpad go to the server of that pane and arrive as paths, and offered files are saved after the user chose Save, each shown as a window notice. A host group closes as a whole from its caption, its panel or the manager while its Screens keep running; the Hosts panel then shows how many Screens the host had open here and reopens them when the host is chosen.'
       metadata { module 'splitty_gpui::workspace' }
@@ -112,5 +117,11 @@ model {
     gpui_workspace -> splitty.client_core.client_root 'Consume charged source events and construct isolated native view fixtures'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'
     gpui_document -> splitty.client_core.client_root 'Form a source-scoped annotation draft'
+    gpui_keys -> splitty.client_core.keymap 'Hold the effective keymap and look up key combinations'
+    gpui_main -> splitty.client_core.keymap 'List the default keys in the help text'
+    terminal -> gpui_keys 'Look up the find, clipboard and scroll keys'
+    terminal -> splitty.client_core.keymap 'Map keyboard commands to local terminal actions'
+    gpui_workspace -> gpui_keys 'Dispatch key events, show key labels and replace the keymap'
+    gpui_workspace -> splitty.client_core.keymap 'Run registry commands, list them in the palette and keep the user\'s overrides'
   }
 }

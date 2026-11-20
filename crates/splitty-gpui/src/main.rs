@@ -8,6 +8,7 @@ mod appearance;
 mod askpass;
 mod chrome;
 mod document;
+mod keys;
 mod offscreen;
 mod startup;
 mod terminal;
@@ -428,6 +429,46 @@ impl OwnedWorker {
     }
 }
 
+/// The default keys of every command, one line per category, as `--help`
+/// lists them. `keybindings.json` in the configuration directory changes them.
+fn key_help(platform: splitty_client_core::keymap::Platform) -> String {
+    use splitty_client_core::keymap::{Command, Keymap};
+    let keymap = Keymap::defaults(platform);
+    let mut lines = vec![format!(
+        "Default keys (change them in {}):",
+        splitty_client_core::keymap::KeybindingsFile::default_path().display()
+    )];
+    let mut category = None;
+    let mut entries: Vec<String> = Vec::new();
+    for command in Command::all() {
+        if category != Some(command.category()) {
+            if let Some(category) = category.replace(command.category()) {
+                lines.push(format!("  {}: {}", category.title(), entries.join("; ")));
+                entries.clear();
+            }
+        }
+        let keys: Vec<_> = keymap
+            .bindings(command)
+            .iter()
+            .map(|chord| chord.label(platform))
+            .collect();
+        match command {
+            Command::SelectScreen(1) => {
+                // The nine Screen keys differ only in their digit.
+                let keys: Vec<_> = keys.iter().map(|key| format!("{key}–9")).collect();
+                entries.push(format!("Switch to Screen 1–9 {}", keys.join(", ")));
+            }
+            Command::SelectScreen(_) => {}
+            _ if keys.is_empty() => {}
+            _ => entries.push(format!("{} {}", command.title(), keys.join(", "))),
+        }
+    }
+    if let Some(category) = category {
+        lines.push(format!("  {}: {}", category.title(), entries.join("; ")));
+    }
+    lines.join("\n")
+}
+
 fn main() -> anyhow::Result<()> {
     // The embedded service runs this executable as OpenSSH's askpass helper.
     #[cfg(not(target_os = "windows"))]
@@ -456,8 +497,9 @@ fn main() -> anyhow::Result<()> {
     )?;
     if help {
         println!(
-                    "splitty-gpui [--wsl-distro NAME --wsl-backend PATH --wsl-config-dir PATH] [--workspace-smoke] [--probe | --smoke] [--web-spike] [--screenshot PATH]\nLocal workspace with terminal splits and tabs. On Windows, without WSL arguments the app uses the remembered or default WSL distribution and installs its backend there; the three WSL arguments together name an explicit target instead, with absolute Linux paths in an existing distribution, and install nothing. WSL itself is never installed. --workspace-smoke exercises its real sessions, layout and keyboard routing. --probe opens the legacy terminal/Markdown fixture; --smoke checks that fixture and exits. --web-spike selects the fixture with optional CEF.\nWorkspace shortcuts: Cmd on macOS, Alt elsewhere. Modifier+T creates a tab; modifier+D splits right; modifier+Shift+D splits below; modifier+W closes the focused pane; modifier+M toggles the focused group; modifier+Shift+arrow focuses the nearest split group; modifier+PageUp/PageDown selects the previous/next tab in that group. Ctrl+Shift+Space creates a Screen; modifier+Shift+1–9 selects a Screen on verified US/German XKB layouts. Drag a tab into the tab row for exact placement, or into the pane body for a split; the tab row scrolls horizontally. Ctrl+C and Ctrl+Shift+C/V remain terminal input and copy/paste.\n--screenshot requires --smoke and the capture feature; native Linux capture remains unavailable."
-                );
+            "splitty-gpui [--wsl-distro NAME --wsl-backend PATH --wsl-config-dir PATH] [--workspace-smoke] [--probe | --smoke] [--web-spike] [--screenshot PATH]\nLocal workspace with terminal splits and tabs. On Windows, without WSL arguments the app uses the remembered or default WSL distribution and installs its backend there; the three WSL arguments together name an explicit target instead, with absolute Linux paths in an existing distribution, and install nothing. WSL itself is never installed. --workspace-smoke exercises its real sessions, layout and keyboard routing. --probe opens the legacy terminal/Markdown fixture; --smoke checks that fixture and exits. --web-spike selects the fixture with optional CEF.\nDrag a tab into the tab row for exact placement, or into the pane body for a split; the tab row scrolls horizontally. Keys that run no command, Ctrl+C among them, remain terminal input.\n--screenshot requires --smoke and the capture feature; native Linux capture remains unavailable.\n\n{}",
+            key_help(splitty_client_core::keymap::Platform::current())
+        );
         return Ok(());
     }
     // Started without a WSL target, the Windows workspace chooses a
@@ -613,4 +655,32 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("Native smoke did not satisfy its evidence checks");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::key_help;
+    use splitty_client_core::keymap::Platform;
+
+    #[test]
+    fn the_help_lists_the_default_keys_of_the_platform() {
+        let linux = key_help(Platform::Linux);
+        assert!(linux.contains("  Screens: New Screen Ctrl+Shift+Space; "));
+        assert!(linux.contains("Switch to Screen 1–9 Alt+1–9, Alt+Shift+1–9;"));
+        assert!(linux.contains("New Tab Alt+T"));
+        assert!(linux.contains("Copy Ctrl+Shift+C, Super+C"));
+        assert!(
+            !linux.contains("Connect to Host"),
+            "unbound commands stay out"
+        );
+        assert!(!linux.contains("Switch to Screen 2"));
+        let mac = key_help(Platform::Mac);
+        assert!(mac.contains("Switch to Screen 1–9 ⌘1–9;"));
+        assert!(mac.contains("Quit ⌘Q"));
+        assert_eq!(
+            mac.lines().count(),
+            7,
+            "a heading and one line per category"
+        );
+    }
 }

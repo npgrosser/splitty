@@ -445,6 +445,8 @@ impl Workspace {
             .overflow_y_scroll()
             .track_scroll(&picker.scroll);
         let mut count = 0;
+        // The default profile is the one the new-tab key opens.
+        let new_tab_key = crate::keys::label(KeyCommand::NewTab, cx);
         if let Some(snapshot) = &self.profiles {
             for (index, profile) in snapshot
                 .state()
@@ -492,16 +494,8 @@ impl Workspace {
                     .when_some(badge, |meta, badge| {
                         meta.child(menu_style::badge(colors, badge, selected))
                     })
-                    .when(default, |meta| {
-                        meta.child(menu_style::detail(
-                            colors,
-                            if cfg!(target_os = "macos") {
-                                "⌘T"
-                            } else {
-                                "Alt+T"
-                            },
-                            selected,
-                        ))
+                    .when_some(new_tab_key.clone().filter(|_| default), |meta, key| {
+                        meta.child(menu_style::detail(colors, key, selected))
                     });
                 let row = if available {
                     menu_style::item(colors, selected, false)
