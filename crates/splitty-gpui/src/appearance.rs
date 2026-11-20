@@ -152,6 +152,9 @@ pub struct NativeAppearance {
     pub control_radius: f32,
     /// 3D edges; `None` for flat borders.
     pub bevel: Option<Bevel>,
+    /// The background of fields that hold text; `None` keeps each field's
+    /// own background.
+    pub field: Option<u32>,
     pub title_bar: TitleBarTheme,
     /// Status colors, as host connection dots use them.
     pub success: u32,
@@ -266,6 +269,7 @@ impl NativeAppearance {
             radius: 8.,
             control_radius: 8.,
             bevel: None,
+            field: None,
             title_bar: TitleBarTheme::default(),
             success: 0x98c379,
             warning: 0xe5c07b,
@@ -472,6 +476,7 @@ impl NativeAppearance {
         self.radius = f32::from(kit.radius).clamp(0., 24.);
         self.control_radius = self.radius;
         self.bevel = None;
+        self.field = None;
         self.title_bar = TitleBarTheme::default();
         self.hover_overlay = (self.text << 8) | 0x0f;
         self.shadow = if dark { 0x00000073 } else { 0x00000033 };
@@ -607,6 +612,11 @@ impl NativeAppearance {
             valid &= color.is_some();
             color
         });
+        if let Some(value) = &block.field {
+            let color = parse_color(value).map(|color| color.over(self.surface));
+            valid &= color.is_some();
+            self.field = color.or(self.field);
+        }
         match &block.bevel {
             None => {}
             Some(Maybe::Keyword(keyword)) if keyword == "none" => self.bevel = None,
@@ -1324,7 +1334,7 @@ mod tests {
     fn the_splitty_block_gives_a_theme_its_edges_corners_and_title_bar() {
         let block: ChromeBlock = serde_json::from_value(serde_json::json!({
             "surface": "#c0c0c0", "raised": "#c0c0c0", "active": "#000080",
-            "active-text": "#ffffff", "menu-hover": "#000080", "radius": 8,
+            "active-text": "#ffffff", "menu-hover": "#000080", "field": "#ffffff", "radius": 8,
             "control-radius": 4,
             "bevel": {"highlight": "#ffffff", "light": "#dfdfdf",
                       "shadow": "#808080", "dark-shadow": "#000000"},
@@ -1352,6 +1362,7 @@ mod tests {
             })
         );
         assert_eq!((shown.radius, shown.control_radius), (8., 4.));
+        assert_eq!(shown.field, Some(0xffffff));
         assert_eq!((shown.corner(6.), shown.corner(3.)), (4., 3.));
         assert_eq!(
             shown.title_bar,

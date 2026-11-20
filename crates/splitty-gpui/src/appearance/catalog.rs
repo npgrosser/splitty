@@ -113,6 +113,8 @@ pub struct ChromeBlock {
     pub radius: Option<f32>,
     /// The corners of controls, where they differ from `radius`.
     pub control_radius: Option<f32>,
+    /// The background of fields that hold text.
+    pub field: Option<String>,
     /// 3D edges in place of flat borders.
     pub bevel: Option<Maybe<BevelBlock>>,
     pub title_bar: Option<TitleBarBlock>,
