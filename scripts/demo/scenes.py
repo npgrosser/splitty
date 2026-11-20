@@ -2,13 +2,23 @@
 
 A scene is a name, how the app starts (drawer, zoom, theme, size) and a
 function that plays it on a `Stage` (see `record.py`). Pointer positions are
-in pixels of the clip.
+in pixels of the window's content, below its title bar; a negative one counts
+from the right or the bottom edge.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Callable
+
+
+# The height of the app's title bar in the scenes' theme and zoom.
+TITLE_BAR = 36
+# Seconds the stand-in test run and build take, with a margin. A program that
+# ends in a pane nobody looks at leaves an unread mark, so a setup waits for
+# it while its pane has the focus.
+FINISH = 4.0
 
 
 @dataclass
@@ -23,8 +33,9 @@ class Scene:
     size: tuple[int, int] | None = None
     # The machines the scene reaches over SSH, by name.
     hosts: tuple[str, ...] = ()
-    # Whether the window shows the app's own title bar.
-    decorated: bool = False
+    # Whether the window shows the app's own title bar, as it does on a
+    # desktop, in the shape the theme gives it.
+    decorated: bool = True
     # More of the app's `config.toml`, such as a `[notifications]` table.
     config: str = ""
     # Seconds the window gets before the setup and after the last step.
@@ -72,7 +83,7 @@ def pointer_setup(stage):
 
 def pointer(stage):
     """Five tabs become a layout by dragging them out of their group."""
-    width, height = stage.hands.size
+    width, height = stage.size
     # The tab bar's height, and where the five tabs of the setup are.
     bar = 17
     monitor, serve, logs, tests, graph = 55, 175, 285, 440, 650
@@ -97,7 +108,7 @@ def rename(stage, name: str):
     stage.key("Return", label="", pause=0.7)
 
 
-SETTINGS = (70, 768)
+SETTINGS = (70, -32)
 
 
 def customize_setup(stage):
@@ -106,11 +117,11 @@ def customize_setup(stage):
     stage.run("git log --graph --oneline --all")
     stage.key("alt+shift+d")
     stage.run("tests")
+    time.sleep(FINISH)
 
 
-# The Theme list of the settings after the page is scrolled, below the
-# window's title bar, which this scene shows.
-THEME_SELECT = (430, 572)
+# The Theme list of the settings after the page is scrolled.
+THEME_SELECT = (430, 536)
 
 
 def customize(stage):
@@ -135,7 +146,7 @@ SCENES = [
     Scene("terminal", terminal),
     Scene("splits", splits),
     Scene("pointer", pointer, setup=pointer_setup),
-    Scene("customize", customize, setup=customize_setup, drawer=True, decorated=True),
+    Scene("customize", customize, setup=customize_setup, drawer=True),
 ]
 
 from scenes_remote import SCENES as _REMOTE  # noqa: E402

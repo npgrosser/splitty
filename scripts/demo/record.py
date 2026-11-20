@@ -36,8 +36,9 @@ from PIL import Image, ImageDraw, ImageFont
 import scenes
 
 FPS = 24
-# The private display's size is the clip's.
-DEFAULT_SIZE = (1280, 800)
+# The size of the window's content. The private display, and with it the
+# clip, is taller by the title bar of a scene that shows one.
+DEFAULT_SIZE = (1440, 900)
 HOME = Path(__file__).resolve().parent / "home"
 
 
@@ -194,13 +195,17 @@ class Stage:
     """
 
     def __init__(self, hands: Screen, recorder: Recorder | None, xdotool: str, env: dict,
-                 seed: str):
+                 seed: str, top: int = 0):
         self.hands, self.recorder = hands, recorder
         self.xdotool, self.env = xdotool, env
+        # A scene's positions are those of the window's content: `top` is the
+        # height of the title bar above it, `size` what is left below.
+        self.top = top
+        self.size = (hands.size[0], hands.size[1] - top)
         # (start, end, label) of the key chips shown in the clip.
         self.keys: list[tuple[float, float, str]] = []
         self.pointer_used = False
-        self.position = (float(hands.size[0] - 4), float(hands.size[1] - 4))
+        self.position = (float(self.size[0] - 4), float(self.size[1] - 4))
         self.fast = True
         self.random = random.Random(seed)
         # The demo home, for a scene that leaves a signal to a stand-in program.
@@ -233,14 +238,23 @@ class Stage:
         self.type(command, pause=0.2)
         self.key("Return", label="", pause=pause)
 
+    def point(self, x: float, y: float):
+        self.hands.point(x, y + self.top)
+
+    def at(self, x: float, y: float) -> tuple[float, float]:
+        """A scene's position in the content: a negative one counts from the
+        right or the bottom edge, where things anchored there stay."""
+        return (float(x if x >= 0 else self.size[0] + x),
+                float(y if y >= 0 else self.size[1] + y))
+
     def move(self, x: float, y: float, pace: float = 1.0):
         """Take the pointer to a place of the window as a hand would: along a
         slight arc, fast in the middle, and settling at the end."""
-        start, end = self.position, (float(x), float(y))
+        start, end = self.position, self.at(x, y)
         distance = math.dist(start, end)
         self.position = end
         if self.fast or distance < 2:
-            self.hands.point(*end)
+            self.point(*end)
             return
         self.pointer_used = True
         # Farther targets take longer, by less than their distance (Fitts).
@@ -270,18 +284,18 @@ class Stage:
             px = u ** 3 * start[0] + 3 * u * u * t * first[0] + 3 * u * t * t * second[0] + t ** 3 * target[0]
             py = u ** 3 * start[1] + 3 * u * u * t * first[1] + 3 * u * t * t * second[1] + t ** 3 * target[1]
             wobble = 0.5 * (1 - t)
-            self.hands.point(px + self.random.uniform(-wobble, wobble),
-                             py + self.random.uniform(-wobble, wobble))
+            self.point(px + self.random.uniform(-wobble, wobble),
+                       py + self.random.uniform(-wobble, wobble))
             rest = began + duration * step / steps - time.monotonic()
             if rest > 0:
                 time.sleep(rest)
         if past:
             time.sleep(self.random.uniform(0.03, 0.07))
             for step in range(1, 6):
-                self.hands.point(past[0] + (end[0] - past[0]) * step / 5,
-                                 past[1] + (end[1] - past[1]) * step / 5)
+                self.point(past[0] + (end[0] - past[0]) * step / 5,
+                           past[1] + (end[1] - past[1]) * step / 5)
                 time.sleep(0.012)
-        self.hands.point(*end)
+        self.point(*end)
 
     def click(self, x: float, y: float, button: int = 1, pause: float = 0.5, pace: float = 1.0):
         self.move(x, y, pace)
@@ -305,14 +319,15 @@ class Stage:
              pace: float = 1.15):
         """Press at `start`, carry to `end`, release. The way there passes a
         point just off the start, so the app sees the drag begin."""
+        start, end = self.at(*start), self.at(*end)
         self.move(*start)
         self.wait(0.1)
         self.hands.button(1, True)
         time.sleep(0.07)
         if self.fast:
             for step in range(1, 9):
-                self.hands.point(start[0] + (end[0] - start[0]) * step / 8,
-                                 start[1] + (end[1] - start[1]) * step / 8)
+                self.point(start[0] + (end[0] - start[0]) * step / 8,
+                           start[1] + (end[1] - start[1]) * step / 8)
                 time.sleep(0.03)
             self.position = (float(end[0]), float(end[1]))
         else:
@@ -417,7 +432,7 @@ def wait_for(check, what: str, seconds: float = 30):
     raise RuntimeError(f"timed out: {what}")
 
 
-def cursor_sprite() -> Image.Image:
+def cursor_sprite(grow: float) -> Image.Image:
     """An arrow pointer with a dark outline, readable on any theme."""
     scale = 4
     points = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12)]
@@ -426,27 +441,30 @@ def cursor_sprite() -> Image.Image:
     scaled = [((x + 1.5) * scale, (y + 1.5) * scale) for x, y in points]
     draw.polygon(scaled, fill=(255, 255, 255, 255))
     draw.line(scaled + [scaled[0]], fill=(20, 20, 20, 255), width=scale + 1, joint="curve")
-    return image.resize((16, 24), Image.LANCZOS)
+    return image.resize((round(16 * grow), round(24 * grow)), Image.LANCZOS)
 
 
-def key_chip(label: str, font) -> Image.Image:
+def key_chip(label: str, font, grow: float) -> Image.Image:
     """A pressed key as a chip for the bottom of the clip."""
     left, top, right, bottom = font.getbbox(label)
-    width, height = right - left + 28, 34
+    side = round(14 * grow)
+    width, height = right - left + 2 * side, round(34 * grow)
     chip = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(chip)
-    draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=8,
+    draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=round(8 * grow),
                            fill=(24, 24, 28, 235), outline=(255, 255, 255, 70))
-    draw.text((14 - left, (height - (bottom - top)) / 2 - top), label,
+    draw.text((side - left, (height - (bottom - top)) / 2 - top), label,
               font=font, fill=(255, 255, 255, 255))
     return chip
 
 
 def compose(recorder: Recorder, stage: Stage, length: float, size, font_path: str | None):
     """The recorded frames with the pointer and the key chips drawn in."""
-    font = ImageFont.truetype(font_path, 15)
-    cursor = cursor_sprite()
-    chips = {label: key_chip(label, font) for _, _, label in stage.keys}
+    # The pointer and the chips keep their share of a clip of any width.
+    grow = size[0] / 1280
+    font = ImageFont.truetype(font_path, round(15 * grow))
+    cursor = cursor_sprite(grow)
+    chips = {label: key_chip(label, font, grow) for _, _, label in stage.keys}
     # A chip appearing or leaving is a frame of its own.
     moments = sorted({0.0} | {frame[0] for frame in recorder.frames}
                      | {t for start, end, _ in stage.keys for t in (start, end)})
@@ -461,7 +479,8 @@ def compose(recorder: Recorder, stage: Stage, length: float, size, font_path: st
         shown = [label for start, end, label in stage.keys if start <= moment < end]
         if shown:
             chip = chips[shown[-1]]
-            image.alpha_composite(chip, ((size[0] - chip.width) // 2, size[1] - chip.height - 18))
+            image.alpha_composite(chip, ((size[0] - chip.width) // 2,
+                                         size[1] - chip.height - round(18 * grow)))
         if stage.pointer_used:
             image.alpha_composite(cursor, (max(0, pointer[0] - 1), max(0, pointer[1] - 1)))
         following = moments[position + 1] if position + 1 < len(moments) else length
@@ -487,7 +506,9 @@ def save(images, durations, out: Path, name: str):
 
 
 def record(scene, args, out: Path, display: str):
-    size = scene.size or DEFAULT_SIZE
+    content = scene.size or DEFAULT_SIZE
+    top = scenes.TITLE_BAR if scene.decorated else 0
+    size = (content[0], content[1] + top)
     root = Path(tempfile.mkdtemp(prefix="splitty-demo-"))
     xvfb = app = host = home = None
     try:
@@ -545,7 +566,7 @@ def record(scene, args, out: Path, display: str):
             hands.maximized(int(handle))
         hands.point(size[0] - 4, size[1] - 4)
         time.sleep(scene.settle)
-        stage = Stage(hands, None, args.xdotool, tools, scene.name)
+        stage = Stage(hands, None, args.xdotool, tools, scene.name, top)
         stage.home = home
         if scene.setup:
             scene.setup(stage)

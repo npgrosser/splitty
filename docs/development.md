@@ -219,16 +219,21 @@ private X server with a home, configuration and shell of its own (a copy of
 `scripts/demo/home/`, with stand-in programs for a server, a test run, a
 process monitor and a coding agent), sets its window up off camera and then
 plays keys, text and pointer movement. Nothing of the recording machine shows.
+The window fills the clip and shows the app's own title bar: the recorder
+stands in for a compositing window manager as far as the app asks for one.
 
 It needs Xvfb, xdotool, libX11, libXtst, Pillow (`python3-pil`), Git and the
 DejaVu fonts, and release builds of `splitty-gpui` and `splitty-server` side by
-side. The scenes with a remote host (`remote`, `reconnect`, `ports`) also need
-`sshd`, `ssh`, `unshare`, `nsenter`, `ip`, `curl` and unprivileged user
-namespaces: they reach a host in a network namespace of its own
-(`scripts/demo/remote.py`); `--sshd-root` names an unpacked OpenSSH server
-where none is installed. Pointer positions in the scenes are pixels of the
-clip for the default theme at the scenes' zoom; after a change of the layout,
-`--keep` and a look at the frames show where they have to move.
+side. The scenes with a remote host (`overview`, `screens`, `reconnect`,
+`ports`) also need `sshd`, `ssh`, `unshare`, `nsenter`, `ip`, `curl` and
+unprivileged user namespaces: they reach each host in a network namespace of
+its own (`scripts/demo/remote.py`); `--sshd-root` names an unpacked OpenSSH
+server where none is installed. Pointer positions in the scenes are pixels of
+the window's content, below the title bar, for the default theme at the
+scenes' zoom; a negative one counts from the right or the bottom edge, where
+the drawer's lower entries and their popovers stay when the window's size
+changes. After a change of the layout, a look at the clip's frames shows
+where they have to move.
 
 The clips live on the branch `media`, which holds nothing else, and the README
 names them by URL, so the history of `main` does not grow with every

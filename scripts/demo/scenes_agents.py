@@ -2,7 +2,7 @@
 (see `home/bin/agent`): `agents` follows the status agents report (OSC 7501)
 through marks and the window's notices, which its configuration turns on.
 
-Pointer positions are pixels of the clip.
+Pointer positions are those of the window's content (see `scenes.py`).
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from scenes import Scene, rename
 
 # "Show" on the window's notice of a program that waits or is done.
-SHOW = (1218, 754)
+SHOW = (-62, -46)
 
 
 def agents_setup(stage):

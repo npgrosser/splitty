@@ -1,31 +1,32 @@
 """The scenes with a remote host, `devbox` (see `remote.py`).
 
-Pointer positions are pixels of the clip, with the drawer pinned and the two
-local screens of `local_setup` above the host's group.
+Pointer positions are those of the window's content (see `scenes.py`), with
+the drawer pinned and the two local screens of `local_setup` above the host's
+group.
 """
 
 from __future__ import annotations
 
 import time
 
-from scenes import Scene, rename
+from scenes import FINISH, Scene, rename
 
-HOSTS = (70, 692)
+HOSTS = (70, -108)
 # The host's line in the Hosts popover, and New Screen in its panel.
-DEVBOX = (330, 707)
-NEW_SCREEN = (340, 597)
+DEVBOX = (330, -93)
+NEW_SCREEN = (340, -203)
 # The host's line in the drawer: its ports button and unplug button.
 PORTS = (182, 293)
 UNPLUG = (147, 293)
 REMOTE_SCREEN = (80, 330)
 # The detected port in the ports popover.
 PORT_8080 = (340, 411)
-# Where the terminal's context menu opens, and its "Open Folder in" entry.
+# Where the terminal's context menu opens, and its "Open Folder in" entry:
+# the menu is as tall as the room below that place and so ends at the
+# window's bottom edge.
 MENU_AT = (700, 500)
-OPEN_FOLDER_IN = (790, 690)
+OPEN_FOLDER_IN = (790, -110)
 LOCAL_SCREEN = (80, 114)
-# Seconds the stand-in test run and build take, with a margin.
-FINISH = 4.0
 
 
 def connect(stage, host: str):
@@ -53,8 +54,6 @@ def overview_setup(stage):
     stage.run("git log --graph --oneline --all")
     stage.key("alt+d")
     stage.run("tests")
-    # A program that ends in a pane nobody looks at leaves an unread mark;
-    # these end while their pane has the focus.
     time.sleep(FINISH)
     stage.key("alt+shift+d")
     stage.run("build")
