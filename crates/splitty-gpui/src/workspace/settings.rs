@@ -20,6 +20,9 @@ use splitty_client_core::settings::{SettingsDomain, SettingsEdit, SettingsField,
 use std::rc::Rc;
 use uuid::Uuid;
 
+use super::keyboard::KeyboardPage;
+use super::Workspace;
+
 const APPEARANCE: &[SettingsField] = &[
     SettingsField::InterfaceStyle,
     SettingsField::WindowDecoration,
@@ -83,6 +86,9 @@ enum Section {
     Workspace,
     Remote,
     Notifications,
+    /// The keys of the window's commands: the application's own bindings
+    /// file, not a setting of the service.
+    Keyboard,
     /// Windows only, and only while several WSL distributions are installed.
     Wsl,
     /// Read-only: what this build and its local backend are.
@@ -90,12 +96,13 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Appearance,
         Self::Terminal,
         Self::Workspace,
         Self::Remote,
         Self::Notifications,
+        Self::Keyboard,
     ];
 
     fn id(self) -> &'static str {
@@ -105,6 +112,7 @@ impl Section {
             Self::Workspace => "workspace",
             Self::Remote => "remote",
             Self::Notifications => "notifications",
+            Self::Keyboard => "keyboard",
             Self::Wsl => "wsl",
             Self::About => "about",
         }
@@ -117,6 +125,7 @@ impl Section {
             Self::Workspace => "Workspace",
             Self::Remote => "Remote",
             Self::Notifications => "Notifications",
+            Self::Keyboard => "Keyboard",
             Self::Wsl => "WSL",
             Self::About => "About",
         }
@@ -129,7 +138,7 @@ impl Section {
             Self::Workspace => WORKSPACE,
             Self::Remote => REMOTE,
             Self::Notifications => NOTIFICATIONS,
-            Self::Wsl | Self::About => &[],
+            Self::Keyboard | Self::Wsl | Self::About => &[],
         }
     }
 
@@ -140,6 +149,7 @@ impl Section {
             Self::Workspace => "Drawer placement and size",
             Self::Remote => "Hosts and their ports",
             Self::Notifications => "Activity from other terminals",
+            Self::Keyboard => "The keys of the window's commands",
             Self::Wsl => "The distribution local terminals run in",
             Self::About => "This build and the local backend it uses",
         }
@@ -256,6 +266,7 @@ pub(super) struct SettingsView {
     wsl: WslChoice,
     /// The version the window's local backend reported, ready to show.
     backend_version: Option<String>,
+    pub(super) keyboard: KeyboardPage,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -265,6 +276,7 @@ impl SettingsView {
     pub(super) fn new(
         themes: Rc<ThemeCatalog>,
         mut available_fonts: Vec<String>,
+        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -322,6 +334,8 @@ impl SettingsView {
         if wsl.chosen.is_some() {
             Self::list_wsl_distributions(cx);
         }
+        let (keyboard, search_changes) = KeyboardPage::new(workspace, window, cx);
+        subscriptions.push(search_changes);
         Self {
             themes,
             owner: None,
@@ -338,6 +352,7 @@ impl SettingsView {
             writes: BTreeMap::new(),
             wsl,
             backend_version: None,
+            keyboard,
             _subscriptions: subscriptions,
         }
     }
@@ -750,8 +765,21 @@ impl SettingsView {
         }
     }
 
-    pub(super) fn focus(&self, window: &mut Window, cx: &mut App) {
+    /// Focus the page; a row left waiting for a key stops waiting.
+    pub(super) fn focus(&mut self, window: &mut Window, cx: &mut App) {
+        self.keyboard.cancel_recording();
         self.focus.focus(window, cx);
+    }
+
+    /// Show the Keyboard section with its search field focused.
+    pub(super) fn show_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.section != Section::Keyboard {
+            self.section = Section::Keyboard;
+            self.scroll.set_offset(point(px(0.), px(0.)));
+        }
+        self.keyboard.cancel_recording();
+        self.keyboard.focus_search(window, cx);
+        cx.notify();
     }
 
     fn restore_select(&self, field: SettingsField, window: &mut Window, cx: &mut Context<Self>) {
@@ -1219,6 +1247,7 @@ impl Render for SettingsView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.section != section {
                             this.section = section;
+                            this.keyboard.cancel_recording();
                             this.scroll.set_offset(point(px(0.), px(0.)));
                             cx.notify();
                         }
@@ -1337,6 +1366,9 @@ impl Render for SettingsView {
                             .child(form)
                             .when(self.section == Section::Wsl, |view| {
                                 view.child(self.render_wsl(cx))
+                            })
+                            .when(self.section == Section::Keyboard, |view| {
+                                view.child(self.keyboard.render(cx))
                             })
                             .when(self.section == Section::About, |view| {
                                 view.child(self.render_about(cx))
@@ -1601,7 +1633,13 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(gpui_kit::init);
         let (view, window) = cx.add_window_view(|window, cx| {
-            SettingsView::new(Rc::new(ThemeCatalog::load(None)), Vec::new(), window, cx)
+            SettingsView::new(
+                Rc::new(ThemeCatalog::load(None)),
+                Vec::new(),
+                gpui_kit::WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
         });
         let draw = |window: &mut gpui_kit::VisualTestContext| {
             window.update(|window, cx| window.draw(cx).clear(cx));
@@ -1680,6 +1718,7 @@ mod tests {
             SettingsView::new(
                 Rc::new(ThemeCatalog::load(None)),
                 vec!["Test Mono".into()],
+                gpui_kit::WeakEntity::new_invalid(),
                 window,
                 cx,
             )
@@ -1825,7 +1864,13 @@ mod tests {
         let mut cx = TestAppContext::single();
         cx.update(gpui_kit::init);
         let (view, window) = cx.add_window_view(|window, cx| {
-            SettingsView::new(Rc::new(ThemeCatalog::load(None)), Vec::new(), window, cx)
+            SettingsView::new(
+                Rc::new(ThemeCatalog::load(None)),
+                Vec::new(),
+                gpui_kit::WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
         });
         let owner = Uuid::new_v4();
         window.update(|window, cx| {
@@ -1956,5 +2001,7 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "ui-test-support"))]
+mod keyboard_tests;
 #[cfg(all(test, feature = "ui-test-support"))]
 mod notification_tests;

@@ -1603,7 +1603,9 @@ impl Workspace {
             &splitty_client_core::appearance::themes_dir(),
         )));
         let settings_themes = themes.clone();
-        let settings = cx.new(|cx| SettingsView::new(settings_themes, available_fonts, window, cx));
+        let workspace = cx.weak_entity();
+        let settings =
+            cx.new(|cx| SettingsView::new(settings_themes, available_fonts, workspace, window, cx));
         let settings_subscription = cx.subscribe_in(
             &settings,
             window,
@@ -3886,6 +3888,9 @@ impl Workspace {
         crate::keys::command(key, window.modifiers().shift, cx.keyboard_layout().id(), cx)
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.record_key(event, window, cx) {
+            return;
+        }
         if self.palette.is_some() {
             self.palette_key(&event.keystroke, window, cx);
             return;

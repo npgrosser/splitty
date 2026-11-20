@@ -1,14 +1,13 @@
-//! The command palette and the list of keyboard shortcuts: one centered panel
-//! over the window, opened by a shortcut. The palette filters the window's
-//! commands as the web client's does; choosing one runs it as its own control
-//! or shortcut would.
+//! The command palette: one centered panel over the window, opened by a
+//! shortcut. It filters the window's commands; choosing one runs it as its
+//! own control or shortcut would. Every command's keys are listed and
+//! changed on the Keyboard page of the settings.
 use super::*;
 
 /// What a palette row does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PaletteCommand {
     Run(KeyCommand),
-    Shortcuts,
 }
 
 pub(super) struct PaletteEntry {
@@ -18,7 +17,7 @@ pub(super) struct PaletteEntry {
 }
 
 /// Whether the palette lists `command`: not the numbered and directional
-/// commands, which have a row each in the shortcut list, nor itself.
+/// commands, which have a row each on the Keyboard page, nor itself.
 fn listed(command: KeyCommand) -> bool {
     !matches!(
         command,
@@ -33,9 +32,9 @@ fn listed(command: KeyCommand) -> bool {
 }
 
 /// Every command of the window in the registry's order, with its key in
-/// `keymap`, then the shortcut list.
+/// `keymap`.
 pub(super) fn palette_entries(keymap: &keymap::Keymap) -> Vec<PaletteEntry> {
-    let mut entries: Vec<_> = KeyCommand::all()
+    KeyCommand::all()
         .into_iter()
         .filter(|command| listed(*command))
         .map(|command| PaletteEntry {
@@ -43,20 +42,6 @@ pub(super) fn palette_entries(keymap: &keymap::Keymap) -> Vec<PaletteEntry> {
             shortcut: keymap.label(command),
             command: PaletteCommand::Run(command),
         })
-        .collect();
-    entries.push(PaletteEntry {
-        label: "Shortcut List".into(),
-        shortcut: None,
-        command: PaletteCommand::Shortcuts,
-    });
-    entries
-}
-
-/// The rows of the shortcut list: every command with a key.
-fn shortcut_rows(keymap: &keymap::Keymap) -> Vec<(String, String)> {
-    KeyCommand::all()
-        .into_iter()
-        .filter_map(|command| Some((command.title(), keymap.label(command)?)))
         .collect()
 }
 
@@ -80,13 +65,11 @@ pub(super) enum Palette {
         scroll: ScrollHandle,
         _changes: Subscription,
     },
-    Shortcuts,
 }
 
 const PANEL_WIDTH: f32 = 440.;
 pub(super) const PANEL_TOP: f32 = 0.16;
 const LIST_HEIGHT: f32 = 320.;
-const SHORTCUTS_HEIGHT: f32 = 460.;
 
 impl Workspace {
     fn palette_admitted(&self, cx: &App) -> bool {
@@ -127,15 +110,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn show_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.palette_admitted(cx) {
-            return;
-        }
-        self.palette = Some(Palette::Shortcuts);
-        self.focus.focus(window, cx);
-        cx.notify();
-    }
-
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
             self.focus_current(window, cx);
@@ -171,8 +145,6 @@ impl Workspace {
             selected, scroll, ..
         }) = &mut self.palette
         else {
-            // The shortcut list takes no other key.
-            cx.stop_propagation();
             return;
         };
         match name.as_str() {
@@ -204,16 +176,13 @@ impl Workspace {
         };
         let command = entry.command;
         self.close_palette(window, cx);
-        match command {
-            PaletteCommand::Run(command) => self.run_command(command, window, cx),
-            PaletteCommand::Shortcuts => self.show_shortcuts(window, cx),
-        }
+        let PaletteCommand::Run(command) = command;
+        self.run_command(command, window, cx);
     }
 
     pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let palette = self.palette.as_ref()?;
         let colors = &self.appearance;
-        let keymap = crate::keys::keymap(cx);
         let panel = menu_style::panel(colors)
             .id("palette-panel")
             .when(cfg!(all(test, feature = "ui-test-support")), |panel| {
@@ -283,31 +252,6 @@ impl Workspace {
                     )
                     .child(list)
             }
-            Palette::Shortcuts => {
-                let mut list = div()
-                    .id("shortcut-list")
-                    .flex()
-                    .flex_col()
-                    .max_h(chrome_rems(SHORTCUTS_HEIGHT))
-                    .overflow_y_scroll();
-                for (label, key) in shortcut_rows(&keymap) {
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_between()
-                            .gap(chrome_rems(20.))
-                            .px(chrome_rems(10.))
-                            .py(chrome_rems(4.))
-                            .child(label)
-                            .child(menu_style::shortcut(colors, key, false)),
-                    );
-                }
-                panel
-                    .child(menu_style::caption(colors, "Keyboard Shortcuts"))
-                    .child(list)
-            }
         };
         Some(
             div()
@@ -334,7 +278,7 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_entries, palette_entries, shortcut_rows, KeyCommand, PaletteCommand};
+    use super::{filter_entries, palette_entries, KeyCommand, PaletteCommand};
     use splitty_client_core::keymap::{Keymap, Overrides, Platform};
 
     #[test]
@@ -348,24 +292,14 @@ mod tests {
             .collect();
         assert_eq!(split, [("Split Down".into(), Some("Alt+Shift+D".into()))]);
         assert!(filter_entries(palette_entries(&linux), "nothing here").is_empty());
-        // The Hosts manager is listed with its key, in the palette and so in
-        // the shortcut list.
+        // The Hosts manager is listed with its key.
         for platform in [Platform::Linux, Platform::Mac] {
             let keymap = Keymap::defaults(platform);
             let hosts = keymap.label(KeyCommand::Hosts).unwrap();
             assert!(palette_entries(&keymap).iter().any(|entry| {
                 entry.label == "Hosts and Ports" && entry.shortcut.as_ref() == Some(&hosts)
             }));
-            assert!(shortcut_rows(&keymap)
-                .iter()
-                .any(|(label, key)| label == "Hosts and Ports" && *key == hosts));
         }
-        // Every key the list shows belongs to one row only.
-        let rows = shortcut_rows(&linux);
-        let mut keys: Vec<_> = rows.iter().map(|(_, key)| key.clone()).collect();
-        keys.sort();
-        keys.dedup();
-        assert_eq!(keys.len(), rows.len());
         // A command without a key is listed without one.
         let connect = all
             .iter()
@@ -378,8 +312,5 @@ mod tests {
         assert!(palette_entries(&unbound)
             .iter()
             .any(|entry| entry.label == "Split Down" && entry.shortcut.is_none()));
-        assert!(shortcut_rows(&unbound)
-            .iter()
-            .all(|(label, _)| label != "Split Down"));
     }
 }
