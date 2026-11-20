@@ -1,6 +1,6 @@
 //! The borders of the chrome: the theme's 3D bevel where it has one, a flat
 //! one-color line otherwise. A bevel is drawn square, as two rings of lines
-//! (or one for the thin reliefs) in the border's own space, so an element
+//! in the border's own space, so an element
 //! keeps its content box whichever theme draws it.
 use super::{Bevel, NativeAppearance};
 use gpui_kit::{
@@ -20,24 +20,17 @@ pub enum Relief {
     Sunken,
     /// A groove: group outlines and separators.
     Etched,
-    /// One line of `Raised`, for small or dense parts.
-    ThinRaised,
-    /// One line of `Sunken`.
-    ThinSunken,
 }
 
 impl Relief {
     /// The edge's width in pixels with a bevel; a flat border is 1.
     pub fn width(self) -> f32 {
-        match self {
-            Self::ThinRaised | Self::ThinSunken => 1.,
-            _ => 2.,
-        }
+        2.
     }
 
     /// The rings from the outside in, each as its top-left and its
     /// bottom-right color.
-    fn rings(self, bevel: &Bevel) -> ([(u32, u32); 2], usize) {
+    fn rings(self, bevel: &Bevel) -> [(u32, u32); 2] {
         let Bevel {
             highlight,
             light,
@@ -45,12 +38,10 @@ impl Relief {
             dark_shadow,
         } = *bevel;
         match self {
-            Self::Raised => ([(highlight, dark_shadow), (light, shadow)], 2),
-            Self::Frame => ([(light, dark_shadow), (highlight, shadow)], 2),
-            Self::Sunken => ([(shadow, highlight), (dark_shadow, light)], 2),
-            Self::Etched => ([(shadow, highlight), (highlight, shadow)], 2),
-            Self::ThinRaised => ([(highlight, shadow), (0, 0)], 1),
-            Self::ThinSunken => ([(shadow, highlight), (0, 0)], 1),
+            Self::Raised => [(highlight, dark_shadow), (light, shadow)],
+            Self::Frame => [(light, dark_shadow), (highlight, shadow)],
+            Self::Sunken => [(shadow, highlight), (dark_shadow, light)],
+            Self::Etched => [(shadow, highlight), (highlight, shadow)],
         }
     }
 }
@@ -91,9 +82,8 @@ fn lines(
     sides: Sides,
     bevel: &Bevel,
 ) -> Vec<(f32, f32, f32, f32, u32)> {
-    let (rings, count) = relief.rings(bevel);
-    let mut result = Vec::with_capacity(count * 4);
-    for (ring, (top_left, bottom_right)) in rings.into_iter().take(count).enumerate() {
+    let mut result = Vec::with_capacity(8);
+    for (ring, (top_left, bottom_right)) in relief.rings(bevel).into_iter().enumerate() {
         let inset = ring as f32;
         let step = |side: bool| if side { inset } else { 0. };
         let (left, top) = (outer.0 + step(sides.left), outer.1 + step(sides.top));
@@ -212,7 +202,7 @@ impl<E: Styled + ParentElement + Sized> Edged for E {}
 
 /// A classic 3D appearance for view tests: grey faces, bevels, square
 /// corners, navy selection with white text.
-#[cfg(test)]
+#[cfg(all(test, feature = "ui-test-support"))]
 pub fn bevel_test_appearance() -> NativeAppearance {
     let mut appearance = NativeAppearance::fallback("UI");
     appearance.bevel = Some(Bevel {
@@ -262,8 +252,6 @@ mod tests {
         beveled.bevel = Some(BEVEL);
         let mut raised = div().edged_or(&beveled, Relief::Raised, Sides::LEFT, |element| element);
         assert_eq!(width(&mut raised), Some(2.));
-        let mut thin = div().edged_or(&beveled, Relief::ThinSunken, Sides::ALL, |element| element);
-        assert_eq!(width(&mut thin), Some(1.));
     }
 
     #[test]
@@ -299,15 +287,7 @@ mod tests {
         assert_eq!(colors(Relief::Sunken)[4], 0x000000);
         assert_eq!(colors(Relief::Frame)[0], 0xdfdfdf);
         assert_eq!(colors(Relief::Etched)[4], 0xffffff);
-        assert_eq!(
-            colors(Relief::ThinRaised),
-            [0xffffff, 0xffffff, 0x808080, 0x808080]
-        );
-        assert_eq!(colors(Relief::ThinSunken).len(), 4);
-        assert_eq!(
-            (Relief::Raised.width(), Relief::ThinSunken.width()),
-            (2., 1.)
-        );
+        assert_eq!(Relief::Raised.width(), 2.);
     }
 
     #[test]

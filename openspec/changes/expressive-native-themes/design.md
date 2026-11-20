@@ -38,7 +38,7 @@ decoration.
 
 ### Edges
 
-The edge painter knows six reliefs (raised, frame, sunken, etched and the one-line raised and sunken) and
+The edge painter knows four reliefs (raised, frame, sunken and etched) and
 which sides carry the edge. With a bevel it reserves the relief's width as border space and paints the
 two rings of lines there, lit from the top left, as an overlay child that takes no input; without a bevel
 it is a 1 px border in the caller's color. Views name what an element is (a control, a field, a floating

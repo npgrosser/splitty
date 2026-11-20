@@ -23,7 +23,7 @@ pub mod edges;
 mod palette;
 pub mod titlebar;
 
-pub use catalog::{ChromeBlock, FillBlock, Maybe, ThemeCatalog, TitleBarBlock, UiTheme};
+pub use catalog::{ChromeBlock, FillBlock, Maybe, ThemeCatalog, UiTheme};
 pub use palette::TerminalPalette;
 
 /// A solid border of the given width and color.
@@ -68,13 +68,6 @@ impl BarFill {
                 linear_color_stop(rgb(from), 0.),
                 linear_color_stop(rgb(to), 1.),
             ),
-        }
-    }
-
-    /// The color at the start of the bar, where only one color can be used.
-    pub fn start(self) -> u32 {
-        match self {
-            Self::Solid(color) | Self::Gradient { from: color, .. } => color,
         }
     }
 }
@@ -1406,7 +1399,6 @@ mod tests {
                 buttons: CaptionButtons::Boxed,
             }
         );
-        assert_eq!(BarFill::Solid(0x808080).start(), 0x808080);
 
         // An unsupported value costs only itself.
         let partly: ChromeBlock = serde_json::from_value(serde_json::json!({
