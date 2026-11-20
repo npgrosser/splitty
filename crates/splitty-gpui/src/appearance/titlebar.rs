@@ -1,7 +1,7 @@
 //! Resolves window chrome separately from application and terminal appearance.
 //! Desktop conventions own geometry and controls; the selected source owns all
 //! colors of client decorations. Server decorations keep the compositor's colors.
-use super::NativeAppearance;
+use super::{BarFill, Bevel, CaptionButtons, NativeAppearance, TitleAlign};
 
 mod icons;
 use gpui_kit::{FontWeight, Global, WindowAppearance, WindowButton, WindowButtonLayout};
@@ -220,14 +220,39 @@ impl DecorationProfile {
     }
 }
 
+/// Size and spacing of the caption buttons of a bar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CaptionMetrics {
+    pub width: f32,
+    pub height: f32,
+    pub gap: f32,
+    /// Extra space that sets close off from the other buttons.
+    pub close_gap: f32,
+    pub side_padding: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct TitleBarAppearance {
-    pub background: u32,
+    pub background: BarFill,
     pub foreground: u32,
+    /// The bar of a window without focus; `None` keeps the active fill.
+    pub inactive_background: Option<BarFill>,
+    /// The title of a window without focus; `None` dims `foreground` by the
+    /// profile's inactive opacities.
+    pub inactive_foreground: Option<u32>,
     pub button: u32,
     pub hover: u32,
     pub height: f32,
     pub font: SystemFont,
+    pub weight: FontWeight,
+    pub align: TitleAlign,
+    pub caption: CaptionButtons,
+    /// Boxed caption buttons: their face, glyph color, the flat border used
+    /// without a bevel, and the bevel. The bevel also draws the window frame.
+    pub face: u32,
+    pub glyph: u32,
+    pub edge: u32,
+    pub bevel: Option<Bevel>,
     pub profile: DecorationProfile,
     pub desktop_gnome: bool,
     pub icons: DesktopWindowIcons,
@@ -236,6 +261,9 @@ pub struct TitleBarAppearance {
 }
 
 impl TitleBarAppearance {
+    /// Theme title-bar colors apply whenever title-bar colors follow the
+    /// theme; the theme's title-bar shape and frame radius only under
+    /// Splitty decoration, whose geometry the application owns.
     pub fn resolve(
         style: TitleBarStyle,
         app: &NativeAppearance,
@@ -247,10 +275,24 @@ impl TitleBarAppearance {
             system,
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
+        let theme = &app.title_bar;
         let (background, foreground, button, hover) = match style {
-            TitleBarStyle::Theme => (app.raised, app.text, app.hover, app.active),
-            TitleBarStyle::System if dark => (0x303030, 0xffffff, 0x454545, 0x505050),
-            TitleBarStyle::System => (0xebebeb, 0x2e3436, 0xd9d9d9, 0xcccccc),
+            TitleBarStyle::Theme => (
+                theme.background.unwrap_or(BarFill::Solid(app.raised)),
+                theme.foreground.unwrap_or(app.text),
+                app.hover,
+                app.active,
+            ),
+            TitleBarStyle::System if dark => {
+                (BarFill::Solid(0x303030), 0xffffff, 0x454545, 0x505050)
+            }
+            TitleBarStyle::System => (BarFill::Solid(0xebebeb), 0x2e3436, 0xd9d9d9, 0xcccccc),
+        };
+        let themed = style == TitleBarStyle::Theme;
+        let (face, glyph, edge, bevel) = if themed {
+            (app.surface, app.text, app.border, app.bevel)
+        } else {
+            (button, foreground, hover, None)
         };
         let system_geometry = app.window_decoration == WindowDecoration::System;
         let adwaita = gnome && system_geometry;
@@ -262,22 +304,38 @@ impl TitleBarAppearance {
                 size: app.font_size,
             }
         };
+        let profile = if adwaita {
+            DecorationProfile::Adwaita
+        } else {
+            DecorationProfile::Standard
+        };
+        let derived_height = if adwaita {
+            46_f32.max(font.size + 24.)
+        } else {
+            36_f32.max(font.size + 16.)
+        };
+        let shape = (!system_geometry).then_some(theme);
         Self {
             background,
             foreground,
+            inactive_background: themed.then_some(theme.inactive_background).flatten(),
+            inactive_foreground: themed.then_some(theme.inactive_foreground).flatten(),
             button,
             hover,
-            height: if adwaita {
-                46_f32.max(font.size + 24.)
-            } else {
-                36_f32.max(font.size + 16.)
-            },
+            height: shape
+                .and_then(|theme| theme.height)
+                .unwrap_or(derived_height),
             font,
-            profile: if adwaita {
-                DecorationProfile::Adwaita
-            } else {
-                DecorationProfile::Standard
-            },
+            weight: shape
+                .and_then(|theme| theme.weight)
+                .unwrap_or(profile.metrics().title_weight),
+            align: shape.map(|theme| theme.align).unwrap_or_default(),
+            caption: shape.map(|theme| theme.buttons).unwrap_or_default(),
+            face,
+            glyph,
+            edge,
+            bevel,
+            profile,
             desktop_gnome: gnome,
             icons: DesktopWindowIcons::default(),
             radius: if adwaita {
@@ -285,9 +343,89 @@ impl TitleBarAppearance {
             } else if system_geometry {
                 8.
             } else {
-                app.radius.clamp(6., 16.)
+                app.radius
             },
             buttons: app.window_buttons,
+        }
+    }
+
+    /// The size and spacing of the bar's caption buttons.
+    pub fn caption_metrics(&self) -> CaptionMetrics {
+        let profile = self.profile.metrics();
+        match self.caption {
+            CaptionButtons::Plain => {
+                let size = profile.button_size.min(self.height);
+                CaptionMetrics {
+                    width: size,
+                    height: size,
+                    gap: profile.button_gap,
+                    close_gap: 0.,
+                    side_padding: profile.side_padding,
+                }
+            }
+            CaptionButtons::Boxed => {
+                let height = (self.height - 8.).max(10.).round();
+                CaptionMetrics {
+                    width: height + 2.,
+                    height,
+                    gap: 0.,
+                    close_gap: 2.,
+                    side_padding: 3.,
+                }
+            }
+            CaptionButtons::Wide => CaptionMetrics {
+                width: 46.,
+                height: self.height,
+                gap: 0.,
+                close_gap: 0.,
+                side_padding: 0.,
+            },
+        }
+    }
+
+    /// The width of one group of caption buttons, without side padding.
+    pub fn controls_width(&self, buttons: &[Option<WindowButton>]) -> f32 {
+        let metrics = self.caption_metrics();
+        let count = buttons.iter().flatten().count();
+        let close = buttons.contains(&Some(WindowButton::Close));
+        count as f32 * metrics.width
+            + count.saturating_sub(1) as f32 * metrics.gap
+            + if close && count > 1 {
+                metrics.close_gap
+            } else {
+                0.
+            }
+    }
+
+    /// The bar's fill for a window with or without focus.
+    pub fn fill(&self, active: bool) -> BarFill {
+        match self.inactive_background {
+            Some(fill) if !active => fill,
+            _ => self.background,
+        }
+    }
+
+    /// The title's color and opacity for a window with or without focus.
+    pub fn title_color(&self, active: bool) -> (u32, f32) {
+        match self.inactive_foreground {
+            _ if active => (self.foreground, 1.),
+            Some(color) => (color, 1.),
+            None => (
+                self.foreground,
+                self.profile.metrics().inactive_title_opacity,
+            ),
+        }
+    }
+
+    /// The color and opacity of plain and wide caption symbols.
+    pub fn control_color(&self, active: bool) -> (u32, f32) {
+        match self.inactive_foreground {
+            _ if active => (self.foreground, 1.),
+            Some(color) => (color, 1.),
+            None => (
+                self.foreground,
+                self.profile.metrics().inactive_controls_opacity,
+            ),
         }
     }
 }
@@ -321,10 +459,166 @@ mod tests {
         let themed = resolve(&app, TitleBarStyle::Theme, WindowAppearance::Light);
         assert_eq!(
             (themed.background, themed.foreground),
-            (app.raised, app.text)
+            (BarFill::Solid(app.raised), app.text)
         );
         assert_eq!(themed.height, system.height);
         assert_eq!(themed.font, system.font);
+    }
+
+    fn themed_bar() -> NativeAppearance {
+        let mut app = NativeAppearance::fallback("UI");
+        app.radius = 0.;
+        app.surface = 0xc0c0c0;
+        app.text = 0x000000;
+        app.bevel = Some(Bevel {
+            highlight: 0xffffff,
+            light: 0xdfdfdf,
+            shadow: 0x808080,
+            dark_shadow: 0x000000,
+        });
+        app.title_bar = crate::appearance::TitleBarTheme {
+            background: Some(BarFill::Gradient {
+                from: 0x000080,
+                to: 0x1084d0,
+            }),
+            foreground: Some(0xffffff),
+            inactive_background: Some(BarFill::Gradient {
+                from: 0x808080,
+                to: 0xb5b5b5,
+            }),
+            inactive_foreground: Some(0xc0c0c0),
+            height: Some(22.),
+            align: TitleAlign::Start,
+            weight: Some(FontWeight::BOLD),
+            buttons: CaptionButtons::Boxed,
+        };
+        app
+    }
+
+    fn resolve(app: &NativeAppearance, style: TitleBarStyle) -> TitleBarAppearance {
+        TitleBarAppearance::resolve(
+            style,
+            app,
+            WindowAppearance::Light,
+            true,
+            SystemFont {
+                family: "Desktop font".into(),
+                size: 15.,
+            },
+        )
+    }
+
+    #[test]
+    fn theme_title_bar_colors_apply_under_both_decorations() {
+        let mut app = themed_bar();
+        for decoration in [WindowDecoration::System, WindowDecoration::Splitty] {
+            app.window_decoration = decoration;
+            let bar = resolve(&app, TitleBarStyle::Theme);
+            assert_eq!(bar.fill(true), app.title_bar.background.unwrap());
+            assert_eq!(bar.fill(false), app.title_bar.inactive_background.unwrap());
+            assert_eq!(bar.title_color(true), (0xffffff, 1.));
+            assert_eq!(bar.title_color(false), (0xc0c0c0, 1.));
+            assert_eq!(bar.control_color(false), (0xc0c0c0, 1.));
+            assert_eq!((bar.face, bar.glyph, bar.bevel), (0xc0c0c0, 0, app.bevel));
+        }
+    }
+
+    #[test]
+    fn absent_theme_colors_keep_the_derived_bar_and_dimmed_inactive_title() {
+        let mut app = NativeAppearance::fallback("UI");
+        app.title_bar.foreground = Some(0x123456);
+        let bar = resolve(&app, TitleBarStyle::Theme);
+        assert_eq!(bar.fill(true), BarFill::Solid(app.raised));
+        assert_eq!(bar.fill(false), bar.fill(true));
+        let metrics = bar.profile.metrics();
+        assert_eq!(
+            bar.title_color(false),
+            (0x123456, metrics.inactive_title_opacity)
+        );
+        assert_eq!(
+            bar.control_color(false),
+            (0x123456, metrics.inactive_controls_opacity)
+        );
+    }
+
+    #[test]
+    fn system_title_bar_colors_ignore_theme_tokens() {
+        let app = themed_bar();
+        let plain = resolve(&NativeAppearance::fallback("UI"), TitleBarStyle::System);
+        let bar = resolve(&app, TitleBarStyle::System);
+        assert_eq!(bar.background, plain.background);
+        assert_eq!(bar.foreground, plain.foreground);
+        assert_eq!(
+            (bar.inactive_background, bar.inactive_foreground),
+            (None, None)
+        );
+        assert_eq!(bar.title_color(false).1, plain.title_color(false).1);
+        assert_eq!(bar.bevel, None);
+        assert_eq!((bar.face, bar.glyph), (plain.button, plain.foreground));
+    }
+
+    #[test]
+    fn theme_shape_applies_only_under_splitty_decoration() {
+        let mut app = themed_bar();
+        let system = resolve(&app, TitleBarStyle::Theme);
+        let plain = resolve(&NativeAppearance::fallback("UI"), TitleBarStyle::Theme);
+        assert_eq!(system.height, plain.height);
+        assert_eq!(system.weight, plain.weight);
+        assert_eq!(system.align, TitleAlign::Center);
+        assert_eq!(system.caption, CaptionButtons::Plain);
+        assert_eq!(system.radius, 15.);
+
+        app.window_decoration = WindowDecoration::Splitty;
+        for style in [TitleBarStyle::Theme, TitleBarStyle::System] {
+            let splitty = resolve(&app, style);
+            assert_eq!(splitty.height, 22.);
+            assert_eq!(splitty.weight, FontWeight::BOLD);
+            assert_eq!(splitty.align, TitleAlign::Start);
+            assert_eq!(splitty.caption, CaptionButtons::Boxed);
+            // A square theme has a square window frame.
+            assert_eq!(splitty.radius, 0.);
+        }
+
+        // Absent shape tokens keep the derived height and profile weight,
+        // and the frame takes the theme's radius as it is.
+        let mut app = NativeAppearance::fallback("UI");
+        app.window_decoration = WindowDecoration::Splitty;
+        app.radius = 3.;
+        let splitty = resolve(&app, TitleBarStyle::Theme);
+        assert_eq!(splitty.height, 36_f32.max(app.font_size + 16.));
+        assert_eq!(
+            splitty.weight,
+            DecorationProfile::Standard.metrics().title_weight
+        );
+        assert_eq!(splitty.radius, 3.);
+    }
+
+    #[test]
+    fn caption_buttons_take_their_size_from_the_style_and_bar() {
+        let mut app = themed_bar();
+        app.window_decoration = WindowDecoration::Splitty;
+        let all = [
+            Some(WindowButton::Minimize),
+            Some(WindowButton::Maximize),
+            Some(WindowButton::Close),
+        ];
+        let mut bar = resolve(&app, TitleBarStyle::Theme);
+        let boxed = bar.caption_metrics();
+        assert_eq!((boxed.width, boxed.height), (16., 14.));
+        assert_eq!(bar.controls_width(&all), 50.);
+        assert_eq!(
+            bar.controls_width(&[None, None, Some(WindowButton::Close)]),
+            16.
+        );
+        bar.caption = CaptionButtons::Wide;
+        bar.height = 32.;
+        let wide = bar.caption_metrics();
+        assert_eq!((wide.width, wide.height, wide.gap), (46., 32., 0.));
+        assert_eq!(bar.controls_width(&all), 138.);
+        // Plain buttons never grow past a short bar.
+        bar.caption = CaptionButtons::Plain;
+        bar.height = 22.;
+        assert_eq!(bar.caption_metrics().height, 22.);
     }
 
     #[test]
