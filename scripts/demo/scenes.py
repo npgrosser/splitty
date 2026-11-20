@@ -178,17 +178,18 @@ THEME_SELECT = (430, 572)
 
 def customize(stage):
     """Themes change the whole window at once; every key can be rebound."""
-    stage.wait(0.5)
-    stage.click(*SETTINGS, pause=0.9)
-    stage.scroll(520, 500, 6, pause=0.5)
-    stage.click(*THEME_SELECT, pause=0.5)
+    stage.wait(0.4)
+    stage.click(*SETTINGS, pause=0.6)
+    stage.scroll(520, 500, 6, pause=0.3)
+    stage.click(*THEME_SELECT, pause=0.35)
     # The list filters by what is typed; it opens again from the keyboard,
     # wherever a theme's own metrics have put it. The last theme stays.
-    for name, hold in (("Splitty Aurora", 1.4), ("Catppuccin Mocha", 1.4), ("Windows Classic", 2.8)):
-        stage.type(name, pause=0.4)
+    themes = (("Splitty Aurora", 0.9), ("Splitty Retro", 0.9), ("Windows Classic", 2.6))
+    for index, (name, hold) in enumerate(themes):
+        stage.type(name, delay=0.03, pause=0.25)
         stage.key("Return", label="", pause=hold)
-        if name != "Windows Classic":
-            stage.key("Return", label="", pause=0.5)
+        if index + 1 < len(themes):
+            stage.key("Return", label="", pause=0.35)
     stage.key("alt+shift+k", pause=1.2)
     stage.type("split", pause=1.6)
 
