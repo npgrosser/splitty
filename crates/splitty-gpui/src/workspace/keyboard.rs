@@ -288,7 +288,7 @@ impl KeyboardPage {
         let platform = keymap.platform();
         let recording = self.recording == Some(command);
         let bindings = keymap.bindings(command);
-        let mut keys = div().flex().flex_wrap().items_center().gap_1();
+        let mut keys = div().flex().flex_none().items_center().gap_1();
         if recording {
             keys = keys.child(
                 key_cap(appearance, "Press a key…")
@@ -326,7 +326,13 @@ impl KeyboardPage {
             .child(
                 Button::new(SharedString::from(record_id.clone()))
                     .when(test, |button| button.debug_selector(move || record_id))
-                    .label(if recording { "Cancel" } else { "Record" })
+                    // The keys themselves are the control that records.
+                    .child(keys)
+                    .tooltip(if recording {
+                        "Cancel"
+                    } else {
+                        "Record a new key"
+                    })
                     .accessibility_label(format!("Record a key for {label}"))
                     .selected(recording)
                     .ghost()
@@ -341,7 +347,8 @@ impl KeyboardPage {
             .child(
                 Button::new(SharedString::from(remove_id.clone()))
                     .when(test, |button| button.debug_selector(move || remove_id))
-                    .label("Remove")
+                    .icon(IconName::Close)
+                    .tooltip("Remove the key")
                     .accessibility_label(format!("Remove the key of {label}"))
                     .ghost()
                     .xsmall()
@@ -355,7 +362,8 @@ impl KeyboardPage {
             .child(
                 Button::new(SharedString::from(reset_id.clone()))
                     .when(test, |button| button.debug_selector(move || reset_id))
-                    .label("Reset")
+                    .icon(IconName::Undo2)
+                    .tooltip("Reset to the default")
                     .accessibility_label(format!("Reset the keys of {label}"))
                     .ghost()
                     .xsmall()
@@ -372,21 +380,21 @@ impl KeyboardPage {
             .flex()
             .flex_col()
             .gap_1()
-            .py_1()
             .child(
                 div()
                     .flex()
-                    .flex_wrap()
                     .items_center()
                     .gap_2()
                     .child(
                         div()
                             .flex_1()
-                            .min_w(rems(10.))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
                             .text_sm()
                             .child(command.title()),
                     )
-                    .child(keys)
                     .child(actions),
             );
         if recording {
