@@ -61,16 +61,28 @@ its parents, then installed fallback themes. Missing or invalid icons use the
 existing Splitty symbols. Icon-theme changes reload the four cached symbols;
 no Adwaita artwork is bundled. Geometry and bold title styling follow an explicit
 Adwaita profile, independently of the icon theme and title-bar palette.
-Splitty decoration uses a compact header, app typography and rectangular button
-hover backgrounds. Both have rounded client frames; the renderer clips all
-content, including terminal backgrounds, to that shape. Tiled edges and maximized
-windows lose the relevant rounded corners and shadows.
+Splitty decoration uses app typography and takes the title bar's shape from the
+UI theme: its height, title alignment (centered or at the start) and weight, and
+the caption button style. Plain buttons are symbols on rectangular hover
+backgrounds; boxed buttons are small raised buttons with the theme's edge,
+sunken while pressed; wide buttons are cells as tall as the bar, with a red
+close cell under the pointer. Windows uses the same styles for its caption
+buttons; macOS keeps its native traffic lights, centered in the bar. A theme
+without these values gets a compact header with plain buttons. The client
+frame's corner radius is the theme's radius, so a square theme has a square
+window. System decoration keeps the desktop's geometry and a rounded frame. The
+renderer clips all content, including terminal backgrounds, to the frame's
+shape. Tiled edges and maximized windows lose the relevant rounded corners and
+shadows.
 
-Match app theme takes colors from the currently shown interface. Changing it
-does not change decoration geometry. All three is the default client button
-policy and places all controls on the right. System layout reads the desktop
-arrangement at startup and follows changes live, including left/right placement
-and hiding minimize or maximize; it can show only Close.
+Match app theme takes colors from the currently shown interface, including the
+theme's own title-bar colors (a solid color or a gradient, and separate colors
+for a window without focus) where it has them, under either decoration. Changing
+it does not change decoration geometry, and system colors ignore the theme's
+title-bar colors. All three is the default client button policy and places all
+controls on the right. System layout reads the desktop arrangement at startup
+and follows changes live, including left/right placement and hiding minimize or
+maximize; it can show only Close.
 Unavailable platform actions are disabled. Native OS-owned frames retain their
 own buttons and may retain system colors.
 

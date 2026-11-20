@@ -44,6 +44,7 @@ pub struct TitleBar {
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 1]>,
     on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+    window_controls: Option<AnyElement>,
 }
 
 impl TitleBar {
@@ -53,6 +54,7 @@ impl TitleBar {
             style: StyleRefinement::default(),
             children: SmallVec::new(),
             on_close_window: None,
+            window_controls: None,
         }
     }
 
@@ -100,6 +102,15 @@ impl TitleBar {
         if cfg!(target_os = "linux") {
             self.on_close_window = Some(Rc::new(Box::new(f)));
         }
+        self
+    }
+
+    /// Replace the built-in window controls with the given element, which
+    /// routes its own buttons: on Windows through `window_control_area`, so
+    /// the native window procedure handles them. It sits beside the drag
+    /// area, not over it.
+    pub fn window_controls(mut self, controls: impl IntoElement) -> Self {
+        self.window_controls = Some(controls.into_any_element());
         self
     }
 }
@@ -402,8 +413,12 @@ impl RenderOnce for TitleBar {
                         })
                         .children(self.children),
                 )
-                .child(WindowControls {
-                    on_close_window: self.on_close_window,
+                .child(match self.window_controls {
+                    Some(controls) => controls,
+                    None => WindowControls {
+                        on_close_window: self.on_close_window,
+                    }
+                    .into_any_element(),
                 }),
         )
     }

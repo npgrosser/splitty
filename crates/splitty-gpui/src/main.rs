@@ -36,6 +36,15 @@ const MACOS_TRAFFIC_LIGHTS: Point<Pixels> = Point {
     y: px(10.),
 };
 
+/// The traffic lights centered in a header of the given height.
+#[cfg(target_os = "macos")]
+fn macos_traffic_lights(bar: f32) -> Point<Pixels> {
+    point(
+        MACOS_TRAFFIC_LIGHTS.x,
+        px(((bar - 16.) / 2.).max(0.).round()),
+    )
+}
+
 struct RootView {
     content: AnyView,
     workspace: Option<WeakEntity<workspace::Workspace>>,
@@ -54,6 +63,9 @@ struct RootView {
     waiting_for_appearance: bool,
     appearance_subscription: Option<Subscription>,
     reveal_timeout: Option<Task<()>>,
+    /// The header height the traffic lights were last centered in.
+    #[cfg(target_os = "macos")]
+    traffic_lights_bar: f32,
 }
 impl RootView {
     fn new(
@@ -213,6 +225,8 @@ impl RootView {
             waiting_for_appearance: windows_chrome,
             appearance_subscription,
             reveal_timeout,
+            #[cfg(target_os = "macos")]
+            traffic_lights_bar: 36.,
         }
     }
 
@@ -310,6 +324,15 @@ impl Render for RootView {
             }
             let radius = self.title_bar_appearance(window, cx).radius;
             gpui_kit::component::set_window_corner_radius(window, cx, px(radius));
+        }
+        // The theme sets the header height; keep the lights centered in it.
+        #[cfg(target_os = "macos")]
+        if self.custom_titlebar {
+            let bar = self.title_bar_appearance(window, cx).height;
+            if self.traffic_lights_bar != bar {
+                self.traffic_lights_bar = bar;
+                window.set_traffic_light_position(macos_traffic_lights(bar));
+            }
         }
         let show_titlebar = !window.is_fullscreen()
             && (self.custom_titlebar
