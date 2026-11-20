@@ -1,7 +1,6 @@
 # Splitty
 
-Terminals from your own machine and from SSH hosts in one window, in splits,
-tabs and screens. Remote sessions keep running when you close the app.
+A graphical terminal multiplexer for Linux, macOS and Windows.
 
 ![Several screens with terminals in splits and tabs](https://github.com/npgrosser/splitty/raw/media/overview.webp)
 
