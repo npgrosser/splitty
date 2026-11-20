@@ -356,11 +356,18 @@ mod tests {
             "splitty-classic-light-gray",
             "adwaita-dark",
             "adwaita-light",
-            "windows-11-dark",
-            "windows-11-light",
             "windows-classic",
         ] {
             assert!(catalog.ui(id).is_some(), "{id}");
+            assert!(catalog.palette(id).is_some(), "{id}");
+        }
+        // The Windows 11 themes leave the terminal to the default palette;
+        // the colors of the Windows console are palettes to choose.
+        for id in ["windows-11-dark", "windows-11-light"] {
+            assert!(catalog.ui(id).is_some(), "{id}");
+            assert!(catalog.palette_for_theme(id).is_none(), "{id}");
+        }
+        for id in ["campbell", "campbell-light"] {
             assert!(catalog.palette(id).is_some(), "{id}");
         }
         assert!(catalog.ui("catppuccin-mocha").is_some());

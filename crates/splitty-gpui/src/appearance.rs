@@ -1509,12 +1509,19 @@ mod tests {
             assert!(contrast(text, rgb(shown.surface).into()) >= 7., "{id}");
             assert!(contrast(text, rgb(shown.active).into()) >= 7., "{id}");
         }
-        assert_eq!(
-            resolve(&selection("windows-11-dark"), &catalog)
-                .terminal
-                .background,
-            0x0c0c0c
-        );
+        // The Windows 11 themes have no palette of their own: their
+        // terminals take the default palette of their mode.
+        for (id, scheme) in [
+            ("windows-11-dark", ColorScheme::Dark),
+            ("windows-11-light", ColorScheme::Light),
+        ] {
+            let palette = catalog.default_palette(scheme).unwrap();
+            assert_eq!(
+                resolve(&selection(id), &catalog).terminal.background,
+                palette.colors.background,
+                "{id}"
+            );
+        }
     }
 
     // In-process: the toolkit's components draw from its own theme, so the

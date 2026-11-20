@@ -16,10 +16,13 @@ Both come with the app and can be added as files.
   follows a light system. Splitty Modern is the rounded sans-serif look that
   was called Splitty Dark; settings that name it keep it.
 - The Windows themes, which also change the shape of the interface: Windows 11
-  Dark and Light (soft panels, small control corners, wide window buttons) and
-  Windows Classic (3D edges, square corners, a navy selection, a gradient title
-  bar with boxed window buttons, and a black console as its terminal palette).
-  Their title-bar shape shows with Splitty window decoration; see below.
+  Dark and Light (soft panels, small control corners, a centered title and wide
+  window buttons; their terminals take the default palettes, Splitty Classic
+  and Splitty Classic Light) and Windows Classic (3D edges, square corners, a
+  navy selection, a gradient title bar with boxed window buttons, and a black
+  console as its terminal palette). Their title-bar shape shows with Splitty
+  window decoration; see below. The colors of the Windows console are the
+  terminal palettes Campbell and Campbell Light.
 - The theme sets of [GPUI Kit](https://github.com/longbridge/gpui-kit)
   (Catppuccin, Gruvbox, Tokyo Night, Solarized, Ayu, Everforest and others).
 - About 270 terminal palettes from
