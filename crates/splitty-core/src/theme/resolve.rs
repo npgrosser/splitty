@@ -2,7 +2,7 @@
 //!
 //! Takes a `ThemeFile` (palette + variant + optional overrides) and produces a
 //! `ResolvedTheme` ready to be returned as JSON. Falls back to
-//! `splitty-dark` if a requested theme cannot be found or parsed.
+//! the default theme if a requested theme cannot be found or parsed.
 
 use super::bundled;
 use super::types::*;
@@ -274,7 +274,7 @@ pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme 
 
     if !is_valid_theme_name(name) {
         tracing::warn!("rejected theme name {name:?}: not a plain identifier");
-        return named("splitty-dark", &bundled::splitty_dark());
+        return fallback();
     }
 
     let path = themes_dir.join(format!("{name}.toml"));
@@ -290,7 +290,7 @@ pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme 
     };
     if !inside_themes_dir {
         tracing::warn!("rejected theme {name:?}: resolves outside the themes directory");
-        return named("splitty-dark", &bundled::splitty_dark());
+        return fallback();
     }
 
     if let Ok(content) = std::fs::read_to_string(&path) {
@@ -299,7 +299,14 @@ pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme 
             Err(e) => tracing::warn!("failed to parse custom theme '{name}': {e}"),
         }
     }
-    named("splitty-dark", &bundled::splitty_dark())
+    fallback()
+}
+
+/// The theme shown where the requested one cannot be: the default theme.
+fn fallback() -> ResolvedTheme {
+    let mut theme = resolve_theme_file(&bundled::splitty_classic());
+    theme.id = Some(crate::config::DEFAULT_THEME_DARK.to_owned());
+    theme
 }
 
 /// The terminal palette settings choose for a UI theme of `variant`: the
@@ -360,7 +367,7 @@ mod tests {
     #[test]
     fn test_resolve_dark_tokens() {
         let theme = resolve_theme_file(&bundled::splitty_dark());
-        assert_eq!(theme.name, "Splitty Dark");
+        assert_eq!(theme.name, "Splitty Modern");
         assert!(theme.id.is_none());
         assert_eq!(theme.ui.surface_base, "#0f0f0f");
         assert_eq!(theme.ui.text_primary, "#c8c8c8");
@@ -373,7 +380,7 @@ mod tests {
     #[test]
     fn test_resolve_light_tokens() {
         let theme = resolve_theme_file(&bundled::splitty_light());
-        assert_eq!(theme.name, "Splitty Light");
+        assert_eq!(theme.name, "Splitty Modern Light");
         assert_eq!(theme.ui.surface_base, "#f0f0f0");
         assert_eq!(theme.ui.text_primary, "#121212");
         assert_eq!(theme.terminal.bg, "#ffffff");
@@ -403,8 +410,8 @@ mod tests {
     fn test_resolve_unknown_falls_back_to_dark() {
         let dir = tempfile::tempdir().unwrap();
         let theme = resolve_theme("nonexistent", dir.path());
-        assert_eq!(theme.name, "Splitty Dark");
-        assert_eq!(theme.id.as_deref(), Some("splitty-dark"));
+        assert_eq!(theme.name, "Splitty Classic");
+        assert_eq!(theme.id.as_deref(), Some("splitty-classic"));
     }
 
     /// settings, Terminal Palette Choice: the named palette, then the one

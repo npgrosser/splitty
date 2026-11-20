@@ -330,6 +330,11 @@ fn default_title_bar_style() -> String {
     "theme".into()
 }
 
+/// The UI themes of settings that name none: the dark one also for a fixed
+/// theme, the light one for a light system preference.
+pub const DEFAULT_THEME_DARK: &str = "splitty-classic";
+pub const DEFAULT_THEME_LIGHT: &str = "splitty-classic-light";
+
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
@@ -337,10 +342,10 @@ impl Default for AppearanceSettings {
             window_decoration: default_window_decoration(),
             window_buttons: default_window_buttons(),
             title_bar_style: default_title_bar_style(),
-            theme: "splitty-dark".into(),
+            theme: DEFAULT_THEME_DARK.into(),
             theme_mode: "fixed".into(),
-            theme_dark: "splitty-dark".into(),
-            theme_light: "splitty-light".into(),
+            theme_dark: DEFAULT_THEME_DARK.into(),
+            theme_light: DEFAULT_THEME_LIGHT.into(),
             border_radius: 1,
             font_size: 0,
             font_family: String::new(),
@@ -416,10 +421,10 @@ impl HomeConfig {
             self.appearance.theme_mode = "fixed".into();
         }
         if self.appearance.theme_dark.is_empty() {
-            self.appearance.theme_dark = "splitty-dark".into();
+            self.appearance.theme_dark = DEFAULT_THEME_DARK.into();
         }
         if self.appearance.theme_light.is_empty() {
-            self.appearance.theme_light = "splitty-light".into();
+            self.appearance.theme_light = DEFAULT_THEME_LIGHT.into();
         }
         if !(0..=20).contains(&self.appearance.border_radius) {
             self.appearance.border_radius = 1;
@@ -848,7 +853,7 @@ mod tests {
         assert_eq!(cfg.terminal.theme, "default");
         assert_eq!(cfg.terminal.close_on_exit, "always");
         assert_eq!(cfg.terminal.scroll_to_bottom, Some(true));
-        assert_eq!(cfg.appearance.theme, "splitty-dark");
+        assert_eq!(cfg.appearance.theme, "splitty-classic");
         assert_eq!(cfg.appearance.border_radius, 1);
         assert!(cfg.drawer.pinned);
         assert!(cfg.drawer.edge_reveal);
@@ -1128,7 +1133,7 @@ mod tests {
 
         assert_eq!(updated.terminal.theme, "monokai");
         // Everything else stays at defaults.
-        assert_eq!(updated.appearance.theme, "splitty-dark");
+        assert_eq!(updated.appearance.theme, "splitty-classic");
     }
 
     #[test]
@@ -1328,7 +1333,7 @@ mod tests {
         // Other terminal fields should be defaults.
         assert_eq!(cfg.terminal.close_on_exit, "always");
         // Other sections should be defaults.
-        assert_eq!(cfg.appearance.theme, "splitty-dark");
+        assert_eq!(cfg.appearance.theme, "splitty-classic");
     }
 
     #[test]

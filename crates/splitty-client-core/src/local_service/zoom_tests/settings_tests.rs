@@ -305,7 +305,7 @@ async fn named_terminal_palettes_pass_through_without_a_theme_request() {
     let owner = Uuid::new_v4();
     let client = loaded(api, owner).await;
     let snapshot = client.last_appearance.as_ref().unwrap();
-    assert_eq!(snapshot.ui_theme(), "splitty-dark");
+    assert_eq!(snapshot.ui_theme(), "splitty-classic");
     assert_eq!(snapshot.terminal().theme(), "unknown-palette");
     assert_eq!(snapshot.terminal().theme_dark(), "splitty-dark");
     assert_eq!(snapshot.terminal().theme_light(), "splitty-light");

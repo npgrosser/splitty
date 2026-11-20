@@ -217,9 +217,11 @@ The native workspace SHALL choose the terminal palette by Terminal Palette Rule,
 - **THEN** both count as `default` and the editor does not offer to change them
 
 ### Requirement: Native Theme Catalog
-The native workspace SHALL resolve UI themes and terminal palettes in a catalog of its own, made of the themes bundled with the application and the files of the themes directory (`themes/` in the configuration directory of the computer the application runs on). A UI theme SHALL be a theme of a theme set in the component toolkit's JSON format (`*.json`: a `themes` list whose entries have `name`, `mode` and `colors`). A terminal palette SHALL be a file in Ghostty's theme format: `palette = N=#rrggbb` for the ANSI colors 0 to 15, `background`, `foreground`, `cursor-color`, `selection-background` and `selection-foreground`; other keys SHALL be ignored, and a file without `background` and `foreground` is not a palette. In the themes directory, `*.toml` files SHALL be ignored, and every other file that is not a theme set SHALL be read as a terminal palette named by its file name.
+The native workspace SHALL resolve UI themes and terminal palettes in a catalog of its own, made of the themes bundled with the application and the files of the themes directory (`themes/` in the configuration directory of the computer the application runs on). A UI theme SHALL be a theme of a theme set in the component toolkit's JSON format (`*.json`: a `themes` list whose entries have `name`, `mode` and `colors`). A terminal palette SHALL be a file in Ghostty's theme format: `palette = N=#rrggbb` for the ANSI colors 0 to 15, `background`, `foreground`, `cursor-color`, `selection-background` and `selection-foreground`; other keys SHALL be ignored, and a file without `background` and `foreground` is not a palette. In the themes directory, `*.toml` files SHALL be ignored, and every other file that is not a theme set SHALL be read as a terminal palette named by its file name. A comment line `# name: <text>` in a palette file SHALL give the palette that display name, while its identifier stays the one of its file name.
 
-Settings SHALL store a theme by its identifier: the display name in lowercase with every run of characters other than ASCII letters and digits replaced by `-`, or the `id` of the theme's `splitty` object. A bundled theme SHALL keep its identifier against a file with the same one. The identifiers of the themes shipped before this catalog (`splitty-dark`, `splitty-light` and the others) SHALL keep selecting the same looks, as a UI theme and as a terminal palette of the same identifier.
+Settings SHALL store a theme by its identifier: the display name in lowercase with every run of characters other than ASCII letters and digits replaced by `-`, or the `id` of the theme's `splitty` object. A bundled theme SHALL keep its identifier against a file with the same one. The identifiers of the themes shipped before this catalog (`splitty-dark`, `splitty-light` and the others) SHALL keep selecting the same looks, as a UI theme and as a terminal palette of the same identifier. A bundled theme whose display name changes SHALL keep its identifier: `splitty-dark`, `splitty-light` and `splitty-light-gray` are shown as Splitty Modern, Splitty Modern Light and Splitty Modern Light Gray.
+
+The default UI themes SHALL be `splitty-classic` for a dark and for a fixed theme and `splitty-classic-light` for a light one: settings created without a choice name them, and they are shown in place of a stored theme the catalog does not have. Settings that already name a theme SHALL keep it.
 
 A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `active-text`, `hover`, `menu-hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `control-radius`, `field`, `bevel`, `title-bar`, `font-size` and `font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme or the other values of the same object.
 
@@ -255,6 +257,18 @@ Third-party themes bundled with the application SHALL be limited to those whose 
 #### Scenario: Partly unsupported title bar
 - **WHEN** a theme's `title-bar` holds a supported `foreground` and an unsupported `align`
 - **THEN** the title bar takes the foreground, keeps its derived alignment, and the problem is reported
+
+#### Scenario: First start
+- **WHEN** the app starts with no stored settings
+- **THEN** the UI theme is `splitty-classic`, and `splitty-classic-light` where the theme follows a light system preference
+
+#### Scenario: Settings from before the default changed
+- **WHEN** the stored settings name `splitty-dark`
+- **THEN** that theme is shown, listed as Splitty Modern, with the terminal palette of the same identifier
+
+#### Scenario: Palette with a display name
+- **WHEN** a palette file named `Night` holds the line `# name: Night Owl`
+- **THEN** the palette is offered as Night Owl and stored as `night`
 
 ### Requirement: Program Status Notification Switch
 A server's settings SHALL hold `notifications.programStatus`, a boolean that defaults to true and is listed in the settings metadata; settings stored without it SHALL read it as true, and a window SHALL read it as true from an older server that does not send it. A window SHALL add program status notifications (see `program-status`) only while both `notifications.enabled` and `notifications.programStatus` are on. The switch SHALL NOT change which status a window shows on tabs, screens and host groups.

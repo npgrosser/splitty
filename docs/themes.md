@@ -10,9 +10,11 @@ Both come with the app and can be added as files.
 
 ## What ships
 
-- The Splitty themes (Splitty Dark, Splitty Light, Classic, Retro, Aurora, Neon,
-  Cozy, the gray variants, Adwaita), each as a UI theme and as a terminal
-  palette.
+- The Splitty themes (Classic, Modern, Retro, Aurora, Neon, Cozy, their light
+  and gray variants, Adwaita), each as a UI theme and as a terminal palette.
+  Splitty Classic is the default, with Splitty Classic Light where the theme
+  follows a light system. Splitty Modern is the rounded sans-serif look that
+  was called Splitty Dark; settings that name it keep it.
 - The Windows themes, which also change the shape of the interface: Windows 11
   Dark and Light (soft panels, small control corners, wide window buttons) and
   Windows Classic (3D edges, square corners, a navy selection, a gradient title
@@ -137,7 +139,9 @@ selection-background = #f5e0dc
 selection-foreground = #1e1e2e
 ```
 
-Themes from `~/.config/ghostty/themes/` can be copied as they are.
+Themes from `~/.config/ghostty/themes/` can be copied as they are. A comment
+line `# name: Night Owl` shows the palette under that name; settings keep
+storing the identifier of the file name.
 
 ### UI theme
 
