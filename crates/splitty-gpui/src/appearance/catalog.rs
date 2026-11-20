@@ -356,6 +356,9 @@ mod tests {
             "splitty-classic-light-gray",
             "adwaita-dark",
             "adwaita-light",
+            "windows-11-dark",
+            "windows-11-light",
+            "windows-classic",
         ] {
             assert!(catalog.ui(id).is_some(), "{id}");
             assert!(catalog.palette(id).is_some(), "{id}");

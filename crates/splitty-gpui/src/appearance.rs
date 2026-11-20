@@ -412,10 +412,13 @@ impl NativeAppearance {
         // muted text keep the theme's values: their low contrast is how a
         // theme subdues idle entries against running and selected ones.
         result.text = readable_rgb(result.text, result.surface);
-        result.active_text =
-            active_text.unwrap_or_else(|| readable_rgb(result.text, result.active));
+        result.active_text = active_text.unwrap_or_else(|| text_on(result.text, result.active));
         result.menu_hover = menu_hover.unwrap_or(result.hover);
-        result.menu_hover_text = readable_rgb(result.text, result.menu_hover);
+        result.menu_hover_text = if result.menu_hover == result.active {
+            result.active_text
+        } else {
+            text_on(result.text, result.menu_hover)
+        };
 
         result.font_size = if (8..=24).contains(&selection.font_size) {
             selection.font_size as f32
@@ -856,6 +859,20 @@ fn readable_text(requested: Hsla, background: Hsla) -> Hsla {
     blend(requested, target, high)
 }
 
+/// The text of a highlighted entry: `text` where it reads on `background`,
+/// else black or white, whichever reads better. A highlight is a statement,
+/// so its text does not stop at the first readable grey.
+fn text_on(text: u32, background: u32) -> u32 {
+    let on = |color: u32| contrast(rgb(color).into(), rgb(background).into());
+    if on(text) >= 4.5 {
+        text
+    } else if on(0) >= on(0xffffff) {
+        0
+    } else {
+        0xffffff
+    }
+}
+
 fn readable_rgb(requested: u32, background: u32) -> u32 {
     u32::from(Rgba::from(readable_text(
         rgb(requested).into(),
@@ -1188,9 +1205,11 @@ mod tests {
             );
             let terminal_dark = luminance(rgb(shown.terminal.background).into())
                 < luminance(rgb(shown.terminal.foreground).into());
+            // The classic theme keeps the black console of its era under a
+            // light interface; every other theme's palette has its mode.
             assert_eq!(
                 terminal_dark,
-                theme.scheme == ColorScheme::Dark,
+                theme.scheme == ColorScheme::Dark || theme.id == "windows-classic",
                 "{}",
                 theme.id
             );
@@ -1409,6 +1428,78 @@ mod tests {
         assert!(shown.apply_block(&none).3);
     }
 
+    /// The bundled themes that take their shape from the tokens: one with
+    /// 3D edges and square corners, one with two corner sizes.
+    #[test]
+    fn the_windows_themes_resolve_with_their_shapes_and_palettes() {
+        let catalog = ThemeCatalog::load(None);
+        let classic = resolve(&selection("windows-classic"), &catalog);
+        assert_eq!(classic.notice, None);
+        assert_eq!(classic.scheme, ColorScheme::Light);
+        assert_eq!(
+            classic.bevel,
+            Some(Bevel {
+                highlight: 0xffffff,
+                light: 0xdfdfdf,
+                shadow: 0x808080,
+                dark_shadow: 0x000000
+            })
+        );
+        assert_eq!(
+            (classic.radius, classic.control_radius, classic.corner(6.)),
+            (0., 0., 0.)
+        );
+        assert_eq!(
+            (classic.active, classic.active_text, classic.field),
+            (0x000080, 0xffffff, Some(0xffffff))
+        );
+        assert_eq!(
+            (classic.menu_hover, classic.menu_hover_text),
+            (0x000080, 0xffffff)
+        );
+        assert_eq!(classic.title_bar.buttons, CaptionButtons::Boxed);
+        assert_eq!(
+            classic.title_bar.background,
+            Some(BarFill::Gradient {
+                from: 0x000080,
+                to: 0x1084d0
+            })
+        );
+        // The classic console under a light interface.
+        assert_eq!(
+            (classic.terminal.background, classic.terminal.foreground),
+            (0x000000, 0xc0c0c0)
+        );
+        for (id, scheme) in [
+            ("windows-11-dark", ColorScheme::Dark),
+            ("windows-11-light", ColorScheme::Light),
+        ] {
+            let shown = resolve(&selection(id), &catalog);
+            assert_eq!(
+                (shown.notice.as_deref(), shown.scheme),
+                (None, scheme),
+                "{id}"
+            );
+            assert_eq!(
+                (shown.bevel, shown.radius, shown.control_radius),
+                (None, 8., 4.)
+            );
+            assert_eq!(
+                (shown.title_bar.buttons, shown.title_bar.align),
+                (CaptionButtons::Wide, TitleAlign::Start)
+            );
+            let text: Hsla = rgb(shown.text).into();
+            assert!(contrast(text, rgb(shown.surface).into()) >= 7., "{id}");
+            assert!(contrast(text, rgb(shown.active).into()) >= 7., "{id}");
+        }
+        assert_eq!(
+            resolve(&selection("windows-11-dark"), &catalog)
+                .terminal
+                .background,
+            0x0c0c0c
+        );
+    }
+
     #[test]
     fn text_on_a_selected_entry_is_readable_without_a_token() {
         let catalog = ThemeCatalog::load(None);
@@ -1425,9 +1516,10 @@ mod tests {
         assert_eq!(navy.on_active(0xc0c0c0), 0xc0c0c0);
         let lifted: Hsla = rgb(navy.on_active(0x404040)).into();
         assert!(contrast(lifted, rgb(0x000080).into()) >= 3.);
-        let background: Hsla = rgb(0x000080).into();
-        let lifted: Hsla = rgb(readable_rgb(0x000000, 0x000080)).into();
-        assert!(contrast(lifted, background) >= 4.5);
+        // Text that does not read on the highlight turns black or white.
+        assert_eq!(text_on(0x000000, 0x000080), 0xffffff);
+        assert_eq!(text_on(0xf0f0f0, 0xffe000), 0x000000);
+        assert_eq!(text_on(0x101010, 0xd0d0d0), 0x101010);
     }
 
     #[test]
