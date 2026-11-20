@@ -1471,7 +1471,10 @@ mod tests {
             (classic.menu_hover, classic.menu_hover_text),
             (0x000080, 0xffffff)
         );
-        assert_eq!(classic.title_bar.buttons, CaptionButtons::Boxed);
+        assert_eq!(
+            (classic.title_bar.buttons, classic.title_bar.align),
+            (CaptionButtons::Boxed, TitleAlign::Start)
+        );
         assert_eq!(
             classic.title_bar.background,
             Some(BarFill::Gradient {
@@ -1500,7 +1503,7 @@ mod tests {
             );
             assert_eq!(
                 (shown.title_bar.buttons, shown.title_bar.align),
-                (CaptionButtons::Wide, TitleAlign::Start)
+                (CaptionButtons::Wide, TitleAlign::Center)
             );
             let text: Hsla = rgb(shown.text).into();
             assert!(contrast(text, rgb(shown.surface).into()) >= 7., "{id}");

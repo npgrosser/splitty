@@ -39,7 +39,7 @@
         "title-bar": {
           "inactive-foreground": "#8b8b8b",
           "height": 32.0,
-          "align": "start",
+          "align": "center",
           "weight": "normal",
           "buttons": "wide"
         },
@@ -204,7 +204,7 @@
         "title-bar": {
           "inactive-foreground": "#8b8b8b",
           "height": 32.0,
-          "align": "start",
+          "align": "center",
           "weight": "normal",
           "buttons": "wide"
         },
