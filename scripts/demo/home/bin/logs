@@ -1,0 +1,37 @@
+#!/usr/bin/python3
+"""A service's structured log, for the clips."""
+import random
+import shutil
+import signal
+import sys
+import time
+
+
+def fit(line: str) -> str:
+    """The line cut to the terminal's width, so a narrow pane does not wrap it."""
+    columns = shutil.get_terminal_size((100, 30)).columns
+    shown, out, index = 0, [], 0
+    while index < len(line) and shown < columns:
+        if line[index] == "\033":
+            end = line.index("m", index) + 1
+            out.append(line[index:end])
+            index = end
+        else:
+            out.append(line[index])
+            shown += 1
+            index += 1
+    return "".join(out) + "\033[0m"
+
+
+LINES = [("INFO", "32", "queue", "job {} done in {} ms"), ("INFO", "32", "http", "accepted connection {}"),
+         ("DEBUG", "2", "store", "cache hit for item {}"), ("WARN", "33", "auth", "token of user {} expires soon"),
+         ("INFO", "32", "mail", "delivered message {}"), ("DEBUG", "2", "store", "flushed {} pages"),
+         ("ERROR", "31", "queue", "job {} failed, retry {} of 3")]
+signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+rng = random.Random(11)
+while True:
+    time.sleep(rng.uniform(0.15, 0.7))
+    level, color, target, text = rng.choices(LINES, weights=[6, 5, 5, 2, 4, 3, 1])[0]
+    text = text.format(*(rng.randint(1, 990) for _ in range(text.count("{}"))))
+    print(fit(f"\033[2m{time.strftime('%H:%M:%S')}\033[0m \033[{color}m{level:5}\033[0m "
+              f"\033[36m{target:5}\033[0m {text}"), flush=True)

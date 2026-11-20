@@ -15,72 +15,113 @@ from typing import Callable
 class Scene:
     name: str
     play: Callable
+    # What happens off camera before the clip starts.
+    setup: Callable | None = None
     drawer: bool = False
-    zoom: float = 1.1
+    zoom: float = 1.25
     theme: str = "splitty-dark"
     size: tuple[int, int] | None = None
-    # Seconds the window gets before the clip starts and after its last step.
+    # Whether the scene needs a machine to reach over SSH.
+    host: bool = False
+    # Seconds the window gets before the setup and after the last step.
     settle: float = 2.5
-    tail: float = 1.2
+    tail: float = 1.4
 
 
 def terminal(stage):
-    stage.wait(0.6)
-    stage.run("ls")
-    stage.run("git log --oneline")
-    stage.run("build", pause=3.2)
+    stage.wait(0.5)
+    stage.run("git log --graph --oneline --all", pause=1.3)
+    stage.run("tests", pause=4.2)
+    stage.run("git diff", pause=1.6)
 
 
 def splits(stage):
-    stage.wait(0.5)
-    stage.run("serve", pause=1.4)
+    """A whole workspace from the keyboard: six terminals in splits and tabs."""
+    stage.wait(0.4)
+    stage.run("monitor", pause=1.0)
     stage.key("alt+d")
-    stage.run("git log --oneline", pause=0.8)
+    stage.run("serve", pause=0.9)
     stage.key("alt+shift+d")
-    stage.run("build", pause=2.8)
+    stage.run("tests", pause=1.2)
+    stage.key("alt+shift+Left", pause=0.6)
+    stage.key("alt+shift+d")
+    stage.run("logs", pause=0.9)
     stage.key("alt+t")
-    stage.run("ls", pause=0.8)
-    stage.key("alt+Prior")
-    stage.key("alt+shift+Left")
-    stage.key("alt+m", pause=1.4)
-    stage.key("alt+m", pause=1.0)
-    stage.key("alt+r", pause=0.8)
-    for _ in range(3):
-        stage.key("Right", pause=0.45)
-    stage.key("Escape", pause=0.6)
-
-
-def screens(stage):
-    stage.wait(0.5)
-    stage.run("serve", pause=1.2)
-    stage.key("ctrl+shift+space", pause=1.2)
-    stage.run("git log --oneline", pause=0.8)
-    stage.key("alt+shift+r", pause=0.7)
-    stage.key("ctrl+a", label="", pause=0.2)
-    stage.type("review", pause=0.3)
-    stage.key("Return", label="", pause=0.9)
-    stage.key("ctrl+shift+space", pause=1.2)
+    stage.run("git log --graph --oneline --all", pause=1.0)
+    stage.key("alt+shift+Right", pause=0.5)
+    stage.key("alt+shift+Up", pause=0.5)
+    stage.key("alt+t")
     stage.run("build", pause=2.6)
-    stage.key("ctrl+Tab", pause=1.1)
-    stage.key("ctrl+Tab", pause=1.1)
-    stage.key("alt+1", pause=1.1)
+    stage.key("alt+Prior", pause=0.8)
+    stage.key("alt+shift+Left", pause=0.6)
+    stage.key("alt+m", pause=1.5)
+    stage.key("alt+m", pause=0.9)
+
+
+def pointer_setup(stage):
+    for command in ("monitor", "serve", "logs", "tests"):
+        stage.run(command)
+        stage.key("alt+t")
+    stage.run("git log --graph --oneline --all")
 
 
 def pointer(stage):
-    stage.wait(0.4)
-    stage.run("serve", pause=1.0)
-    stage.key("alt+t", label="", pause=0.8)
-    stage.run("git log --oneline", pause=0.8)
-    # The second tab becomes a split on the right, then the split is resized
-    # and the tab goes back beside the first.
-    stage.drag((165, 17), (760, 300), duration=1.1, pause=1.2)
-    stage.drag((440, 300), (300, 300), duration=0.9, pause=1.0)
-    stage.drag((345, 17), (120, 17), duration=1.1, pause=1.2)
+    """Five tabs become a layout by dragging them out of their group."""
+    width, height = stage.hands.size
+    bar = 20
+    stage.wait(0.5)
+    # The last tab to the right half, the next one below it.
+    stage.drag((470, bar), (width - 150, height * 0.5))
+    stage.drag((365, bar), (width - 200, height - 110))
+    # One to the bottom of the left group, one beside it.
+    stage.drag((255, bar), (300, height - 110))
+    stage.drag((150, bar), (width * 0.5 - 90, height - 150))
+    # The splits take the sizes their content needs.
+    stage.drag((width * 0.5, height * 0.25), (width * 0.58, height * 0.27), pace=1.0)
+    stage.drag((width * 0.25, height * 0.5 + 16), (width * 0.24, height * 0.6), pace=1.0)
+    stage.move(width * 0.7, height * 0.4)
+
+
+def screens_setup(stage):
+    """Four screens with work in them; the clip starts on the first."""
+    stage.run("serve")
+    stage.key("alt+d")
+    stage.run("logs")
+    rename(stage, "api")
+    stage.key("ctrl+shift+space")
+    stage.run("monitor")
+    rename(stage, "system")
+    stage.key("ctrl+shift+space")
+    stage.run("tests")
+    stage.key("alt+shift+d")
+    stage.run("git log --graph --oneline --all")
+    rename(stage, "review")
+    stage.key("alt+1")
+
+
+def rename(stage, name: str):
+    stage.key("alt+shift+r", pause=0.6)
+    stage.key("ctrl+a", label="", pause=0.15)
+    stage.type(name, pause=0.25)
+    stage.key("Return", label="", pause=0.7)
+
+
+def screens(stage):
+    stage.wait(0.6)
+    stage.key("ctrl+Tab", pause=1.3)
+    stage.key("ctrl+Tab", pause=1.3)
+    stage.key("alt+1", pause=1.1)
+    # The drawer lists every screen with what runs in it.
+    stage.click(70, 232, pause=1.2)
+    stage.key("ctrl+shift+space", pause=1.0)
+    stage.run("build", pause=1.2)
+    rename(stage, "release")
+    stage.wait(1.4)
 
 
 SCENES = [
     Scene("terminal", terminal),
     Scene("splits", splits),
-    Scene("screens", screens, drawer=True),
-    Scene("pointer", pointer),
+    Scene("pointer", pointer, setup=pointer_setup),
+    Scene("screens", screens, setup=screens_setup, drawer=True),
 ]

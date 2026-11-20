@@ -4,12 +4,14 @@
 Usage: record.py --app target/release/splitty-gpui --out <dir> [scene ...]
 
 Each scene of `scenes.py` runs the desktop app in a private X server (Xvfb)
-with its own home, configuration and shell, drives it with xdotool and is
-saved as an animated WebP and a GIF. Nothing of the machine it runs on shows
-in a clip: the environment of the app is built from scratch.
+with its own home, configuration and shell. A scene first sets its window up
+off camera, then plays: keys and text go through xdotool, the pointer through
+XTest along a hand-like path. The clip is saved as an animated WebP and a GIF.
+Nothing of the machine it runs on shows in a clip: the environment of the app
+is built from scratch out of `home/`.
 
-Needs Xvfb, xdotool, libX11 and Pillow (`python3-pil`); a font named by
-`--font` has to be installed. The app renders in software there, so a clip
+Needs Xvfb, xdotool, libX11, libXtst and Pillow (`python3-pil`); a font named
+by `--font` has to be installed. The app renders in software there, so a clip
 shows what happens, not how fast it happens on a GPU.
 """
 
@@ -17,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import math
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -31,8 +35,9 @@ from PIL import Image, ImageDraw, ImageFont
 import scenes
 
 FPS = 24
-# The private display's size is the clip's: no scaling between them.
-DEFAULT_SIZE = (880, 550)
+# The private display's size is the clip's.
+DEFAULT_SIZE = (1280, 800)
+HOME = Path(__file__).resolve().parent / "home"
 
 
 class XImage(ctypes.Structure):
@@ -75,6 +80,21 @@ class Screen:
             raise RuntimeError(f"cannot open display {display}")
         self.root = self.lib.XDefaultRootWindow(self.display)
         self.size = size
+        self.lib.XFlush.argtypes = [ctypes.c_void_p]
+        self.test = ctypes.CDLL("libXtst.so.6")
+        self.test.XTestFakeMotionEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+        self.test.XTestFakeButtonEvent.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+
+    def point(self, x: float, y: float):
+        """Put the pointer somewhere."""
+        self.test.XTestFakeMotionEvent(self.display, -1, round(x), round(y), 0)
+        self.lib.XFlush(self.display)
+
+    def button(self, number: int, down: bool):
+        self.test.XTestFakeButtonEvent(self.display, number, 1 if down else 0, 0)
+        self.lib.XFlush(self.display)
 
     def grab(self) -> bytes:
         """The screen as BGRX rows."""
@@ -129,15 +149,22 @@ class Recorder(threading.Thread):
 
 
 class Stage:
-    """What a scene does to the app: keys, text and the pointer, in real time."""
+    """What a scene does to the app: keys, text and the pointer, in real time.
 
-    def __init__(self, display: str, window: str, recorder: Recorder, xdotool: str, env: dict):
-        self.display, self.window, self.recorder = display, window, recorder
+    While `fast` is set (a scene's setup, off camera) nothing waits longer
+    than the app needs and nothing is shown.
+    """
+
+    def __init__(self, hands: Screen, recorder: Recorder | None, xdotool: str, env: dict,
+                 seed: str):
+        self.hands, self.recorder = hands, recorder
         self.xdotool, self.env = xdotool, env
         # (start, end, label) of the key chips shown in the clip.
         self.keys: list[tuple[float, float, str]] = []
         self.pointer_used = False
-        self.position = (0, 0)
+        self.position = (float(hands.size[0] - 4), float(hands.size[1] - 4))
+        self.fast = True
+        self.random = random.Random(seed)
 
     def now(self) -> float:
         return time.monotonic() - self.recorder.started_at
@@ -147,51 +174,101 @@ class Stage:
                        stdout=subprocess.DEVNULL)
 
     def wait(self, seconds: float):
-        time.sleep(seconds)
+        time.sleep(min(seconds, 0.35) if self.fast else seconds)
 
-    def key(self, chord: str, label: str | None = None, hold: float = 1.1, pause: float = 0.9):
+    def key(self, chord: str, label: str | None = None, hold: float = 1.0, pause: float = 0.8):
         """Press a chord in xdotool's spelling and show it; `label=""` hides it."""
         shown = key_label(chord) if label is None else label
-        if shown:
+        if shown and not self.fast:
             self.keys.append((self.now(), self.now() + hold, shown))
         self.xdo("key", "--clearmodifiers", chord)
         self.wait(pause)
 
-    def type(self, text: str, delay: float = 0.055, pause: float = 0.4):
-        self.xdo("type", "--delay", str(int(delay * 1000)), text)
+    def type(self, text: str, delay: float = 0.05, pause: float = 0.35):
+        self.xdo("type", "--delay", "4" if self.fast else str(int(delay * 1000)), text)
         self.wait(pause)
 
-    def run(self, command: str, pause: float = 1.0):
+    def run(self, command: str, pause: float = 0.9):
         """Type a shell command and run it."""
-        self.type(command, pause=0.25)
+        self.type(command, pause=0.2)
         self.key("Return", label="", pause=pause)
 
-    def move(self, x: int, y: int, duration: float = 0.5):
-        """Glide the pointer to a place of the window."""
+    def move(self, x: float, y: float, pace: float = 1.0):
+        """Take the pointer to a place of the window as a hand would: along a
+        slight arc, fast in the middle, and settling at the end."""
+        start, end = self.position, (float(x), float(y))
+        distance = math.dist(start, end)
+        self.position = end
+        if self.fast or distance < 2:
+            self.hands.point(*end)
+            return
         self.pointer_used = True
-        start, steps = self.position, max(1, int(duration * 60))
+        # Farther targets take longer, by less than their distance (Fitts).
+        duration = (0.16 + 0.085 * math.log2(distance / 18 + 1)) * pace
+        duration *= self.random.uniform(0.9, 1.12)
+        # The arc: both control points on one side of the straight line.
+        normal = ((end[1] - start[1]) / distance, (start[0] - end[0]) / distance)
+        bend = distance * self.random.uniform(0.06, 0.16) * self.random.choice((-1, 1))
+        first = (start[0] + (end[0] - start[0]) * 0.3 + normal[0] * bend,
+                 start[1] + (end[1] - start[1]) * 0.3 + normal[1] * bend)
+        second = (start[0] + (end[0] - start[0]) * 0.72 + normal[0] * bend * 0.7,
+                  start[1] + (end[1] - start[1]) * 0.72 + normal[1] * bend * 0.7)
+        # A long reach lands a little past its target and comes back.
+        past = None
+        if distance > 260:
+            over = self.random.uniform(3, 8)
+            past = (end[0] + (end[0] - start[0]) / distance * over,
+                    end[1] + (end[1] - start[1]) / distance * over)
+        target = past or end
+        steps = max(2, int(duration * 90))
+        began = time.monotonic()
         for step in range(1, steps + 1):
-            # Ease in and out, as a hand does.
             t = step / steps
-            t = t * t * (3 - 2 * t)
-            self.xdo("mousemove", str(round(start[0] + (x - start[0]) * t)),
-                     str(round(start[1] + (y - start[1]) * t)))
-            time.sleep(duration / steps)
-        self.position = (x, y)
+            # Quick off the mark, slow into the target.
+            t = 1 - (1 - t ** 0.9) ** 2.2
+            u = 1 - t
+            px = u ** 3 * start[0] + 3 * u * u * t * first[0] + 3 * u * t * t * second[0] + t ** 3 * target[0]
+            py = u ** 3 * start[1] + 3 * u * u * t * first[1] + 3 * u * t * t * second[1] + t ** 3 * target[1]
+            wobble = 0.5 * (1 - t)
+            self.hands.point(px + self.random.uniform(-wobble, wobble),
+                             py + self.random.uniform(-wobble, wobble))
+            rest = began + duration * step / steps - time.monotonic()
+            if rest > 0:
+                time.sleep(rest)
+        if past:
+            time.sleep(self.random.uniform(0.03, 0.07))
+            for step in range(1, 6):
+                self.hands.point(past[0] + (end[0] - past[0]) * step / 5,
+                                 past[1] + (end[1] - past[1]) * step / 5)
+                time.sleep(0.012)
+        self.hands.point(*end)
 
-    def click(self, x: int, y: int, button: int = 1, pause: float = 0.6):
-        self.move(x, y)
-        self.xdo("click", str(button))
+    def click(self, x: float, y: float, button: int = 1, pause: float = 0.5, pace: float = 1.0):
+        self.move(x, y, pace)
+        self.wait(0.08)
+        self.hands.button(button, True)
+        time.sleep(0.05)
+        self.hands.button(button, False)
         self.wait(pause)
 
-    def drag(self, start: tuple[int, int], end: tuple[int, int], duration: float = 0.9,
-             pause: float = 0.8):
+    def drag(self, start: tuple[float, float], end: tuple[float, float], pause: float = 0.6,
+             pace: float = 1.15):
+        """Press at `start`, carry to `end`, release. The way there passes a
+        point just off the start, so the app sees the drag begin."""
         self.move(*start)
-        self.xdo("mousedown", "1")
-        self.wait(0.15)
-        self.move(*end, duration=duration)
-        self.wait(0.25)
-        self.xdo("mouseup", "1")
+        self.wait(0.1)
+        self.hands.button(1, True)
+        time.sleep(0.07)
+        if self.fast:
+            for step in range(1, 9):
+                self.hands.point(start[0] + (end[0] - start[0]) * step / 8,
+                                 start[1] + (end[1] - start[1]) * step / 8)
+                time.sleep(0.03)
+            self.position = (float(end[0]), float(end[1]))
+        else:
+            self.move(*end, pace=pace)
+        self.wait(0.16)
+        self.hands.button(1, False)
         self.wait(pause)
 
 
@@ -206,10 +283,10 @@ def key_label(chord: str) -> str:
 
 
 def demo_home(root: Path) -> Path:
-    """A home with a small project, a plain prompt and nothing personal."""
+    """A home with a small project, a plain prompt and nothing personal:
+    a copy of `home/` with a Git history of its own."""
     home = root / "home"
-    project = home / "project"
-    (project / "src").mkdir(parents=True)
+    shutil.copytree(HOME, home)
     (home / ".hushlogin").touch()
     (home / ".bashrc").write_text(
         "PS1='\\[\\e[1;34m\\]\\w\\[\\e[0m\\] \\$ '\n"
@@ -217,42 +294,48 @@ def demo_home(root: Path) -> Path:
         "export PATH=\"$HOME/bin:$PATH\"\n")
     (home / ".bash_profile").write_text(
         "[ -f ~/.bashrc ] && . ~/.bashrc\ncd ~/project 2>/dev/null\n")
-    (project / "README.md").write_text("# demo\n\nA small service.\n")
-    (project / "Cargo.toml").write_text('[package]\nname = "demo"\nversion = "0.1.0"\n')
-    (project / "src" / "main.rs").write_text(
-        'fn main() {\n    println!("listening on :8080");\n}\n')
-    (project / "notes.txt").write_text("ship the release\n")
-    binaries = home / "bin"
-    binaries.mkdir()
-    # Stand-ins with a little output, so a clip needs no toolchain or network.
-    build = binaries / "build"
-    build.write_text(
-        "#!/bin/sh\n"
-        "for crate in core net http router server demo; do\n"
-        "  printf '\\033[1;32m   Compiling\\033[0m %s v0.1.0\\n' \"$crate\"; sleep 0.35\n"
-        "done\n"
-        "printf '\\033[1;32m    Finished\\033[0m release in 2.1s\\n'\n")
-    serve = binaries / "serve"
-    serve.write_text(
-        "#!/bin/sh\n"
-        "printf '\\033[1;36mdemo\\033[0m listening on http://localhost:8080\\n'\n"
-        "n=0; while :; do n=$((n+1)); sleep 1.2\n"
-        "  printf '\\033[2m%s\\033[0m GET /api/items/%s \\033[32m200\\033[0m\\n' \"$(date +%T)\" \"$n\"\n"
-        "done\n")
-    for script in (build, serve):
-        script.chmod(0o755)
-    git = {"GIT_AUTHOR_NAME": "Demo", "GIT_AUTHOR_EMAIL": "demo@example.com",
-           "GIT_COMMITTER_NAME": "Demo", "GIT_COMMITTER_EMAIL": "demo@example.com",
-           "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
-           "PATH": "/usr/bin:/bin", "HOME": str(home)}
-    if shutil.which("git"):
-        run = lambda *args: subprocess.run(["git", *args], cwd=project, env=git, check=True,
-                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        run("init", "-q", "-b", "main")
-        for message, name in [("Start the service", "Cargo.toml"), ("Add the router", "src/main.rs"),
-                              ("Describe the project", "README.md"), ("Plan the release", "notes.txt")]:
-            run("add", name)
-            run("commit", "-q", "-m", message)
+    project = home / "project"
+    if not shutil.which("git"):
+        return home
+    stamp = [1_700_000_000]
+
+    def git(*args):
+        # Fixed names and dates: the same history, and so the same hashes,
+        # on every machine.
+        stamp[0] += 3600
+        environment = {
+            "GIT_AUTHOR_NAME": "Demo", "GIT_AUTHOR_EMAIL": "demo@example.com",
+            "GIT_COMMITTER_NAME": "Demo", "GIT_COMMITTER_EMAIL": "demo@example.com",
+            "GIT_AUTHOR_DATE": f"{stamp[0]} +0000", "GIT_COMMITTER_DATE": f"{stamp[0]} +0000",
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null",
+            "PATH": "/usr/bin:/bin", "HOME": str(home)}
+        subprocess.run(["git", *args], cwd=project, env=environment, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def commit(message: str, path: str, text: str | None = None):
+        if text is not None:
+            with open(project / path, "a") as file:
+                file.write(text)
+        git("add", path)
+        git("commit", "-q", "-m", message)
+
+    git("init", "-q", "-b", "main")
+    commit("Start the service", "Cargo.toml")
+    commit("Add the router", "src")
+    commit("Describe the project", "README.md")
+    git("switch", "-q", "-c", "search")
+    commit("Sketch the search route", "src/router.rs", "\n// search: by title\n")
+    commit("Rank the results", "src/router.rs", "// search: rank by recency\n")
+    git("switch", "-q", "main")
+    commit("Write the plan", "PLAN.md")
+    git("merge", "-q", "--no-ff", "-m", "Merge the search route", "search")
+    git("switch", "-q", "-c", "queue")
+    commit("Retry failed jobs", "src/main.rs", "\n// queue: three retries\n")
+    git("switch", "-q", "main")
+    commit("Bump to 0.4.2", "Cargo.toml", "# 0.4.2\n")
+    # Work in progress, for a colored diff.
+    with open(project / "src/router.rs", "a") as file:
+        file.write("\nfn search() -> String {\n    \"[]\".into()\n}\n")
     return home
 
 
@@ -347,16 +430,15 @@ def save(images, durations, out: Path, name: str):
     return webp, gif
 
 
-def record(scene, args, out: Path):
+def record(scene, args, out: Path, display: str):
     size = scene.size or DEFAULT_SIZE
     root = Path(tempfile.mkdtemp(prefix="splitty-demo-"))
-    xvfb = app = None
+    xvfb = app = host = None
     try:
         home = demo_home(root)
         app_config(root / "config", scene, args.font)
         runtime = root / "run"
         runtime.mkdir(mode=0o700)
-        display = f":{args.display}"
         library_path = os.environ.get("LD_LIBRARY_PATH", "")
         xvfb = subprocess.Popen(
             [args.xvfb, display, "-screen", "0", f"{size[0]}x{size[1]}x24", "-dpi", "96",
@@ -384,6 +466,10 @@ def record(scene, args, out: Path):
             "DISPLAY": display, "GPUI_BACKEND": "x11", "XDG_RUNTIME_DIR": str(runtime),
             "SPLITTY_CONFIG_DIR": str(root / "config"), "LD_LIBRARY_PATH": library_path,
         }
+        if scene.host:
+            # A machine to reach over SSH, for the scenes of remote screens.
+            import remote
+            host = remote.start(root, home, environment, args)
         log = open(root / "app.log", "wb")
         app = subprocess.Popen([str(args.app)], env=environment, stdout=log, stderr=log)
 
@@ -394,15 +480,19 @@ def record(scene, args, out: Path):
         handle = wait_for(window, "the app's window")
         for command in (["windowmove", handle, "0", "0"],
                         ["windowsize", handle, str(size[0]), str(size[1])],
-                        ["windowfocus", handle], ["mousemove", str(size[0] - 4), str(size[1] - 4)]):
+                        ["windowfocus", handle]):
             subprocess.run([args.xdotool, *command], env=tools, check=True)
+        hands = Screen(display, size)
+        hands.point(size[0] - 4, size[1] - 4)
         time.sleep(scene.settle)
-        screen = Screen(display, size)
-        recorder = Recorder(screen)
-        stage = Stage(display, handle, recorder, args.xdotool, tools)
-        stage.position = (size[0] - 4, size[1] - 4)
+        stage = Stage(hands, None, args.xdotool, tools, scene.name)
+        if scene.setup:
+            scene.setup(stage)
+            time.sleep(1.2)
+        recorder = Recorder(Screen(display, size))
+        stage.recorder, stage.fast = recorder, False
         recorder.start()
-        time.sleep(0.4)
+        time.sleep(0.5)
         scene.play(stage)
         time.sleep(scene.tail)
         length = recorder.finish()
@@ -420,6 +510,8 @@ def record(scene, args, out: Path):
                     process.wait(5)
                 except subprocess.TimeoutExpired:
                     process.kill()
+        if host:
+            host.stop()
         if not args.keep:
             shutil.rmtree(root, ignore_errors=True)
         else:
@@ -435,7 +527,8 @@ def main():
     parser.add_argument("--xvfb-arg", action="append", default=[],
                         help="an extra argument for Xvfb, such as a font path")
     parser.add_argument("--xdotool", default="xdotool")
-    parser.add_argument("--display", type=int, default=87)
+    parser.add_argument("--display", type=int, default=87,
+                        help="the first private display number")
     parser.add_argument("--font", default="Ubuntu Sans", help="the interface font, installed")
     parser.add_argument("--font-file", default="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                         help="a TrueType file for the key chips, with arrows")
@@ -447,8 +540,9 @@ def main():
         parser.error(f"unknown scene: {', '.join(unknown)}; there are {', '.join(known)}")
     args.out.mkdir(parents=True, exist_ok=True)
     args.app = args.app.resolve()
-    for name in args.names or list(known):
-        record(known[name], args, args.out)
+    for index, name in enumerate(args.names or list(known)):
+        # A display of its own per scene: the one before may not be gone yet.
+        record(known[name], args, args.out, f":{args.display + index}")
 
 
 if __name__ == "__main__":

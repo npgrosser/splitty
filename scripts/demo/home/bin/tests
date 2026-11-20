@@ -1,0 +1,36 @@
+#!/usr/bin/python3
+"""A test run that passes, for the clips."""
+import random
+import shutil
+import sys
+import time
+
+
+def fit(line: str) -> str:
+    """The line cut to the terminal's width, so a narrow pane does not wrap it."""
+    columns = shutil.get_terminal_size((100, 30)).columns
+    shown, out, index = 0, [], 0
+    while index < len(line) and shown < columns:
+        if line[index] == "\033":
+            end = line.index("m", index) + 1
+            out.append(line[index:end])
+            index = end
+        else:
+            out.append(line[index])
+            shown += 1
+            index += 1
+    return "".join(out) + "\033[0m"
+
+
+MODULES = ["router", "handlers", "store", "auth", "queue", "config"]
+CASES = ["matches_a_prefix", "rejects_an_empty_path", "keeps_the_order", "retries_after_a_timeout",
+         "reads_the_defaults", "refuses_an_expired_token", "round_trips", "ends_on_shutdown"]
+rng = random.Random(5)
+names = [f"{module}::{case}" for module in MODULES for case in CASES]
+rng.shuffle(names)
+print(f"\033[1;32m     Running\033[0m unittests src/lib.rs\n\nrunning {len(names)} tests", flush=True)
+for name in names:
+    time.sleep(rng.uniform(0.02, 0.09))
+    print(fit(f"test {name} ... \033[32mok\033[0m"), flush=True)
+print("\n" + fit(f"test result: \033[32mok\033[0m. {len(names)} passed; 0 failed; finished in 2.31s"),
+      flush=True)

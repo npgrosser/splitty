@@ -1,0 +1,77 @@
+#!/usr/bin/python3
+"""A process monitor with made-up numbers, for the clips: bars per core, memory
+and a process table, redrawn in place until a key or Ctrl+C ends it."""
+import random
+import shutil
+import signal
+import sys
+import time
+
+PROCESSES = [
+    ("demo serve --port 8080", 18.0, 2.1), ("postgres: writer process", 9.0, 6.4),
+    ("node vite --host", 7.5, 4.8), ("cargo watch -x test", 6.0, 3.3),
+    ("redis-server *:6379", 3.2, 1.2), ("postgres: checkpointer", 2.4, 2.0),
+    ("rust-analyzer", 12.0, 9.7), ("demo worker --queue mail", 5.1, 1.8),
+    ("nginx: worker process", 1.9, 0.6), ("demo worker --queue index", 4.4, 1.7),
+    ("tail -f log/development.log", 0.4, 0.1), ("ssh-agent", 0.1, 0.1),
+    ("demo scheduler", 1.3, 0.9), ("bash", 0.2, 0.2), ("git fetch --all", 2.8, 0.4),
+    ("esbuild --watch", 3.6, 1.5), ("demo migrate --watch", 0.9, 0.7), ("dbus-daemon", 0.1, 0.1),
+]
+
+
+def bar(share: float, width: int) -> str:
+    filled = max(0, min(width, round(share * width)))
+    green = min(filled, round(width * 0.55))
+    yellow = min(filled - green, round(width * 0.25))
+    red = filled - green - yellow
+    return ("\033[32m" + "|" * green + "\033[33m" + "|" * yellow + "\033[31m" + "|" * red
+            + "\033[0m" + " " * (width - filled))
+
+
+def main():
+    rng = random.Random(7)
+    cores = [rng.uniform(0.1, 0.7) for _ in range(8)]
+    memory = 0.46
+    pids = sorted(rng.sample(range(900, 9800), len(PROCESSES)))
+    started = time.time()
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    sys.stdout.write("\033[?1049h\033[?25l")
+    try:
+        while True:
+            columns, lines = shutil.get_terminal_size((100, 30))
+            half = max(10, columns // 2 - 12)
+            out = ["\033[H"]
+            cores = [max(0.02, min(0.98, value + rng.uniform(-0.12, 0.12))) for value in cores]
+            memory = max(0.3, min(0.7, memory + rng.uniform(-0.01, 0.01)))
+            for row in range(4):
+                left, right = cores[row], cores[row + 4]
+                out.append(f" \033[36m{row + 1}\033[0m[{bar(left, half)}{left * 100:5.1f}%] "
+                           f"\033[36m{row + 5}\033[0m[{bar(right, half)}{right * 100:5.1f}%]\033[K\n")
+            load = f"{sum(cores):.2f} {sum(cores) * 0.8:.2f} {sum(cores) * 0.7:.2f}"
+            tasks = f" \033[36mTasks:\033[0m {len(PROCESSES) + 71}, \033[36mLoad:\033[0m {load}"
+            # The summary beside the memory bar only where it fits.
+            fits = half + 16 + len(f" Tasks: {len(PROCESSES) + 71}, Load: {load}") <= columns
+            out.append(f" \033[36mMem\033[0m[{bar(memory, half - 2)}{memory * 16:4.1f}G/16G]"
+                       f"{tasks if fits else ''}\033[K\n\033[K\n")
+            header = f"  PID USER      CPU%  MEM%     TIME  Command"
+            out.append("\033[30;42m" + header.ljust(columns)[:columns] + "\033[0m\n")
+            rows = []
+            for pid, (command, cpu, mem) in zip(pids, PROCESSES):
+                rows.append((max(0.0, cpu + rng.uniform(-cpu * 0.5, cpu * 0.6)), pid, command, mem))
+            rows.sort(reverse=True)
+            elapsed = int(time.time() - started)
+            for index, (cpu, pid, command, mem) in enumerate(rows[:max(0, lines - 9)]):
+                minutes = (pid * 7 + elapsed) % 600
+                line = f"{pid:5d} demo     {cpu:5.1f} {mem:5.1f} {minutes // 60:4d}:{minutes % 60:02d}.{pid % 100:02d}  "
+                color = "\033[1m" if index == 0 else ""
+                out.append(color + (line + command)[:columns] + "\033[0m\033[K\n")
+            out.append("\033[J")
+            sys.stdout.write("".join(out))
+            sys.stdout.flush()
+            time.sleep(0.8)
+    finally:
+        sys.stdout.write("\033[?25h\033[?1049l")
+        sys.stdout.flush()
+
+
+main()
