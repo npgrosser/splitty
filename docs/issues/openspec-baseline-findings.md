@@ -539,6 +539,10 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-20 in a local full run under load, in `splitty-server`:
+  `an_exit_while_no_daemon_runs_reaches_the_next_daemon` (`tests/daemon_lifecycle.rs`) gave up waiting for "the
+  final output and the exit code". The test file alone then passed all 42 tests, and three repeats of the test
+  passed. Not investigated.
 - Seen on 2026-11-20 in local full runs under load, one test per run, in `splitty-remote`:
   `tunnel::reverse::tests::failed_setup_preserves_ssh_diagnostics_after_cleanup` (the error lost its SSH
   classification) and `tunnel::forward::tests::exact_ports_refuse_both_loopback_families`. Two of three
