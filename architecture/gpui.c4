@@ -122,6 +122,6 @@ model {
     terminal -> gpui_keys 'Look up the find, clipboard and scroll keys'
     terminal -> splitty.client_core.keymap 'Map keyboard commands to local terminal actions'
     gpui_workspace -> gpui_keys 'Dispatch key events, show key labels and replace the keymap'
-    gpui_workspace -> splitty.client_core.keymap 'Run registry commands, list them in the palette and keep the user\'s overrides'
+    gpui_workspace -> splitty.client_core.keymap 'Run registry commands, list them in the palette, show and rebind them on the Keyboard page and keep the user\'s overrides'
   }
 }
