@@ -36,26 +36,27 @@ def terminal(stage):
 
 
 def splits(stage):
-    """A whole workspace from the keyboard: six terminals in splits and tabs."""
+    """A whole workspace from the keyboard: three columns of splits and tabs."""
     stage.wait(0.4)
-    stage.run("monitor", pause=1.0)
-    stage.key("alt+d")
-    stage.run("serve", pause=0.9)
-    stage.key("alt+shift+d")
-    stage.run("tests", pause=1.2)
-    stage.key("alt+shift+Left", pause=0.6)
-    stage.key("alt+shift+d")
-    stage.run("logs", pause=0.9)
-    stage.key("alt+t")
-    stage.run("git log --graph --oneline --all", pause=1.0)
-    stage.key("alt+shift+Right", pause=0.5)
-    stage.key("alt+shift+Up", pause=0.5)
-    stage.key("alt+t")
-    stage.run("build", pause=2.6)
+    stage.run("monitor", pause=0.8)
+    stage.key("alt+d", pause=0.6)
+    stage.run("serve", pause=0.7)
+    stage.key("alt+d", pause=0.6)
+    stage.run("git log --graph --oneline --all", pause=0.8)
+    stage.key("alt+t", pause=0.6)
+    stage.run("build", pause=0.5)
+    stage.key("alt+shift+Left", pause=0.5)
+    stage.key("alt+shift+d", pause=0.6)
+    stage.run("tests", pause=0.6)
+    stage.key("alt+shift+Left", pause=0.5)
+    stage.key("alt+shift+d", pause=0.6)
+    stage.run("logs", pause=0.7)
+    stage.key("alt+t", pause=0.6)
+    stage.run("git diff", pause=0.9)
     stage.key("alt+Prior", pause=0.8)
-    stage.key("alt+shift+Left", pause=0.6)
-    stage.key("alt+m", pause=1.5)
-    stage.key("alt+m", pause=0.9)
+    stage.key("alt+Next", pause=0.8)
+    stage.key("alt+m", pause=1.4)
+    stage.key("alt+m", pause=0.8)
 
 
 def pointer_setup(stage):
@@ -69,17 +70,18 @@ def pointer(stage):
     """Five tabs become a layout by dragging them out of their group."""
     width, height = stage.hands.size
     bar = 20
-    stage.wait(0.5)
-    # The last tab to the right half, the next one below it.
-    stage.drag((470, bar), (width - 150, height * 0.5))
-    stage.drag((365, bar), (width - 200, height - 110))
-    # One to the bottom of the left group, one beside it.
-    stage.drag((255, bar), (300, height - 110))
-    stage.drag((150, bar), (width * 0.5 - 90, height - 150))
+    stage.wait(0.4)
+    quick = dict(pause=0.35, pace=0.95)
+    # The last tab takes the right half, two more the lower halves.
+    stage.drag((560, bar), (width - 110, height * 0.5), **quick)
+    stage.drag((258, bar), (width * 0.25, height - 70), **quick)
+    stage.drag((158, bar), (width * 0.75, height - 70), **quick)
     # The splits take the sizes their content needs.
-    stage.drag((width * 0.5, height * 0.25), (width * 0.58, height * 0.27), pace=1.0)
-    stage.drag((width * 0.25, height * 0.5 + 16), (width * 0.24, height * 0.6), pace=1.0)
-    stage.move(width * 0.7, height * 0.4)
+    stage.drag((width * 0.5, height * 0.3), (width * 0.56, height * 0.33), pause=0.3, pace=0.9)
+    stage.drag((width * 0.2, height * 0.5), (width * 0.21, height * 0.62), pause=0.3, pace=0.9)
+    # A tab moves over to another group, beside the tab that is there.
+    stage.drag((150, bar), (width * 0.56 + 120, bar), **quick)
+    stage.move(width * 0.5, height * 0.45)
 
 
 def screens_setup(stage):
