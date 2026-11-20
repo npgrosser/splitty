@@ -2,7 +2,7 @@
 
 A graphical terminal multiplexer for Linux, macOS and Windows.
 
-![Several screens with terminals in splits and tabs](https://github.com/npgrosser/splitty/raw/media/overview.webp)
+![Local screens and a screen of an SSH host, with terminals in splits and tabs](https://github.com/npgrosser/splitty/raw/media/overview.webp)
 
 ## Install
 
@@ -13,12 +13,6 @@ rpm, tar.gz). The notes for each system are in [Install](docs/install.md).
 
 > A personal project in active development (0.x), used daily on all three
 > systems. Expect rough edges and changes between versions.
-
-## A terminal
-
-![One terminal with a Git graph, a test run and a diff](https://github.com/npgrosser/splitty/raw/media/terminal.webp)
-
-Written in Rust. Terminal emulation by [libghostty](https://ghostty.org).
 
 ## Full keyboard control over splits and tabs
 
@@ -74,6 +68,7 @@ A remote terminal's folder also opens in VS Code or Zed on your computer:
 | [Known issues](docs/known-issues.md) | Platform quirks, with workarounds |
 | [Architecture](docs/architecture.md) · [Networking](docs/networking.md) · [Development](docs/development.md) | How it is built |
 
+Written in Rust; terminal emulation by [libghostty](https://ghostty.org).
 Bugs and ideas are welcome as
 [GitHub issues](https://github.com/npgrosser/splitty/issues). MIT, see
 [LICENSE](LICENSE).

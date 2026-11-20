@@ -26,6 +26,50 @@ OPEN_FOLDER_IN = (790, 690)
 LOCAL_SCREEN = (80, 114)
 
 
+def overview_setup(stage):
+    """Two local screens and one on the host, all at work; the clip starts
+    on the first."""
+    stage.run("monitor")
+    stage.key("alt+d")
+    stage.run("serve")
+    stage.key("alt+shift+d")
+    stage.run("logs")
+    rename(stage, "api")
+    stage.key("ctrl+shift+space")
+    stage.run("git log --graph --oneline --all")
+    stage.key("alt+d")
+    stage.run("tests")
+    stage.key("alt+shift+d")
+    stage.run("build")
+    rename(stage, "review")
+    stage.click(*HOSTS)
+    stage.click(*DEVBOX)
+    # Connecting takes the host's time, not the stage's.
+    time.sleep(3)
+    stage.click(*NEW_SCREEN)
+    time.sleep(2)
+    stage.run("serve")
+    stage.key("alt+d")
+    stage.run("monitor")
+    stage.key("alt+shift+d")
+    stage.run("logs")
+    rename(stage, "staging")
+    time.sleep(1)
+    stage.key("alt+1")
+    stage.move(900, 620)
+
+
+def overview(stage):
+    """The whole window in a few seconds: local screens, a host's screen
+    beside them, splits and tabs."""
+    stage.wait(1.0)
+    stage.key("ctrl+Tab", pause=1.4)
+    stage.key("ctrl+Tab", pause=2.0)
+    stage.key("alt+m", pause=1.4)
+    stage.key("alt+m", pause=1.0)
+    stage.key("ctrl+Tab", pause=1.0)
+
+
 def local_setup(stage):
     """Two local screens at work; the clip starts on the first."""
     stage.run("logs")
@@ -111,6 +155,7 @@ def ports(stage):
 
 
 SCENES = [
+    Scene("overview", overview, setup=overview_setup, drawer=True, host=True),
     Scene("remote", remote, setup=local_setup, drawer=True, host=True),
     Scene("reconnect", reconnect, setup=reconnect_setup, drawer=True, host=True),
     Scene("ports", ports, setup=ports_setup, drawer=True, host=True),

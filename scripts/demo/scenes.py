@@ -127,39 +127,6 @@ def screens(stage):
     stage.wait(1.4)
 
 
-def overview_setup(stage):
-    """Three screens at work; the clip starts on the first."""
-    stage.run("monitor")
-    stage.key("alt+d")
-    stage.run("serve")
-    stage.key("alt+shift+d")
-    stage.run("logs")
-    rename(stage, "api")
-    stage.key("ctrl+shift+space")
-    stage.run("git log --graph --oneline --all")
-    stage.key("alt+d")
-    stage.run("tests")
-    stage.key("alt+shift+d")
-    stage.run("build")
-    rename(stage, "review")
-    stage.key("ctrl+shift+space")
-    stage.run("logs")
-    stage.key("alt+d")
-    stage.run("monitor")
-    rename(stage, "ops")
-    stage.key("alt+1")
-
-
-def overview(stage):
-    """The whole window in a few seconds: screens, splits and tabs."""
-    stage.wait(1.0)
-    stage.key("ctrl+Tab", pause=1.5)
-    stage.key("ctrl+Tab", pause=1.5)
-    stage.key("ctrl+Tab", pause=1.2)
-    stage.key("alt+m", pause=1.3)
-    stage.key("alt+m", pause=0.8)
-
-
 SETTINGS = (70, 768)
 
 
@@ -195,7 +162,6 @@ def customize(stage):
 
 
 SCENES = [
-    Scene("overview", overview, setup=overview_setup, drawer=True),
     Scene("terminal", terminal),
     Scene("splits", splits),
     Scene("pointer", pointer, setup=pointer_setup),
