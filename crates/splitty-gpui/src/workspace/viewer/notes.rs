@@ -1125,7 +1125,7 @@ impl Workspace {
             .flex_none()
             .px(chrome_rems(6.))
             .py(chrome_rems(2.))
-            .rounded(chrome_rems(4.))
+            .rounded(chrome_rems(colors.corner(4.)))
             .cursor_pointer()
             .text_size(chrome_rems(NOTE_META))
             .text_color(rgb(if primary {
@@ -1134,7 +1134,7 @@ impl Workspace {
                 colors.secondary
             }))
             .when(primary, |action| {
-                action.border_1().border_color(rgb(colors.accent))
+                action.edged_sides(colors, Relief::Raised, Sides::ALL, colors.accent)
             })
             .hover(|style| style.bg(rgba(colors.hover_overlay)))
             .child(label.into())
@@ -1156,8 +1156,7 @@ impl Workspace {
             .flex_none()
             .w(chrome_rems(NOTES_WIDTH))
             .h_full()
-            .border_l_1()
-            .border_color(rgb(colors.subtle_border))
+            .edged_sides(colors, Relief::Etched, Sides::LEFT, colors.subtle_border)
             .bg(rgb(colors.raised))
             .text_size(chrome_rems(NOTE_TEXT))
             .text_color(rgb(colors.text));
@@ -1191,8 +1190,7 @@ impl Workspace {
                     .flex_col()
                     .gap(chrome_rems(6.))
                     .p(chrome_rems(10.))
-                    .border_b_1()
-                    .border_color(rgb(colors.subtle_border))
+                    .edged_sides(colors, Relief::Etched, Sides::BOTTOM, colors.subtle_border)
                     .child(format!(
                         "{} waits for your review",
                         if title.is_empty() {
@@ -1266,8 +1264,7 @@ impl Workspace {
             .flex_col()
             .gap(chrome_rems(4.))
             .p(chrome_rems(10.))
-            .border_b_1()
-            .border_color(rgb(colors.subtle_border));
+            .edged_sides(colors, Relief::Etched, Sides::BOTTOM, colors.subtle_border);
         let mut purpose_row = div()
             .flex()
             .items_center()
@@ -1306,10 +1303,9 @@ impl Workspace {
                 div()
                     .px(chrome_rems(8.))
                     .py(chrome_rems(4.))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .rounded(chrome_rems(5.))
-                    .bg(rgb(colors.surface))
+                    .edged(colors, Relief::Sunken)
+                    .rounded(chrome_rems(colors.corner(5.)))
+                    .bg(rgb(colors.field.unwrap_or(colors.surface)))
                     .child(
                         Textarea::new(state)
                             .appearance(false)
@@ -1423,8 +1419,7 @@ impl Workspace {
                         .gap(chrome_rems(4.))
                         .px(chrome_rems(10.))
                         .py(chrome_rems(8.))
-                        .border_b_1()
-                        .border_color(rgb(colors.subtle_border))
+                        .edged_sides(colors, Relief::Etched, Sides::BOTTOM, colors.subtle_border)
                         .when(!open, |card| card.opacity(0.6))
                         .child(
                             div()
@@ -1458,7 +1453,7 @@ impl Workspace {
                                     div()
                                         .px(chrome_rems(6.))
                                         .py(chrome_rems(3.))
-                                        .rounded(chrome_rems(4.))
+                                        .rounded(chrome_rems(colors.corner(4.)))
                                         .bg(rgb(colors.surface))
                                         .font_family(crate::terminal::terminal_family(cx))
                                         .text_size(chrome_rems(NOTE_META))
@@ -1570,8 +1565,7 @@ impl Workspace {
                     .gap(chrome_rems(2.))
                     .px(chrome_rems(6.))
                     .py(chrome_rems(3.))
-                    .border_t_1()
-                    .border_color(rgb(colors.subtle_border))
+                    .edged_sides(colors, Relief::Etched, Sides::TOP, colors.subtle_border)
                     .child(self.note_action(
                         format!("viewer-marks-{key}"),
                         if entry.marks_hidden {
@@ -1608,8 +1602,7 @@ impl Workspace {
                     .flex_none()
                     .px(chrome_rems(6.))
                     .py(chrome_rems(4.))
-                    .border_t_1()
-                    .border_color(rgb(colors.subtle_border));
+                    .edged_sides(colors, Relief::Etched, Sides::TOP, colors.subtle_border);
                 if targets.is_empty() {
                     ways = ways.child(
                         div()
@@ -1661,8 +1654,7 @@ impl Workspace {
                     .justify_end()
                     .gap(chrome_rems(6.))
                     .p(chrome_rems(8.))
-                    .border_t_1()
-                    .border_color(rgb(colors.subtle_border))
+                    .edged_sides(colors, Relief::Etched, Sides::TOP, colors.subtle_border)
                     .child(self.note_action(
                         format!("viewer-review-copy-{key}"),
                         "Copy review",

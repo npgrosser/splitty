@@ -482,7 +482,7 @@ impl Workspace {
                         profile.name
                     ))
                     .when_some(detail, |label, reason| {
-                        label.child(menu_style::detail(colors, reason).mt(px(2.)))
+                        label.child(menu_style::detail(colors, reason, selected).mt(px(2.)))
                     });
                 let meta = div()
                     .flex()
@@ -490,7 +490,7 @@ impl Workspace {
                     .items_center()
                     .gap(chrome_rems(6.))
                     .when_some(badge, |meta, badge| {
-                        meta.child(menu_style::badge(colors, badge))
+                        meta.child(menu_style::badge(colors, badge, selected))
                     })
                     .when(default, |meta| {
                         meta.child(menu_style::detail(
@@ -500,6 +500,7 @@ impl Workspace {
                             } else {
                                 "Alt+T"
                             },
+                            selected,
                         ))
                     });
                 let row = if available {

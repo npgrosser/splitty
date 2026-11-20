@@ -189,9 +189,47 @@ pub trait Edged: Styled + ParentElement + Sized {
             None => self.border_color(rgb(flat)),
         }
     }
+
+    /// The bevel of `relief` on `sides` in a bevel theme; `flat` styles the
+    /// element otherwise. For borders whose flat color is not a theme color
+    /// of the appearance, and for elements that have no border when flat.
+    fn edged_or(
+        self,
+        appearance: &NativeAppearance,
+        relief: Relief,
+        sides: Sides,
+        flat: impl FnOnce(Self) -> Self,
+    ) -> Self {
+        if appearance.bevel.is_some() {
+            self.edged_sides(appearance, relief, sides, 0)
+        } else {
+            flat(self)
+        }
+    }
 }
 
 impl<E: Styled + ParentElement + Sized> Edged for E {}
+
+/// A classic 3D appearance for view tests: grey faces, bevels, square
+/// corners, navy selection with white text.
+#[cfg(test)]
+pub fn bevel_test_appearance() -> NativeAppearance {
+    let mut appearance = NativeAppearance::fallback("UI");
+    appearance.bevel = Some(Bevel {
+        highlight: 0xffffff,
+        light: 0xdfdfdf,
+        shadow: 0x808080,
+        dark_shadow: 0x000000,
+    });
+    (appearance.radius, appearance.control_radius) = (0., 0.);
+    (appearance.surface, appearance.raised, appearance.overlay) = (0xc0c0c0, 0xc0c0c0, 0xc0c0c0);
+    (appearance.text, appearance.secondary, appearance.muted) = (0x000000, 0x000000, 0x808080);
+    (appearance.active, appearance.active_text) = (0x000080, 0xffffff);
+    (appearance.menu_hover, appearance.menu_hover_text) = (0x000080, 0xffffff);
+    appearance.field = Some(0xffffff);
+    appearance.shadow = 0x00000000;
+    appearance
+}
 
 #[cfg(test)]
 mod tests {
@@ -203,6 +241,30 @@ mod tests {
         shadow: 0x808080,
         dark_shadow: 0x000000,
     };
+
+    #[test]
+    fn a_bevel_theme_edges_where_a_flat_one_keeps_its_own_style() {
+        use gpui_kit::{div, AbsoluteLength};
+        let width = |element: &mut gpui_kit::Div| {
+            element.style().border_widths.left.map(|width| match width {
+                AbsoluteLength::Pixels(width) => f32::from(width),
+                AbsoluteLength::Rems(_) => f32::NAN,
+            })
+        };
+        let flat = NativeAppearance::fallback("UI");
+        let mut kept = div().edged_or(&flat, Relief::Raised, Sides::LEFT, |element| element);
+        assert_eq!(width(&mut kept), None);
+        let mut lined = div().edged_or(&flat, Relief::Raised, Sides::LEFT, |element| {
+            element.border_l_1()
+        });
+        assert_eq!(width(&mut lined), Some(1.));
+        let mut beveled = flat.clone();
+        beveled.bevel = Some(BEVEL);
+        let mut raised = div().edged_or(&beveled, Relief::Raised, Sides::LEFT, |element| element);
+        assert_eq!(width(&mut raised), Some(2.));
+        let mut thin = div().edged_or(&beveled, Relief::ThinSunken, Sides::ALL, |element| element);
+        assert_eq!(width(&mut thin), Some(1.));
+    }
 
     #[test]
     fn a_raised_edge_is_two_rings_lit_from_the_top_left() {

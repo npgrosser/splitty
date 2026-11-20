@@ -340,11 +340,18 @@ impl Workspace {
                     list = list.child(
                         menu_style::item(colors, index == active, false)
                             .id(("palette-row", index))
-                            .child(menu_style::label(colors, entry.label, None))
+                            .child(menu_style::label(
+                                colors,
+                                entry.label,
+                                None,
+                                index == active,
+                            ))
                             .when_some(entry.shortcut, |row, text| {
-                                row.child(
-                                    menu_style::meta().child(menu_style::shortcut(colors, text)),
-                                )
+                                row.child(menu_style::meta().child(menu_style::shortcut(
+                                    colors,
+                                    text,
+                                    index == active,
+                                )))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.run_palette_row(index, window, cx)
@@ -361,10 +368,9 @@ impl Workspace {
                             .px(chrome_rems(8.))
                             .flex()
                             .items_center()
-                            .border_1()
-                            .border_color(rgb(colors.border))
-                            .rounded(chrome_rems(5.))
-                            .bg(rgb(colors.surface))
+                            .edged(colors, Relief::Sunken)
+                            .rounded(chrome_rems(colors.corner(5.)))
+                            .bg(rgb(colors.field.unwrap_or(colors.surface)))
                             .line_height(relative(1.3))
                             .child(div().flex_1().min_w_0().child(Input::new(input))),
                     )
@@ -388,7 +394,7 @@ impl Workspace {
                             .px(chrome_rems(10.))
                             .py(chrome_rems(4.))
                             .child(label)
-                            .child(menu_style::shortcut(colors, key)),
+                            .child(menu_style::shortcut(colors, key, false)),
                     );
                 }
                 panel

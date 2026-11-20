@@ -609,14 +609,12 @@ impl Workspace {
 
     fn render_host_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
         let owner = self.lifecycle_token();
-        let mut tabs = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .px_4()
-            .py_2()
-            .border_b_1()
-            .border_color(cx.theme().border);
+        let mut tabs = div().flex().items_center().gap_2().px_4().py_2().edged_or(
+            &self.appearance,
+            Relief::Etched,
+            Sides::BOTTOM,
+            |line| line.border_b_1().border_color(cx.theme().border),
+        );
         for (section, label, icon) in [
             (HostSection::Host, "Screens", IconName::PanelsTopLeft),
             (HostSection::Ports, "Ports", IconName::SlidersHorizontal),
@@ -1782,8 +1780,9 @@ impl Workspace {
                     .justify_center()
                     .gap_1()
                     .px_4()
-                    .border_b_1()
-                    .border_color(border)
+                    .edged_or(&self.appearance, Relief::Etched, Sides::BOTTOM, |line| {
+                        line.border_b_1().border_color(border)
+                    })
                     .child(
                         div()
                             .flex()
@@ -2136,8 +2135,9 @@ impl Workspace {
                     .gap_3()
                     .px_3()
                     .pl_3()
-                    .border_b_1()
-                    .border_color(border)
+                    .edged_or(&self.appearance, Relief::Etched, Sides::BOTTOM, |line| {
+                        line.border_b_1().border_color(border)
+                    })
                     .child(
                         Icon::new(IconName::Terminal)
                             .size(chrome_rems(14.))
@@ -2701,8 +2701,9 @@ impl Workspace {
                     .gap_2()
                     .px_4()
                     .py_3()
-                    .border_b_1()
-                    .border_color(border)
+                    .edged_or(&self.appearance, Relief::Etched, Sides::BOTTOM, |line| {
+                        line.border_b_1().border_color(border)
+                    })
                     .child(div().font_weight(FontWeight::BOLD).child("Hosts"))
                     .child(div().flex_1())
                     .child(
@@ -2848,8 +2849,9 @@ impl Workspace {
                             .flex_none()
                             .flex()
                             .flex_col()
-                            .border_r_1()
-                            .border_color(border)
+                            .edged_or(&self.appearance, Relief::Etched, Sides::RIGHT, |line| {
+                                line.border_r_1().border_color(border)
+                            })
                             .when_some(self.hosts.search.as_ref(), |view, input| {
                                 view.child(
                                     div().p_3().child(

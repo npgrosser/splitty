@@ -119,7 +119,7 @@ impl Workspace {
             super::drawer::drawer_control(
                 SharedString::from(format!("drawer-host-close-{source}")),
                 muted,
-                super::drawer::ICON_BUTTON_RADIUS,
+                self.appearance.corner(super::drawer::ICON_BUTTON_RADIUS),
                 &self.appearance,
                 window,
                 cx,
@@ -151,7 +151,7 @@ impl Workspace {
             super::drawer::drawer_control(
                 SharedString::from(format!("drawer-host-{source}")),
                 rgb(self.appearance.secondary).into(),
-                super::drawer::ICON_BUTTON_RADIUS,
+                self.appearance.corner(super::drawer::ICON_BUTTON_RADIUS),
                 &self.appearance,
                 window,
                 cx,
@@ -299,8 +299,12 @@ impl Workspace {
             .mx(chrome_rems(super::drawer::CARD_INSET))
             .mt(chrome_rems(HOST_MARGIN_TOP))
             .pt(chrome_rems(HOST_CAPTION_PADDING_TOP))
-            .border_t_1()
-            .border_color(rgb(self.appearance.subtle_border))
+            .edged_sides(
+                &self.appearance,
+                Relief::Etched,
+                Sides::TOP,
+                self.appearance.subtle_border,
+            )
             .child(
                 div()
                     .id(SharedString::from(format!("drawer-host-caption-{source}")))
