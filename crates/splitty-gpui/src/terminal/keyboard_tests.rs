@@ -82,7 +82,15 @@ fn focused_pty_keeps_tab_bytes_while_find_and_controls_traverse() {
         commands.borrow_mut().clear();
     }
 
+    // Ctrl+F is the program's; Find has a key of its own.
     window.simulate_keystrokes("ctrl-f");
+    assert!(commands.borrow().iter().any(|command| matches!(
+        command,
+        Command::Input { bytes, .. } if bytes.as_slice() == b"\x06"
+    )));
+    commands.borrow_mut().clear();
+    let mac = window.update(|_, cx| cx.platform_info().is_mac());
+    window.simulate_keystrokes(if mac { "cmd-f" } else { "ctrl-shift-f" });
     let search_focus = window.update(|window, cx| {
         let terminal = terminal.read(cx);
         assert!(terminal.search_input_focused(window, cx));

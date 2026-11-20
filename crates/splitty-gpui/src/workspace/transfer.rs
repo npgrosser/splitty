@@ -154,7 +154,8 @@ impl TabContextMenu {
             .is_some_and(|group| self.transfer.as_ref().is_some_and(|t| t.group == group))
     }
 
-    fn keyboard_in_transfer(&self) -> bool {
+    /// Whether the keyboard is in the open Move to Screen submenu.
+    pub(super) fn keyboard_in_transfer(&self) -> bool {
         self.transfer
             .as_ref()
             .is_some_and(|transfer| transfer.focused.is_some())
@@ -589,6 +590,36 @@ impl Workspace {
         }
     }
 
+    /// Opens the tab menu of `pane` at `position` with its Move to Screen
+    /// submenu open and the keyboard focus on its first Screen.
+    pub(super) fn open_tab_transfer_menu(
+        &mut self,
+        source: SourceToken,
+        screen: &ScreenKey,
+        pane: &str,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab_context_menu_captured(source, screen, pane, position, window, cx);
+        let Some(menu) = self.tab_context_menu.as_ref() else {
+            return;
+        };
+        if !self
+            .tab_menu_enabled(menu)
+            .contains(&TabMenuAction::MoveToScreen)
+        {
+            self.dismiss_tab_context_menu(window, cx);
+            self.status = "Move unavailable for this terminal".into();
+            cx.notify();
+            return;
+        }
+        if let Some(menu) = self.tab_context_menu.as_mut() {
+            menu.selected = Some(TabMenuAction::MoveToScreen);
+        }
+        self.enter_transfer_menu(cx);
+    }
+
     /// Opens the selected entry's submenu with the keyboard focus on its
     /// first entry.
     fn enter_transfer_menu(&mut self, cx: &mut Context<Self>) {
@@ -752,14 +783,36 @@ impl Workspace {
         let Some(menu) = self.take_tab_menu(pane, window, cx) else {
             return;
         };
+        self.close_tabs_captured(menu.source, scope, window, cx);
+    }
+
+    /// Closes the other tabs of `source`'s group, as the tab menu's entry
+    /// does.
+    pub(super) fn close_other_tabs_captured(
+        &mut self,
+        source: PaneActionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tabs_captured(source, TabCloseScope::Others, window, cx);
+    }
+
+    fn close_tabs_captured(
+        &mut self,
+        source: PaneActionTarget,
+        scope: TabCloseScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(model) = self.selected_model() else {
             return;
         };
-        if let Err(error) = model.validate_pane_action(&menu.source) {
+        if let Err(error) = model.validate_pane_action(&source) {
             self.status = format!("Tab changed: {error}");
             cx.notify();
             return;
         }
+        let pane = source.pane_id.as_str();
         let group = tab_group(model, pane).unwrap_or_default();
         let Some(index) = group.iter().position(|tab| *tab == pane) else {
             return;
@@ -785,8 +838,8 @@ impl Workspace {
         // Right to left, as the web client closes them.
         let closing: Vec<_> = closing.into_iter().rev().collect();
         self.request_close_tabs_captured(
-            menu.source.source_token(),
-            &menu.source.screen_id,
+            source.source_token(),
+            &source.screen_id,
             closing,
             &titles,
             window,

@@ -198,7 +198,7 @@ rename, assessed close, Hosts and Templates. Its pin command saves pinning throu
 the local settings service; a new window restores that choice, edge-reveal policy
 and saved sidebar width. The unpinned Drawer slides over the workspace on an
 intentional left-edge dwell and retracts without resizing terminals or writing
-settings. Ctrl+B toggles its transient visibility. The redundant workspace
+settings. Its key (Alt+Shift+B, Cmd+Shift+B on macOS) toggles its transient visibility. The redundant workspace
 toolbar has been removed.
 
 Ordinary vertical wheel input anywhere over the Drawer moves through Screens.
@@ -280,7 +280,7 @@ layouts. The framework drops physical key codes; symbols from other layouts pass
 through to the terminal rather than selecting a guessed Screen. Pointer Screen
 selection remains available.
 
-Ctrl+F (Cmd+F on macOS) opens find in the focused terminal. Enter searches toward
+Ctrl+Shift+F (Cmd+F on macOS) opens find in the focused terminal. Enter searches toward
 older matches; Shift+Enter goes toward newer matches; both wrap. Escape closes
 find and returns typing to the terminal. Search is literal and ASCII
 case-insensitive; other characters match exactly. It covers the retained screen

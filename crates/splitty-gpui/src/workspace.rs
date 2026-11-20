@@ -1,6 +1,10 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
 use gpui_kit::base::FocusTrapElement as _;
+mod arrange;
 mod chrome;
+#[cfg(all(test, feature = "ui-test-support"))]
+mod command_tests;
+mod commands;
 mod drawer;
 mod drawer_ports;
 mod empty_page;
@@ -9,6 +13,9 @@ mod floating;
 mod host_drag;
 mod host_update;
 mod hosts;
+#[cfg(all(test, feature = "ui-test-support"))]
+mod key_tests;
+mod keyboard;
 mod menu_style;
 mod palette;
 mod pane_command;
@@ -50,6 +57,7 @@ use splitty_client_core::appearance::{
     AppearanceMemory, AppearanceSnapshot, ColorScheme, DrawerVisibilityOutcome,
     DrawerVisibilityResult, RememberedAppearance,
 };
+use splitty_client_core::keymap::{self, Command as KeyCommand, Direction};
 use splitty_client_core::native_workspace::{
     Command as WorkerCommand, CommandKind as Command, PtySize, Update, WindowPresenceCell, Worker,
 };
@@ -111,34 +119,6 @@ struct PendingFloat {
     source: SourceToken,
     request_id: Uuid,
     restore_focus: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Direction {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shortcut {
-    Templates,
-    CommandPalette,
-    Settings,
-    Hosts,
-    ToggleDrawer,
-    NewTab,
-    NewScreen,
-    ScreenIndex(usize),
-    ToggleMaximize,
-    Scratchpad,
-    SplitRight,
-    SplitDown,
-    ClosePane,
-    Focus(Direction),
-    PreviousTab,
-    NextTab,
 }
 
 /// The resize handle across a 1 px group boundary (the web client's sash).
@@ -240,121 +220,44 @@ fn tab_header_pixels(tab_height: f32, window_scale: f32) -> Pixels {
     px(tab_height * window_scale)
 }
 
-impl Shortcut {
-    /// The shortcuts of the Drawer's bottom navigation. They work from each
-    /// of its destinations, where the Screen's own shortcuts do not.
-    fn changes_destination(self) -> bool {
-        matches!(self, Self::Templates | Self::Settings | Self::Hosts)
-    }
+/// Commands that work off the Screens as well: the Drawer's destinations
+/// and the other view and window commands. The Screen's own commands do not.
+fn works_off_screens(command: KeyCommand) -> bool {
+    matches!(
+        command,
+        KeyCommand::Templates
+            | KeyCommand::Settings
+            | KeyCommand::Hosts
+            | KeyCommand::KeyboardShortcuts
+            | KeyCommand::ConnectHost
+            | KeyCommand::FocusDrawer
+            | KeyCommand::ToggleFullScreen
+            | KeyCommand::Quit
+    )
 }
 
-fn zoom_shortcut(key: &Keystroke, is_mac: bool) -> Option<ZoomAction> {
-    let mods = key.modifiers;
-    if mods.alt
-        || mods.function
-        || if is_mac {
-            !mods.platform || mods.control
-        } else {
-            !mods.control || mods.platform
-        }
-    {
-        return None;
-    }
-    match key.key.as_str() {
-        "+" | "=" => Some(ZoomAction::In),
-        "-" => Some(ZoomAction::Out),
-        "0" => Some(ZoomAction::Reset),
+/// Commands the focused terminal runs from its own key, so that a text
+/// field with focus keeps these keys.
+fn terminal_key_command(command: KeyCommand) -> bool {
+    matches!(
+        command,
+        KeyCommand::Find
+            | KeyCommand::Copy
+            | KeyCommand::Paste
+            | KeyCommand::ScrollPageUp
+            | KeyCommand::ScrollPageDown
+            | KeyCommand::ScrollTop
+            | KeyCommand::ScrollBottom
+    )
+}
+
+fn zoom_action(command: KeyCommand) -> Option<ZoomAction> {
+    match command {
+        KeyCommand::ZoomIn => Some(ZoomAction::In),
+        KeyCommand::ZoomOut => Some(ZoomAction::Out),
+        KeyCommand::ZoomReset => Some(ZoomAction::Reset),
         _ => None,
     }
-}
-
-fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
-    let mods = key.modifiers;
-    if mods.control
-        && !mods.shift
-        && !mods.alt
-        && !mods.platform
-        && !mods.function
-        && key.key.eq_ignore_ascii_case("b")
-    {
-        return Some(Shortcut::ToggleDrawer);
-    }
-    if mods.control
-        && mods.shift
-        && !mods.alt
-        && !mods.platform
-        && !mods.function
-        && key.key == "space"
-    {
-        return Some(Shortcut::NewScreen);
-    }
-    if mods.control
-        && !mods.shift
-        && !mods.alt
-        && !mods.platform
-        && !mods.function
-        && key.key == ","
-    {
-        return Some(Shortcut::Settings);
-    }
-    if mods.control || mods.function || mods.platform != is_mac || mods.alt == is_mac {
-        return None;
-    }
-    match (key.key.to_ascii_lowercase().as_str(), mods.shift) {
-        ("p", false) => Some(Shortcut::Templates),
-        ("p", true) => Some(Shortcut::CommandPalette),
-        // ⌘H hides the application on macOS, so the chord takes Shift there.
-        ("h", shift) if shift == is_mac => Some(Shortcut::Hosts),
-        ("t", false) => Some(Shortcut::NewTab),
-        ("m", false) => Some(Shortcut::ToggleMaximize),
-        ("j", false) => Some(Shortcut::Scratchpad),
-        ("d", false) => Some(Shortcut::SplitRight),
-        ("d", true) => Some(Shortcut::SplitDown),
-        ("w", false) => Some(Shortcut::ClosePane),
-        ("pageup", false) => Some(Shortcut::PreviousTab),
-        ("pagedown", false) => Some(Shortcut::NextTab),
-        ("left", true) => Some(Shortcut::Focus(Direction::Left)),
-        ("right", true) => Some(Shortcut::Focus(Direction::Right)),
-        ("up", true) => Some(Shortcut::Focus(Direction::Up)),
-        ("down", true) => Some(Shortcut::Focus(Direction::Down)),
-        _ => None,
-    }
-}
-
-// GPUI's XKB conversion clears Keystroke.modifiers.shift for punctuation.
-// Window::modifiers retains the physical Shift state. Symbol -> digit is only
-// known for these exact XKB layouts; an unknown layout passes through to PTY.
-fn shifted_screen_index(key: &Keystroke, raw_shift: bool, layout: &str) -> Option<usize> {
-    if !raw_shift {
-        return None;
-    }
-    if let Ok(digit) = key.key.parse::<usize>() {
-        if (1..=9).contains(&digit) {
-            return Some(digit - 1);
-        }
-    }
-    let symbols = match layout {
-        "English (US)" => ["!", "@", "#", "$", "%", "^", "&", "*", "("],
-        "German" => ["!", "\"", "§", "$", "%", "&", "/", "(", ")"],
-        _ => return None,
-    };
-    let printed = key.key_char.as_deref().unwrap_or(&key.key);
-    symbols.iter().position(|symbol| *symbol == printed)
-}
-
-fn shortcut_with_layout(
-    key: &Keystroke,
-    is_mac: bool,
-    raw_shift: bool,
-    layout: &str,
-) -> Option<Shortcut> {
-    let mods = key.modifiers;
-    if !mods.control && !mods.function && mods.platform == is_mac && mods.alt != is_mac {
-        if let Some(index) = shifted_screen_index(key, raw_shift, layout) {
-            return Some(Shortcut::ScreenIndex(index));
-        }
-    }
-    shortcut(key, is_mac)
 }
 
 struct VisibleSlot {
@@ -1299,6 +1202,10 @@ pub struct Workspace {
     /// The file that keeps the applied appearance for the next start; `None`
     /// for a window that remembers nothing.
     appearance_memory: Option<AppearanceMemory>,
+    /// The user's key bindings as this window applied them, and the file
+    /// they are kept in; none in a start that keeps nothing of the app's.
+    key_overrides: keymap::Overrides,
+    keybindings: Option<keymap::KeybindingsFile>,
     appearance_error: Option<String>,
     appearance_generation: u64,
     drawer_visible: bool,
@@ -1306,6 +1213,13 @@ pub struct Workspace {
     drawer_width: i32,
     drawer_edge_reveal: bool,
     drawer_overlay_open: bool,
+    /// The overlay Drawer was opened by a keyboard command and closes when
+    /// the keyboard leaves it.
+    drawer_keyboard_reveal: bool,
+    /// The keyboard focus of the Drawer's Screen list, on the row of
+    /// `drawer_focus_row` or else of the shown Screen.
+    drawer_focus: FocusHandle,
+    drawer_focus_row: Option<ScreenKey>,
     drawer_edge_last: Option<(Point<Pixels>, Instant)>,
     drawer_edge_task: Option<Task<()>>,
     drawer_collapsed: HashSet<ScreenKey>,
@@ -1366,6 +1280,8 @@ pub struct Workspace {
     ui_family: String,
     mono_family: String,
     rename: Option<RenameEditor>,
+    /// Arranging the focused pane by keyboard, while on.
+    arrange: Option<arrange::ArrangeMode>,
     rename_subscription: Option<Subscription>,
     pending_close: Option<PendingClose>,
     /// A close waiting for its service's assessment, before it asks or closes.
@@ -1479,8 +1395,44 @@ impl Workspace {
                 window,
                 cx,
             );
+            workspace.use_keybindings(
+                keymap::KeybindingsFile::open(keymap::KeybindingsFile::default_path()),
+                cx,
+            );
         }
         (workspace, worker)
+    }
+
+    /// Apply the bindings `file` holds and keep later changes in it.
+    pub(crate) fn use_keybindings(
+        &mut self,
+        file: keymap::KeybindingsFile,
+        cx: &mut Context<Self>,
+    ) {
+        self.keybindings = None;
+        // Without a file nothing is written, so this cannot fail.
+        let _ = self.apply_key_overrides(file.overrides().clone(), cx);
+        self.keybindings = Some(file);
+    }
+
+    /// Apply `overrides` as the user's key bindings in every view and save
+    /// them in the keybindings file of a start that keeps one. They apply
+    /// also when the file cannot be written; the error says so.
+    pub(super) fn apply_key_overrides(
+        &mut self,
+        overrides: keymap::Overrides,
+        cx: &mut Context<Self>,
+    ) -> std::io::Result<()> {
+        crate::keys::set_keymap(
+            keymap::Keymap::new(crate::keys::platform(cx), &overrides),
+            cx,
+        );
+        self.key_overrides = overrides.clone();
+        cx.notify();
+        match &mut self.keybindings {
+            Some(file) => file.save(overrides),
+            None => Ok(()),
+        }
     }
 
     /// Keep the applied appearance in `memory` from now on, and show what it
@@ -1662,7 +1614,9 @@ impl Workspace {
             &splitty_client_core::appearance::themes_dir(),
         )));
         let settings_themes = themes.clone();
-        let settings = cx.new(|cx| SettingsView::new(settings_themes, available_fonts, window, cx));
+        let workspace = cx.weak_entity();
+        let settings =
+            cx.new(|cx| SettingsView::new(settings_themes, available_fonts, workspace, window, cx));
         let settings_subscription = cx.subscribe_in(
             &settings,
             window,
@@ -1748,6 +1702,8 @@ impl Workspace {
                 appearance: NativeAppearance::fallback(&ui_family),
                 themes,
                 appearance_memory: None,
+                key_overrides: keymap::Overrides::default(),
+                keybindings: None,
                 tab_prefs: TabPrefs::default(),
                 scroll_to_bottom: true,
                 clipboard_writes: false,
@@ -1759,6 +1715,9 @@ impl Workspace {
                 drawer_width: 200,
                 drawer_edge_reveal: true,
                 drawer_overlay_open: false,
+                drawer_keyboard_reveal: false,
+                drawer_focus: cx.focus_handle(),
+                drawer_focus_row: None,
                 drawer_edge_last: None,
                 drawer_edge_task: None,
                 drawer_collapsed: HashSet::new(),
@@ -1811,6 +1770,7 @@ impl Workspace {
                 ui_family,
                 mono_family,
                 rename: None,
+                arrange: None,
                 rename_subscription: None,
                 pending_close: None,
                 assessing_close: None,
@@ -2243,7 +2203,7 @@ impl Workspace {
                 detail: "Create a Screen to start a terminal.",
                 action_id: "new-screen-empty",
                 action: "New Screen",
-                shortcut: Shortcut::NewScreen,
+                shortcut: KeyCommand::NewScreen,
                 disabled: self
                     .local_model()
                     .is_none_or(SourceWorkspace::has_pending_create),
@@ -2416,6 +2376,7 @@ impl Workspace {
                 }
             }
         }
+        self.end_keyboard_reveal(cx);
         self.focus_current(window, cx);
         cx.notify();
     }
@@ -3938,7 +3899,14 @@ impl Workspace {
             cx,
         );
     }
+    /// The command the key event runs in the keymap in effect.
+    fn key_command(&self, key: &Keystroke, window: &Window, cx: &App) -> Option<KeyCommand> {
+        crate::keys::command(key, window.modifiers().shift, cx.keyboard_layout().id(), cx)
+    }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.record_key(event, window, cx) {
+            return;
+        }
         if self.palette.is_some() {
             self.palette_key(&event.keystroke, window, cx);
             return;
@@ -3960,16 +3928,21 @@ impl Workspace {
             cx.stop_propagation();
             return;
         }
+        if self.arrange.is_some() && self.arrange_key(event, window, cx) {
+            return;
+        }
+        let command = self.key_command(&event.keystroke, window, cx);
         if self.template_dialog.is_some() {
             // The Templates panel is a destination of the Drawer as well:
             // its own key closes it and the others' keys leave it, unless a
             // request of the panel is under way.
-            match shortcut(&event.keystroke, cx.platform_info().is_mac())
-                .filter(|action| action.changes_destination())
-            {
-                Some(action) => {
+            match command.filter(|command| {
+                // The panel keeps the keyboard, so the Drawer cannot take it.
+                works_off_screens(*command) && *command != KeyCommand::FocusDrawer
+            }) {
+                Some(command) => {
                     cx.stop_propagation();
-                    self.run_key_shortcut(action, window, cx);
+                    self.run_key_command(command, window, cx);
                 }
                 None => self.template_key(&event.keystroke, window, cx),
             }
@@ -3982,19 +3955,8 @@ impl Workspace {
         {
             // Placeholder panes have no admitted session routes. Screen
             // navigation remains available; every other key stays local.
-            if let Some(Shortcut::ScreenIndex(index)) = shortcut_with_layout(
-                &event.keystroke,
-                cx.platform_info().is_mac(),
-                window.modifiers().shift,
-                cx.keyboard_layout().id(),
-            ) {
-                if let Some(key) = self
-                    .model
-                    .as_ref()
-                    .and_then(|model| model.opened().get(index).map(|entry| entry.key().clone()))
-                {
-                    self.switch_screen_key(key, window, cx);
-                }
+            if let Some(KeyCommand::SelectScreen(number)) = command {
+                self.select_screen_number(number, window, cx);
             }
             cx.stop_propagation();
             return;
@@ -4003,7 +3965,7 @@ impl Workspace {
             self.tab_context_menu_key(&event.keystroke, window, cx);
             return;
         }
-        if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
+        if let Some(action) = command.and_then(zoom_action) {
             cx.stop_propagation();
             self.submit_zoom(action, window, cx);
             return;
@@ -4057,17 +4019,19 @@ impl Workspace {
         if GlobalState::is_in_deferred_context(cx) {
             return;
         }
-        let action = shortcut(&event.keystroke, cx.platform_info().is_mac());
         if self.destination == Destination::Settings {
             if event.keystroke.key == "escape" {
                 cx.stop_propagation();
                 self.close_settings(window, cx);
-            } else if let Some(action) = action.filter(|action| {
-                action.changes_destination()
-                    || matches!(action, Shortcut::CommandPalette | Shortcut::ToggleDrawer)
+            } else if let Some(command) = command.filter(|command| {
+                works_off_screens(*command)
+                    || matches!(
+                        command,
+                        KeyCommand::CommandPalette | KeyCommand::ToggleDrawer
+                    )
             }) {
                 cx.stop_propagation();
-                self.run_key_shortcut(action, window, cx);
+                self.run_key_command(command, window, cx);
             }
             return;
         }
@@ -4075,9 +4039,9 @@ impl Workspace {
             if self.host_alias_key(&event.keystroke, window, cx) {
                 return;
             }
-            if let Some(action) = action.filter(|action| action.changes_destination()) {
+            if let Some(command) = command.filter(|command| works_off_screens(*command)) {
                 cx.stop_propagation();
-                self.run_key_shortcut(action, window, cx);
+                self.run_key_command(command, window, cx);
                 return;
             }
             if self.host_search_focused(window, cx) && event.keystroke.key != "escape" {
@@ -4091,13 +4055,8 @@ impl Workspace {
                 }
                 return;
             }
-            if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
-                cx.stop_propagation();
-                self.submit_zoom(action, window, cx);
-                return;
-            }
         }
-        if shortcut(&event.keystroke, cx.platform_info().is_mac()) == Some(Shortcut::ToggleDrawer) {
+        if command == Some(KeyCommand::ToggleDrawer) {
             cx.stop_propagation();
             self.toggle_drawer_overlay(cx);
             return;
@@ -4114,80 +4073,139 @@ impl Workspace {
         if self.destination == Destination::Hosts {
             return;
         }
-        let Some(action) = shortcut_with_layout(
-            &event.keystroke,
-            cx.platform_info().is_mac(),
-            window.modifiers().shift,
-            cx.keyboard_layout().id(),
-        ) else {
+        let Some(command) = command else {
             return;
         };
+        if terminal_key_command(command) {
+            // The focused terminal runs it from the same key.
+            return;
+        }
         cx.stop_propagation();
-        self.run_key_shortcut(action, window, cx);
+        self.run_key_command(command, window, cx);
     }
-    /// Carry out a shortcut from its key. The key of a destination that is
+    /// Carry out a command from its key. The key of a destination that is
     /// open leaves it for the Screens, as its Drawer entry does.
-    fn run_key_shortcut(&mut self, action: Shortcut, window: &mut Window, cx: &mut Context<Self>) {
-        match action {
-            Shortcut::Settings if self.destination == Destination::Settings => {
+    fn run_key_command(
+        &mut self,
+        command: KeyCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            KeyCommand::Settings if self.destination == Destination::Settings => {
                 self.close_settings(window, cx)
             }
-            Shortcut::Hosts if self.destination == Destination::Hosts => {
+            KeyCommand::Hosts if self.destination == Destination::Hosts => {
                 self.show_screens(window, cx)
             }
-            _ => self.run_shortcut(action, window, cx),
+            _ => self.run_command(command, window, cx),
+        }
+    }
+    /// Show Screen `number` (1 to 9) of the Drawer's order.
+    fn select_screen_number(&mut self, number: u8, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = usize::from(number).checked_sub(1) else {
+            return;
+        };
+        if let Some(key) = self
+            .model
+            .as_ref()
+            .and_then(|model| model.opened().get(index).map(|entry| entry.key().clone()))
+        {
+            self.switch_screen_key(key, window, cx);
         }
     }
     /// Carry out a command, from its key or from the command palette.
-    fn run_shortcut(&mut self, action: Shortcut, window: &mut Window, cx: &mut Context<Self>) {
-        match action {
-            Shortcut::ToggleDrawer => self.toggle_drawer_overlay(cx),
-            Shortcut::CommandPalette => self.toggle_palette(window, cx),
-            Shortcut::Settings => self.show_settings(window, cx),
-            Shortcut::Hosts => self.show_hosts(window, cx),
-            Shortcut::Templates => {
+    pub(super) fn run_command(
+        &mut self,
+        command: KeyCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            KeyCommand::NewScreen => self.create_screen(window, cx),
+            KeyCommand::NextScreen => self.next_screen(window, cx),
+            KeyCommand::PreviousScreen => self.previous_screen(window, cx),
+            KeyCommand::SelectScreen(number) => self.select_screen_number(number, window, cx),
+            KeyCommand::CloseScreen => self.close_shown_screen(window, cx),
+            KeyCommand::RenameScreen => self.rename_shown_screen(window, cx),
+            KeyCommand::MoveScreenUp => self.move_shown_screen(true, cx),
+            KeyCommand::MoveScreenDown => self.move_shown_screen(false, cx),
+            KeyCommand::NewTab => self.tab(cx),
+            KeyCommand::NewTabWithProfile => self.new_tab_with_profile(window, cx),
+            KeyCommand::CloseTab => self.close_focused_pane(window, cx),
+            KeyCommand::CloseOtherTabs => self.close_other_tabs(window, cx),
+            KeyCommand::NextTab => self.cycle_tab(TabStep::Next, cx),
+            KeyCommand::PreviousTab => self.cycle_tab(TabStep::Previous, cx),
+            KeyCommand::MoveTabRight => self.move_tab(true, cx),
+            KeyCommand::MoveTabLeft => self.move_tab(false, cx),
+            KeyCommand::MoveTabToScreen => self.move_tab_to_screen(window, cx),
+            KeyCommand::SplitRight => self.split(Axis::Horizontal, cx),
+            KeyCommand::SplitDown => self.split(Axis::Vertical, cx),
+            KeyCommand::FocusPane(direction) => self.focus_neighbor(direction, window, cx),
+            KeyCommand::MaximizePane => self.toggle_maximize(window, cx),
+            KeyCommand::FloatPane => self.toggle_float(cx),
+            KeyCommand::ArrangePanes => self.start_arrange(window, cx),
+            KeyCommand::ToggleScratchpad => self.toggle_focused_scratchpad(window, cx),
+            KeyCommand::Find => {
+                self.focused_terminal_action(terminal::LocalAction::Find, window, cx)
+            }
+            KeyCommand::Copy => {
+                self.focused_terminal_action(terminal::LocalAction::Copy, window, cx)
+            }
+            KeyCommand::Paste => {
+                self.focused_terminal_action(terminal::LocalAction::Paste, window, cx)
+            }
+            KeyCommand::ClearBuffer => self.clear_terminal(window, cx),
+            KeyCommand::ScrollPageUp => {
+                self.scroll_terminal(terminal::ScrollStep::PageUp, window, cx)
+            }
+            KeyCommand::ScrollPageDown => {
+                self.scroll_terminal(terminal::ScrollStep::PageDown, window, cx)
+            }
+            KeyCommand::ScrollTop => self.scroll_terminal(terminal::ScrollStep::Top, window, cx),
+            KeyCommand::ScrollBottom => {
+                self.scroll_terminal(terminal::ScrollStep::Bottom, window, cx)
+            }
+            KeyCommand::CopyWorkingDirectory => self.copy_working_directory(cx),
+            KeyCommand::OpenSelectionInViewer => self.open_selection_in_viewer(cx),
+            KeyCommand::ToggleDrawer => self.toggle_drawer_overlay(cx),
+            KeyCommand::FocusDrawer => self.focus_drawer(window, cx),
+            KeyCommand::Hosts => self.show_hosts(window, cx),
+            KeyCommand::Templates => {
                 self.wheel_navigation.reset();
                 self.toggle_templates(window, cx)
             }
-            Shortcut::NewTab => self.tab(cx),
-            Shortcut::NewScreen => self.create_screen(window, cx),
-            Shortcut::ScreenIndex(index) => {
-                if let Some(key) = self
-                    .model
-                    .as_ref()
-                    .and_then(|model| model.opened().get(index).map(|entry| entry.key().clone()))
-                {
-                    self.switch_screen_key(key, window, cx);
-                }
+            KeyCommand::Settings => self.show_settings(window, cx),
+            KeyCommand::CommandPalette => self.toggle_palette(window, cx),
+            KeyCommand::KeyboardShortcuts => self.show_keyboard_page(window, cx),
+            KeyCommand::ConnectHost => self.connect_host(window, cx),
+            KeyCommand::ZoomIn => self.submit_zoom(ZoomAction::In, window, cx),
+            KeyCommand::ZoomOut => self.submit_zoom(ZoomAction::Out, window, cx),
+            KeyCommand::ZoomReset => self.submit_zoom(ZoomAction::Reset, window, cx),
+            KeyCommand::ToggleFullScreen => self.toggle_fullscreen(window),
+            KeyCommand::Quit => self.quit(window, cx),
+        }
+    }
+    /// Close the focused pane of the shown Screen, after its assessment.
+    fn close_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(pane) = self
+            .selected_model()
+            .and_then(SourceWorkspace::focused_pane)
+            .map(str::to_owned)
+        {
+            if let Some(screen) = self
+                .selected_model()
+                .and_then(SourceWorkspace::shown_screen_id)
+            {
+                self.request_close(
+                    CloseTarget::Pane {
+                        screen: screen.to_owned(),
+                        pane,
+                    },
+                    window,
+                    cx,
+                );
             }
-            Shortcut::ToggleMaximize => self.toggle_maximize(window, cx),
-            Shortcut::Scratchpad => self.toggle_focused_scratchpad(window, cx),
-            Shortcut::PreviousTab => self.cycle_tab(TabStep::Previous, cx),
-            Shortcut::NextTab => self.cycle_tab(TabStep::Next, cx),
-            Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
-            Shortcut::SplitDown => self.split(Axis::Vertical, cx),
-            Shortcut::ClosePane => {
-                if let Some(pane) = self
-                    .selected_model()
-                    .and_then(SourceWorkspace::focused_pane)
-                    .map(str::to_owned)
-                {
-                    if let Some(screen) = self
-                        .selected_model()
-                        .and_then(SourceWorkspace::shown_screen_id)
-                    {
-                        self.request_close(
-                            CloseTarget::Pane {
-                                screen: screen.to_owned(),
-                                pane,
-                            },
-                            window,
-                            cx,
-                        );
-                    }
-                }
-            }
-            Shortcut::Focus(direction) => self.focus_neighbor(direction, window, cx),
         }
     }
     fn split(&mut self, axis: Axis, cx: &mut Context<Self>) {
@@ -6285,7 +6303,8 @@ impl Workspace {
                     }
                     _ => {}
                 }
-                slot.into_any_element()
+                slot.children(self.render_arrange_mark(focused && interactive))
+                    .into_any_element()
             }
             LayoutNode::Split {
                 id,
@@ -6690,6 +6709,7 @@ impl Render for Workspace {
         if let Some(error) = &self.notification_settings_error {
             messages.push(format!("Notifications: {error}"));
         }
+        messages.extend(self.arrange_hint());
         let drawer_fraction = transition(
             "drawer-visibility",
             if self.drawer_visible || self.drawer_overlay_open || self.has_drawer_panel() {
@@ -6905,7 +6925,7 @@ impl Render for Workspace {
                             detail: "Start a terminal to use this Screen again.",
                             action_id: "new-terminal-empty",
                             action: "New Terminal",
-                            shortcut: Shortcut::NewTab,
+                            shortcut: KeyCommand::NewTab,
                             disabled: false,
                         },
                         cx,
@@ -7359,16 +7379,14 @@ fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
 mod tests {
     use super::{
         admit_close, dispatch_owned_update, nearest_slot, prune_layout_bounds, refresh_resize_drag,
-        resized_pair, shortcut, shortcut_with_layout, tab_header_pixels, visible_slots,
-        zoom_shortcut, Command, Direction, PendingClose, ResizeDrag, Shortcut, Update, VisibleSlot,
-        WorkerCommand,
+        resized_pair, tab_header_pixels, visible_slots, Command, Direction, PendingClose,
+        ResizeDrag, Update, VisibleSlot, WorkerCommand,
     };
-    use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
+    use gpui_kit::{point, px, size, Bounds, Pixels};
     #[cfg(not(target_os = "windows"))]
     use splitty_client_core::EmbeddedService;
     use splitty_client_core::{
         workspace::{ClosePlan, CloseTarget, LayoutNode, ScreenModel, SourceWorkspace},
-        zoom::ZoomAction,
         ScreenIds,
     };
     use std::{
@@ -7376,71 +7394,6 @@ mod tests {
         collections::{HashMap, VecDeque},
         time::{Duration, Instant},
     };
-
-    fn key(name: &str, modifiers: Modifiers) -> Keystroke {
-        Keystroke {
-            key: name.into(),
-            modifiers,
-            key_char: None,
-        }
-    }
-
-    #[test]
-    fn zoom_shortcuts_use_logical_keys_and_do_not_claim_other_modifiers() {
-        for (mac, base) in [
-            (
-                false,
-                Modifiers {
-                    control: true,
-                    ..Default::default()
-                },
-            ),
-            (
-                true,
-                Modifiers {
-                    platform: true,
-                    ..Default::default()
-                },
-            ),
-        ] {
-            for (name, action) in [
-                ("+", ZoomAction::In),
-                ("=", ZoomAction::In),
-                ("-", ZoomAction::Out),
-                ("0", ZoomAction::Reset),
-            ] {
-                assert_eq!(zoom_shortcut(&key(name, base), mac), Some(action));
-            }
-            assert_eq!(
-                zoom_shortcut(
-                    &key(
-                        "+",
-                        Modifiers {
-                            shift: true,
-                            ..base
-                        }
-                    ),
-                    mac
-                ),
-                Some(ZoomAction::In)
-            );
-            for modifiers in [
-                Modifiers { alt: true, ..base },
-                Modifiers {
-                    function: true,
-                    ..base
-                },
-                Modifiers {
-                    control: true,
-                    platform: true,
-                    ..base
-                },
-            ] {
-                assert_eq!(zoom_shortcut(&key("=", modifiers), mac), None);
-            }
-            assert_eq!(zoom_shortcut(&key("f", base), mac), None);
-        }
-    }
 
     #[test]
     fn scaled_tab_header_and_insertion_marker_match_visible_geometry() {
@@ -7726,219 +7679,6 @@ mod tests {
             receiver.try_recv(),
             Ok(command) if matches!(command.kind(), Command::RequestClose { .. })
         ));
-    }
-
-    #[test]
-    fn shortcut_chords_do_not_claim_terminal_control_or_clipboard_keys() {
-        let alt = Modifiers {
-            alt: true,
-            ..Default::default()
-        };
-        let cmd = Modifiers {
-            platform: true,
-            ..Default::default()
-        };
-        for (is_mac, base) in [(false, alt), (true, cmd)] {
-            assert_eq!(shortcut(&key("t", base), is_mac), Some(Shortcut::NewTab));
-            assert_eq!(
-                shortcut(&key("d", base), is_mac),
-                Some(Shortcut::SplitRight)
-            );
-            assert_eq!(shortcut(&key("w", base), is_mac), Some(Shortcut::ClosePane));
-            assert_eq!(shortcut(&key("p", base), is_mac), Some(Shortcut::Templates));
-            assert_eq!(
-                shortcut(&key("pageup", base), is_mac),
-                Some(Shortcut::PreviousTab)
-            );
-            assert_eq!(
-                shortcut(&key("pagedown", base), is_mac),
-                Some(Shortcut::NextTab)
-            );
-            let shifted = Modifiers {
-                shift: true,
-                ..base
-            };
-            assert_eq!(
-                shortcut(&key("d", shifted), is_mac),
-                Some(Shortcut::SplitDown)
-            );
-            for (name, direction) in [
-                ("left", Direction::Left),
-                ("right", Direction::Right),
-                ("up", Direction::Up),
-                ("down", Direction::Down),
-            ] {
-                assert_eq!(
-                    shortcut(&key(name, shifted), is_mac),
-                    Some(Shortcut::Focus(direction))
-                );
-            }
-            // Hosts: the plain chord, and with Shift where the system owns
-            // the plain one. The other form stays the terminal's.
-            let (hosts, other) = if is_mac {
-                (shifted, base)
-            } else {
-                (base, shifted)
-            };
-            assert_eq!(shortcut(&key("h", hosts), is_mac), Some(Shortcut::Hosts));
-            assert_eq!(shortcut(&key("h", other), is_mac), None);
-            assert_eq!(shortcut(&key("h", base), !is_mac), None);
-            assert_eq!(
-                shortcut(
-                    &key(
-                        "h",
-                        Modifiers {
-                            control: true,
-                            ..hosts
-                        }
-                    ),
-                    is_mac
-                ),
-                None
-            );
-            assert_eq!(shortcut(&key("t", shifted), is_mac), None);
-            assert_eq!(shortcut(&key("pageup", shifted), is_mac), None);
-            assert_eq!(shortcut(&key("pagedown", shifted), is_mac), None);
-            assert_eq!(
-                shortcut(
-                    &key(
-                        "d",
-                        Modifiers {
-                            control: true,
-                            ..base
-                        }
-                    ),
-                    is_mac
-                ),
-                None
-            );
-            assert_eq!(
-                shortcut(
-                    &key(
-                        "d",
-                        Modifiers {
-                            function: true,
-                            ..base
-                        }
-                    ),
-                    is_mac
-                ),
-                None
-            );
-            assert_eq!(shortcut(&key("t", base), !is_mac), None);
-            assert_eq!(shortcut(&key("pageup", base), !is_mac), None);
-        }
-        assert_eq!(
-            shortcut(
-                &key(
-                    "c",
-                    Modifiers {
-                        control: true,
-                        ..Default::default()
-                    }
-                ),
-                false
-            ),
-            None
-        );
-        for name in ["c", "v"] {
-            assert_eq!(
-                shortcut(
-                    &key(
-                        name,
-                        Modifiers {
-                            control: true,
-                            shift: true,
-                            ..Default::default()
-                        }
-                    ),
-                    false
-                ),
-                None
-            );
-        }
-    }
-
-    #[test]
-    fn navigation_chords_require_actual_shift_and_known_symbol_layout() {
-        let alt = Modifiers {
-            alt: true,
-            ..Default::default()
-        };
-        let shifted_alt = Modifiers { shift: true, ..alt };
-        let ctrl_shift = Modifiers {
-            control: true,
-            shift: true,
-            ..Default::default()
-        };
-        assert_eq!(
-            shortcut(&key("m", alt), false),
-            Some(Shortcut::ToggleMaximize)
-        );
-        assert_eq!(
-            shortcut(&key("space", ctrl_shift), false),
-            Some(Shortcut::NewScreen)
-        );
-        assert_eq!(
-            shortcut(
-                &key(
-                    "space",
-                    Modifiers {
-                        alt: true,
-                        ..ctrl_shift
-                    }
-                ),
-                false
-            ),
-            None
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("1", shifted_alt), false, true, "unknown"),
-            Some(Shortcut::ScreenIndex(0))
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("&", alt), false, true, "English (US)"),
-            Some(Shortcut::ScreenIndex(6))
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("&", alt), false, true, "German"),
-            Some(Shortcut::ScreenIndex(5))
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("/", alt), false, true, "German"),
-            Some(Shortcut::ScreenIndex(6))
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("(", alt), false, true, "German"),
-            Some(Shortcut::ScreenIndex(7))
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("(", alt), false, true, "English (US)"),
-            Some(Shortcut::ScreenIndex(8))
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("&", alt), false, false, "German"),
-            None
-        );
-        assert_eq!(
-            shortcut_with_layout(&key("&", alt), false, true, "unknown"),
-            None
-        );
-        assert_eq!(
-            shortcut_with_layout(
-                &key(
-                    "&",
-                    Modifiers {
-                        control: true,
-                        ..alt
-                    }
-                ),
-                false,
-                true,
-                "German"
-            ),
-            None
-        );
     }
 
     fn rectangle(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {

@@ -107,10 +107,10 @@ const NAV_ICON_OPACITY: f32 = 0.8;
 /// `.drawer-nav-shortcut`: 10px in the system face.
 const NAV_SHORTCUT_TEXT: f32 = 10.;
 
-/// The key of a destination as its Drawer entry shows it, from the one
-/// table the command palette and the shortcut list read.
-pub(super) fn nav_shortcut(shortcut: Shortcut, cx: &App) -> SharedString {
-    super::palette::shortcut_label(shortcut, cx.platform_info().is_mac()).into()
+/// The key of a destination as its Drawer entry shows it, from the keymap
+/// the command palette and the shortcut list read; none when it is unbound.
+pub(super) fn nav_shortcut(command: KeyCommand, cx: &App) -> Option<SharedString> {
+    crate::keys::label(command, cx)
 }
 
 /// One destination of the Drawer's bottom navigation.
@@ -2471,7 +2471,11 @@ pub(super) fn split_title_icon(title: &str) -> (Option<char>, &str) {
 }
 
 impl Workspace {
-    fn screen_menu_before(&self, screen: &ScreenKey, down: bool) -> Option<Option<ScreenKey>> {
+    pub(super) fn screen_menu_before(
+        &self,
+        screen: &ScreenKey,
+        down: bool,
+    ) -> Option<Option<ScreenKey>> {
         let opened: Vec<_> = self
             .model
             .as_ref()?
@@ -2629,6 +2633,7 @@ impl Workspace {
             return;
         }
         self.drawer_overlay_open = open;
+        self.drawer_keyboard_reveal = false;
         self.wheel_navigation.reset();
         cx.notify();
     }
@@ -3145,8 +3150,15 @@ impl Workspace {
                     let rename_on_click = key.clone();
                     let rename_on_key = key.clone();
                     let key_weak = cx.entity().downgrade();
+                    let keyboard_row = match &self.drawer_focus_row {
+                        Some(row) => *row == key,
+                        None => active,
+                    };
                     let select_button =
                         Button::new(SharedString::from(format!("drawer-select-{key}")))
+                            .when(keyboard_row, |button| {
+                                button.track_focus(&self.drawer_focus)
+                            })
                             .accessibility_label(match &unread_summary {
                                 Some(summary) => format!("Select {label}, {summary}"),
                                 None => format!("Select {label}"),
@@ -3194,9 +3206,26 @@ impl Workspace {
                                     .child(label.clone()),
                             )
                             .on_key_down(move |event, window, cx| {
-                                if event.keystroke.key == "f2"
-                                    && event.keystroke.modifiers == Modifiers::default()
+                                let plain = event.keystroke.modifiers == Modifiers::default();
+                                if plain
+                                    && matches!(
+                                        event.keystroke.key.as_str(),
+                                        "up" | "down" | "escape"
+                                    )
                                 {
+                                    let key = event.keystroke.key.clone();
+                                    let handled = key_weak
+                                        .update(cx, |this, cx| {
+                                            this.drawer_row_key(&rename_on_key, &key, window, cx)
+                                        })
+                                        .unwrap_or(false);
+                                    if handled {
+                                        cx.stop_propagation();
+                                        window.prevent_default();
+                                    }
+                                    return;
+                                }
+                                if event.keystroke.key == "f2" && plain {
                                     cx.stop_propagation();
                                     window.prevent_default();
                                     if let (Some(owner), Some(source)) = (owner, rename_source) {
@@ -3232,7 +3261,7 @@ impl Workspace {
                                             }
                                         } else if event.standard_click() {
                                             this.switch_screen_key(select.clone(), window, cx);
-                                            this.focus_current(window, cx);
+                                            this.leave_drawer_focus(window, cx);
                                         }
                                     }
                                 });
@@ -3953,7 +3982,7 @@ impl Workspace {
                 NavItem {
                     icon: IconName::LayoutGrid,
                     label: "Templates",
-                    shortcut: Some(nav_shortcut(Shortcut::Templates, cx)),
+                    shortcut: nav_shortcut(KeyCommand::Templates, cx),
                     active: templates_active,
                 },
                 window,
@@ -4103,7 +4132,7 @@ impl Workspace {
                             NavItem {
                                 icon: IconName::SlidersHorizontal,
                                 label: "Settings",
-                                shortcut: Some(nav_shortcut(Shortcut::Settings, cx)),
+                                shortcut: nav_shortcut(KeyCommand::Settings, cx),
                                 active: self.destination == Destination::Settings,
                             },
                             window,

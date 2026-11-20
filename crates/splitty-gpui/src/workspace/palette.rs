@@ -1,142 +1,39 @@
-//! The command palette and the list of keyboard shortcuts: one centered panel
-//! over the window, opened by a shortcut. The palette filters the window's
-//! commands as the web client's does; choosing one runs it as its own control
-//! or shortcut would.
+//! The command palette: one centered panel over the window, opened by a
+//! shortcut. It filters the window's commands; choosing one runs it as its
+//! own control or shortcut would. Every command's keys are listed and
+//! changed on the Keyboard page of the settings.
 use super::*;
 
 /// What a palette row does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum PaletteCommand {
-    Run(Shortcut),
-    ConnectHost,
-    Shortcuts,
-    Zoom(ZoomAction),
+    Run(KeyCommand),
 }
 
 pub(super) struct PaletteEntry {
-    pub(super) label: &'static str,
+    pub(super) label: String,
     pub(super) shortcut: Option<String>,
     pub(super) command: PaletteCommand,
 }
 
-/// The modifiers as the platform writes them, as in the web client.
-struct KeyNames {
-    primary: &'static str,
-    shift: &'static str,
-    control: &'static str,
+/// Whether the palette lists `command`: every command but its own, so one
+/// without a key can still be run.
+fn listed(command: KeyCommand) -> bool {
+    command != KeyCommand::CommandPalette
 }
 
-fn key_names(is_mac: bool) -> KeyNames {
-    if is_mac {
-        KeyNames {
-            primary: "⌘",
-            shift: "⇧",
-            control: "⌃",
-        }
-    } else {
-        KeyNames {
-            primary: "Alt+",
-            shift: "Shift+",
-            control: "Ctrl+",
-        }
-    }
-}
-
-/// The key combination of a shortcut, as shown beside its command.
-pub(super) fn shortcut_label(shortcut: Shortcut, is_mac: bool) -> String {
-    let KeyNames {
-        primary,
-        shift,
-        control,
-    } = key_names(is_mac);
-    match shortcut {
-        Shortcut::ToggleDrawer => format!("{control}B"),
-        Shortcut::NewScreen => format!("{control}{shift}Space"),
-        Shortcut::Settings => format!("{control},"),
-        Shortcut::Hosts if is_mac => format!("{primary}{shift}H"),
-        Shortcut::Hosts => format!("{primary}H"),
-        Shortcut::Templates => format!("{primary}P"),
-        Shortcut::CommandPalette => format!("{primary}{shift}P"),
-        Shortcut::NewTab => format!("{primary}T"),
-        Shortcut::ToggleMaximize => format!("{primary}M"),
-        Shortcut::Scratchpad => format!("{primary}J"),
-        Shortcut::SplitRight => format!("{primary}D"),
-        Shortcut::SplitDown => format!("{primary}{shift}D"),
-        Shortcut::ClosePane => format!("{primary}W"),
-        Shortcut::PreviousTab => format!("{primary}PageUp"),
-        Shortcut::NextTab => format!("{primary}PageDown"),
-        Shortcut::Focus(direction) => format!(
-            "{primary}{shift}{}",
-            match direction {
-                Direction::Left => "←",
-                Direction::Right => "→",
-                Direction::Up => "↑",
-                Direction::Down => "↓",
-            }
-        ),
-        Shortcut::ScreenIndex(index) => format!("{primary}{shift}{}", index + 1),
-    }
-}
-
-/// Every command of the window, in the order the palette lists them.
-pub(super) fn palette_entries(is_mac: bool) -> Vec<PaletteEntry> {
-    let run = |label, shortcut: Shortcut| PaletteEntry {
-        label,
-        shortcut: Some(shortcut_label(shortcut, is_mac)),
-        command: PaletteCommand::Run(shortcut),
-    };
-    let plain = |label, command| PaletteEntry {
-        label,
-        shortcut: None,
-        command,
-    };
-    let control = key_names(is_mac).control;
-    let zoom = |label, key: &str, action| PaletteEntry {
-        label,
-        shortcut: Some(format!("{}{key}", if is_mac { "⌘" } else { control })),
-        command: PaletteCommand::Zoom(action),
-    };
-    vec![
-        run("New Screen", Shortcut::NewScreen),
-        plain("Connect to Host…", PaletteCommand::ConnectHost),
-        run("New Tab", Shortcut::NewTab),
-        run("Split Right", Shortcut::SplitRight),
-        run("Split Down", Shortcut::SplitDown),
-        run("Close Tab", Shortcut::ClosePane),
-        run("Maximize Pane", Shortcut::ToggleMaximize),
-        run("Toggle Scratchpad", Shortcut::Scratchpad),
-        run("Templates…", Shortcut::Templates),
-        run("Toggle Drawer", Shortcut::ToggleDrawer),
-        run("Settings", Shortcut::Settings),
-        run("Hosts and Ports", Shortcut::Hosts),
-        zoom("Zoom In", "+", ZoomAction::In),
-        zoom("Zoom Out", "-", ZoomAction::Out),
-        zoom("Reset Zoom", "0", ZoomAction::Reset),
-        plain("Keyboard Shortcuts", PaletteCommand::Shortcuts),
-    ]
-}
-
-/// The rows of the shortcut list: every command with a key, then navigation.
-fn shortcut_rows(is_mac: bool) -> Vec<(&'static str, String)> {
-    let mut rows: Vec<_> = palette_entries(is_mac)
+/// Every command of the window in the registry's order, with its key in
+/// `keymap`.
+pub(super) fn palette_entries(keymap: &keymap::Keymap) -> Vec<PaletteEntry> {
+    KeyCommand::all()
         .into_iter()
-        .filter_map(|entry| Some((entry.label, entry.shortcut?)))
-        .collect();
-    let KeyNames { primary, shift, .. } = key_names(is_mac);
-    rows.extend([
-        (
-            "Command Palette",
-            shortcut_label(Shortcut::CommandPalette, is_mac),
-        ),
-        (
-            "Previous Tab",
-            shortcut_label(Shortcut::PreviousTab, is_mac),
-        ),
-        ("Next Tab", shortcut_label(Shortcut::NextTab, is_mac)),
-        ("Focus Neighbor", format!("{primary}{shift}Arrow")),
-        ("Switch Screen", format!("{primary}{shift}1–9")),
-    ]);
-    rows
+        .filter(|command| listed(*command))
+        .map(|command| PaletteEntry {
+            label: command.title(),
+            shortcut: keymap.label(command),
+            command: PaletteCommand::Run(command),
+        })
+        .collect()
 }
 
 /// The entries whose label contains every word of the query.
@@ -159,13 +56,11 @@ pub(super) enum Palette {
         scroll: ScrollHandle,
         _changes: Subscription,
     },
-    Shortcuts,
 }
 
 const PANEL_WIDTH: f32 = 440.;
-const PANEL_TOP: f32 = 0.16;
+pub(super) const PANEL_TOP: f32 = 0.16;
 const LIST_HEIGHT: f32 = 320.;
-const SHORTCUTS_HEIGHT: f32 = 460.;
 
 impl Workspace {
     fn palette_admitted(&self, cx: &App) -> bool {
@@ -206,15 +101,6 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn show_shortcuts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.palette_admitted(cx) {
-            return;
-        }
-        self.palette = Some(Palette::Shortcuts);
-        self.focus.focus(window, cx);
-        cx.notify();
-    }
-
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.take().is_some() {
             self.focus_current(window, cx);
@@ -222,12 +108,12 @@ impl Workspace {
         }
     }
 
-    fn palette_matches(&self, cx: &App) -> Vec<PaletteEntry> {
+    pub(super) fn palette_matches(&self, cx: &App) -> Vec<PaletteEntry> {
         let Some(Palette::Commands { input, .. }) = &self.palette else {
             return Vec::new();
         };
         filter_entries(
-            palette_entries(cx.platform_info().is_mac()),
+            palette_entries(&crate::keys::keymap(cx)),
             input.read(cx).value().as_ref(),
         )
     }
@@ -250,8 +136,6 @@ impl Workspace {
             selected, scroll, ..
         }) = &mut self.palette
         else {
-            // The shortcut list takes no other key.
-            cx.stop_propagation();
             return;
         };
         match name.as_str() {
@@ -283,30 +167,13 @@ impl Workspace {
         };
         let command = entry.command;
         self.close_palette(window, cx);
-        match command {
-            PaletteCommand::Run(shortcut) => self.run_shortcut(shortcut, window, cx),
-            PaletteCommand::ConnectHost => {
-                let viewport = window.viewport_size();
-                self.open_drawer_popover(
-                    popover::PopoverKind::Connect,
-                    popover::PopoverAnchor::Pointer(point(
-                        viewport.width / 2. - px(120.),
-                        viewport.height * PANEL_TOP,
-                    )),
-                    None,
-                    window,
-                    cx,
-                );
-            }
-            PaletteCommand::Shortcuts => self.show_shortcuts(window, cx),
-            PaletteCommand::Zoom(action) => self.submit_zoom(action, window, cx),
-        }
+        let PaletteCommand::Run(command) = command;
+        self.run_command(command, window, cx);
     }
 
     pub(super) fn render_palette(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let palette = self.palette.as_ref()?;
         let colors = &self.appearance;
-        let is_mac = cx.platform_info().is_mac();
         let panel = menu_style::panel(colors)
             .id("palette-panel")
             .when(cfg!(all(test, feature = "ui-test-support")), |panel| {
@@ -376,31 +243,6 @@ impl Workspace {
                     )
                     .child(list)
             }
-            Palette::Shortcuts => {
-                let mut list = div()
-                    .id("shortcut-list")
-                    .flex()
-                    .flex_col()
-                    .max_h(chrome_rems(SHORTCUTS_HEIGHT))
-                    .overflow_y_scroll();
-                for (label, key) in shortcut_rows(is_mac) {
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .justify_between()
-                            .gap(chrome_rems(20.))
-                            .px(chrome_rems(10.))
-                            .py(chrome_rems(4.))
-                            .child(label)
-                            .child(menu_style::shortcut(colors, key, false)),
-                    );
-                }
-                panel
-                    .child(menu_style::caption(colors, "Keyboard Shortcuts"))
-                    .child(list)
-            }
         };
         Some(
             div()
@@ -427,39 +269,39 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{filter_entries, palette_entries, shortcut_label, shortcut_rows, Shortcut};
+    use super::{filter_entries, palette_entries, KeyCommand, PaletteCommand};
+    use splitty_client_core::keymap::{Keymap, Overrides, Platform};
 
     #[test]
     fn palette_filters_by_every_word_and_names_platform_keys() {
-        let all = palette_entries(false);
+        let linux = Keymap::defaults(Platform::Linux);
+        let all = palette_entries(&linux);
         assert!(all.len() > 10);
-        let split: Vec<_> = filter_entries(palette_entries(false), "spl do")
+        let split: Vec<_> = filter_entries(palette_entries(&linux), "spl do")
             .into_iter()
             .map(|entry| (entry.label, entry.shortcut))
             .collect();
-        assert_eq!(split, [("Split Down", Some("Alt+Shift+D".into()))]);
-        assert!(filter_entries(palette_entries(false), "nothing here").is_empty());
-        assert_eq!(shortcut_label(Shortcut::SplitDown, true), "⌘⇧D");
-        assert_eq!(shortcut_label(Shortcut::Settings, false), "Ctrl+,");
-        assert_eq!(shortcut_label(Shortcut::Templates, true), "⌘P");
-        assert_eq!(shortcut_label(Shortcut::Hosts, false), "Alt+H");
-        assert_eq!(shortcut_label(Shortcut::Hosts, true), "⌘⇧H");
-        // The Hosts manager is listed with its key, in the palette and so in
-        // the shortcut list.
-        for is_mac in [false, true] {
-            let hosts = shortcut_label(Shortcut::Hosts, is_mac);
-            assert!(palette_entries(is_mac).iter().any(|entry| {
+        assert_eq!(split, [("Split Down".into(), Some("Alt+Shift+D".into()))]);
+        assert!(filter_entries(palette_entries(&linux), "nothing here").is_empty());
+        // The Hosts manager is listed with its key.
+        for platform in [Platform::Linux, Platform::Mac] {
+            let keymap = Keymap::defaults(platform);
+            let hosts = keymap.label(KeyCommand::Hosts).unwrap();
+            assert!(palette_entries(&keymap).iter().any(|entry| {
                 entry.label == "Hosts and Ports" && entry.shortcut.as_ref() == Some(&hosts)
             }));
-            assert!(shortcut_rows(is_mac)
-                .iter()
-                .any(|(label, key)| *label == "Hosts and Ports" && *key == hosts));
         }
-        // Every key the list shows belongs to one row only.
-        let rows = shortcut_rows(false);
-        let mut keys: Vec<_> = rows.iter().map(|(_, key)| key.clone()).collect();
-        keys.sort();
-        keys.dedup();
-        assert_eq!(keys.len(), rows.len());
+        // A command without a key is listed without one.
+        let connect = all
+            .iter()
+            .find(|entry| entry.command == PaletteCommand::Run(KeyCommand::ConnectHost))
+            .unwrap();
+        assert_eq!(connect.shortcut, None);
+        let mut overrides = Overrides::default();
+        overrides.set(KeyCommand::SplitDown, Vec::new()).unwrap();
+        let unbound = Keymap::new(Platform::Linux, &overrides);
+        assert!(palette_entries(&unbound)
+            .iter()
+            .any(|entry| entry.label == "Split Down" && entry.shortcut.is_none()));
     }
 }

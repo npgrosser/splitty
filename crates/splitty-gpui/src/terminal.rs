@@ -106,6 +106,31 @@ pub(crate) enum LocalAction {
     Paste,
     Find,
     ClearBuffer,
+    Scroll(ScrollStep),
+}
+
+/// A move of the viewport through the scrollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScrollStep {
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
+}
+
+/// The terminal's own action of a keyboard command, which the terminal runs
+/// from its key while it has focus.
+fn key_action(command: KeyCommand) -> Option<LocalAction> {
+    Some(match command {
+        KeyCommand::Find => LocalAction::Find,
+        KeyCommand::Copy => LocalAction::Copy,
+        KeyCommand::Paste => LocalAction::Paste,
+        KeyCommand::ScrollPageUp => LocalAction::Scroll(ScrollStep::PageUp),
+        KeyCommand::ScrollPageDown => LocalAction::Scroll(ScrollStep::PageDown),
+        KeyCommand::ScrollTop => LocalAction::Scroll(ScrollStep::Top),
+        KeyCommand::ScrollBottom => LocalAction::Scroll(ScrollStep::Bottom),
+        _ => return None,
+    })
 }
 
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
@@ -116,6 +141,7 @@ use crate::terminal_engine::{
 };
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
+use splitty_client_core::keymap::Command as KeyCommand;
 use std::{
     collections::HashMap,
     ops::Range,
@@ -1145,6 +1171,11 @@ impl Terminal {
     }
 
     #[cfg(all(test, feature = "ui-test-support"))]
+    pub(crate) fn ui_test_scrollback(&self) -> Option<crate::terminal_engine::Scrollback> {
+        self.scrollback()
+    }
+
+    #[cfg(all(test, feature = "ui-test-support"))]
     pub(crate) fn pty_size(&self) -> Option<PtyGrid> {
         self.pty
     }
@@ -1587,21 +1618,37 @@ impl Terminal {
             LocalAction::ClearBuffer => {
                 self.feed(b"\x1b[2J\x1b[3J\x1b[H", true, cx);
             }
+            LocalAction::Scroll(step) => {
+                let page = i32::from(self.size.rows.saturating_sub(1).max(1));
+                let result = self.engine.as_mut().map(|engine| match step {
+                    ScrollStep::PageUp => engine.scroll(page),
+                    ScrollStep::PageDown => engine.scroll(-page),
+                    ScrollStep::Top => engine.scroll_to_row(0),
+                    ScrollStep::Bottom => engine.scroll_bottom(),
+                });
+                self.operation(result);
+                self.links.cancel();
+                self.search_wake(cx);
+                self.reveal_scrollbar(cx);
+                cx.notify();
+            }
         }
+    }
+
+    /// Whether the program shows the alternate screen, which has no
+    /// scrollback of its own: there, scroll keys are the program's.
+    fn alternate_screen(&self) -> bool {
+        self.engine
+            .as_ref()
+            .is_some_and(|engine| engine.is_alternate_screen().unwrap_or(false))
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
-        let find_modifier = if cx.platform_info().is_mac() {
-            key.modifiers.platform && !key.modifiers.control
-        } else {
-            key.modifiers.control && !key.modifiers.platform
-        };
-        if find_modifier
-            && !key.modifiers.shift
-            && !key.modifiers.alt
-            && key.key.eq_ignore_ascii_case("f")
-        {
+        let action =
+            crate::keys::command(key, window.modifiers().shift, cx.keyboard_layout().id(), cx)
+                .and_then(key_action);
+        if let Some(LocalAction::Find) = action {
             self.local_action(LocalAction::Find, window, cx);
             cx.stop_propagation();
             return;
@@ -1613,20 +1660,14 @@ impl Terminal {
             }
             return;
         }
-        if (key.modifiers.control && key.modifiers.shift) || key.modifiers.platform {
-            match key.key.as_str() {
-                "c" => {
-                    self.local_action(LocalAction::Copy, window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                "v" => {
-                    self.local_action(LocalAction::Paste, window, cx);
-                    cx.stop_propagation();
-                    return;
-                }
-                _ => {}
+        match action {
+            Some(LocalAction::Scroll(_)) if self.alternate_screen() => {}
+            Some(action) => {
+                self.local_action(action, window, cx);
+                cx.stop_propagation();
+                return;
             }
+            None => {}
         }
         // A program's own Ctrl+V reads the clipboard of the machine it runs
         // on. An image or file on this one goes to the pane's server instead;

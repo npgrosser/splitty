@@ -26,7 +26,8 @@ pub(super) struct EmptyPage {
     /// The action's element ID, and its selector in view tests.
     pub(super) action_id: &'static str,
     pub(super) action: &'static str,
-    pub(super) shortcut: Shortcut,
+    /// The command of the action, whose key the page shows beside it.
+    pub(super) shortcut: KeyCommand,
     /// The action cannot run now, for example while it is already under way.
     pub(super) disabled: bool,
 }
@@ -90,7 +91,7 @@ impl Workspace {
         run: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> Div {
         let action_id = page.action_id;
-        let shortcut = palette::shortcut_label(page.shortcut, cx.platform_info().is_mac());
+        let shortcut = crate::keys::label(page.shortcut, cx);
         let (frame, column) = self.render_page_column(PageColumn {
             page_id: page.id,
             icon: Icon::new(page.icon)
@@ -123,7 +124,9 @@ impl Workspace {
                                 run(this, window, cx);
                             })),
                     )
-                    .child(menu_style::shortcut(appearance, shortcut, false)),
+                    .when_some(shortcut, |row, shortcut| {
+                        row.child(menu_style::shortcut(appearance, shortcut, false))
+                    }),
             ),
         )
     }

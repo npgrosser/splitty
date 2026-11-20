@@ -53,7 +53,7 @@ pub(super) struct TerminalMenuRow {
     pub(super) action: TerminalMenuAction,
     pub(super) label: &'static str,
     pub(super) detail: Option<SharedString>,
-    pub(super) shortcut: Option<&'static str>,
+    pub(super) shortcut: Option<SharedString>,
     pub(super) enabled: bool,
     pub(super) danger: bool,
     pub(super) separator_before: bool,
@@ -246,8 +246,8 @@ impl Workspace {
             self.focus.focus(window, cx);
         }
 
-        let is_mac = cx.platform_info().is_mac();
-        let rows = self.build_terminal_menu_rows(&target, is_mac);
+        let keymap = crate::keys::keymap(cx);
+        let rows = self.build_terminal_menu_rows(&target, &keymap);
         let transfer_choices = self.build_terminal_transfer_choices(&target);
         let editor_choices = self.build_terminal_editor_choices(&target);
         let owner = cx.entity().downgrade();
@@ -283,8 +283,9 @@ impl Workspace {
     fn build_terminal_menu_rows(
         &self,
         target: &TerminalMenuTarget,
-        is_mac: bool,
+        keymap: &keymap::Keymap,
     ) -> Vec<TerminalMenuRow> {
+        let key = |command| keymap.label(command).map(SharedString::from);
         let live = target.authority.is_some();
         let can_split = live && target.group.is_some();
         let pane_id = target.route.pane_id();
@@ -315,7 +316,7 @@ impl Workspace {
             action: TerminalMenuAction::Copy,
             label: "Copy",
             detail: None,
-            shortcut: None,
+            shortcut: key(KeyCommand::Copy),
             enabled: target.has_selection,
             danger: false,
             separator_before: false,
@@ -332,7 +333,7 @@ impl Workspace {
                 action: TerminalMenuAction::OpenSelection,
                 label: "Open Selection in Viewer",
                 detail: None,
-                shortcut: None,
+                shortcut: key(KeyCommand::OpenSelectionInViewer),
                 enabled: true,
                 danger: false,
                 separator_before: false,
@@ -344,7 +345,7 @@ impl Workspace {
                 action: TerminalMenuAction::Paste,
                 label: "Paste",
                 detail: None,
-                shortcut: None,
+                shortcut: key(KeyCommand::Paste),
                 enabled: live,
                 danger: false,
                 separator_before: false,
@@ -354,7 +355,7 @@ impl Workspace {
                 action: TerminalMenuAction::Find,
                 label: "Find",
                 detail: None,
-                shortcut: None,
+                shortcut: key(KeyCommand::Find),
                 enabled: target.can_find,
                 danger: false,
                 separator_before: false,
@@ -364,7 +365,7 @@ impl Workspace {
                 action: TerminalMenuAction::ClearBuffer,
                 label: "Clear Buffer",
                 detail: None,
-                shortcut: None,
+                shortcut: key(KeyCommand::ClearBuffer),
                 enabled: live,
                 danger: false,
                 separator_before: true,
@@ -374,7 +375,7 @@ impl Workspace {
                 action: TerminalMenuAction::SplitRight,
                 label: "Split Right",
                 detail: None,
-                shortcut: Some(if is_mac { "⌘D" } else { "Alt+D" }),
+                shortcut: key(KeyCommand::SplitRight),
                 enabled: can_split,
                 danger: false,
                 separator_before: true,
@@ -384,7 +385,7 @@ impl Workspace {
                 action: TerminalMenuAction::SplitDown,
                 label: "Split Down",
                 detail: None,
-                shortcut: Some(if is_mac { "⌘⇧D" } else { "Alt+Shift+D" }),
+                shortcut: key(KeyCommand::SplitDown),
                 enabled: can_split,
                 danger: false,
                 separator_before: false,
@@ -398,7 +399,7 @@ impl Workspace {
                     "Show Scratchpad"
                 },
                 detail: None,
-                shortcut: Some(if is_mac { "⌘J" } else { "Alt+J" }),
+                shortcut: key(KeyCommand::ToggleScratchpad),
                 enabled: live && scratchpad_open.is_some(),
                 danger: false,
                 separator_before: false,
@@ -411,7 +412,7 @@ impl Workspace {
                 action: TerminalMenuAction::CopyDirectory,
                 label: "Copy Working Directory",
                 detail: None,
-                shortcut: None,
+                shortcut: key(KeyCommand::CopyWorkingDirectory),
                 enabled: live,
                 danger: false,
                 separator_before: true,
@@ -459,7 +460,7 @@ impl Workspace {
                 action: TerminalMenuAction::ShowDrawer,
                 label: "Show Drawer",
                 detail: None,
-                shortcut: Some(if is_mac { "⌃B" } else { "Ctrl+B" }),
+                shortcut: key(KeyCommand::ToggleDrawer),
                 enabled: live,
                 danger: false,
                 separator_before: true,
@@ -471,7 +472,7 @@ impl Workspace {
             action: TerminalMenuAction::ClosePane,
             label: "Close Pane",
             detail: None,
-            shortcut: Some(if is_mac { "⌘W" } else { "Alt+W" }),
+            shortcut: key(KeyCommand::CloseTab),
             enabled: live,
             danger: true,
             separator_before: true,
@@ -741,6 +742,57 @@ impl Workspace {
         }
     }
 
+    /// Open the terminal's selection in a text viewer of `source`; nothing
+    /// without a selection.
+    pub(super) fn open_terminal_selection(
+        &mut self,
+        source: SourceToken,
+        screen: &ScreenKey,
+        pane: &str,
+        terminal: &Entity<Terminal>,
+        cx: &mut Context<Self>,
+    ) {
+        let selected = terminal.update(cx, |terminal, _| terminal.selection());
+        // Trailing blanks of a line are the terminal's, not the text's.
+        let text = selected
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text.trim_end_matches('\n').to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if text.len() > 262_144 {
+            self.status = "The selection is too large for a viewer".into();
+            cx.notify();
+            return;
+        }
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        let title = model
+            .snapshot()
+            .and_then(|screen| {
+                screen
+                    .panes
+                    .values()
+                    .find(|entry| entry.id.as_str() == pane)
+            })
+            .and_then(|entry| entry.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Selection".to_owned());
+        let command = Command::OpenTextViewer {
+            screen: screen.screen_id().to_owned(),
+            cwd: transfer::pane_cwd(model, pane),
+            pane: pane.to_owned(),
+            title,
+            text,
+        };
+        self.send_captured(source, command, cx);
+    }
+
     pub(super) fn choose_terminal_menu_action(
         &mut self,
         action: TerminalMenuAction,
@@ -797,48 +849,13 @@ impl Workspace {
                 let Some(source) = target.authority else {
                     return;
                 };
-                let selected = target
-                    .terminal
-                    .update(cx, |terminal, _| terminal.selection());
-                // Trailing blanks of a line are the terminal's, not the text's.
-                let text = selected
-                    .unwrap_or_default()
-                    .lines()
-                    .map(str::trim_end)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let text = text.trim_end_matches('\n').to_owned();
-                if text.is_empty() {
-                    return;
-                }
-                if text.len() > 262_144 {
-                    self.status = "The selection is too large for a viewer".into();
-                    cx.notify();
-                    return;
-                }
-                let pane = target.route.pane_id().to_owned();
-                let Some(model) = self.selected_model() else {
-                    return;
-                };
-                let title = model
-                    .snapshot()
-                    .and_then(|screen| {
-                        screen
-                            .panes
-                            .values()
-                            .find(|entry| entry.id.as_str() == pane)
-                    })
-                    .and_then(|entry| entry.title.clone())
-                    .filter(|title| !title.is_empty())
-                    .unwrap_or_else(|| "Selection".to_owned());
-                let command = Command::OpenTextViewer {
-                    screen: target.screen.screen_id().to_owned(),
-                    cwd: transfer::pane_cwd(model, &pane),
-                    pane,
-                    title,
-                    text,
-                };
-                self.send_captured(source, command, cx);
+                self.open_terminal_selection(
+                    source,
+                    &target.screen,
+                    target.route.pane_id(),
+                    &target.terminal,
+                    cx,
+                );
             }
             TerminalMenuAction::Paste => {
                 if target.authority.is_none() {
@@ -1069,7 +1086,7 @@ impl Workspace {
             let label = menu_style::label(colors, entry.label, entry.detail.clone(), selected);
             let meta = (entry.shortcut.is_some() || entry.has_submenu).then(|| {
                 let mut meta = menu_style::meta();
-                if let Some(shortcut) = entry.shortcut {
+                if let Some(shortcut) = entry.shortcut.clone() {
                     meta = meta.child(menu_style::shortcut(colors, shortcut, selected));
                 }
                 if entry.has_submenu {

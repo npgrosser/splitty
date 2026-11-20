@@ -249,14 +249,12 @@ impl Workspace {
             editor.screen_id = screen_id.to_owned();
             return editor.input.clone();
         }
-        let shortcut = if cx.platform_info().is_mac() {
-            "⌘J"
-        } else {
-            "Alt+J"
+        let placeholder = match crate::keys::label(KeyCommand::ToggleScratchpad, cx) {
+            Some(shortcut) => format!(
+                "Scratchpad for this session: notes and prompts for later. Esc returns to the terminal, {shortcut} closes."
+            ),
+            None => "Scratchpad for this session: notes and prompts for later. Esc returns to the terminal.".to_owned(),
         };
-        let placeholder = format!(
-            "Scratchpad for this session: notes and prompts for later. Esc returns to the terminal, {shortcut} closes."
-        );
         let clamped = within_limit(initial_text).to_owned();
         let full = clamped.len() >= SCRATCHPAD_LIMIT;
         // The shown text is the snapshot's, and so is its version.

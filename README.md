@@ -124,8 +124,8 @@ Local and remote terminals have the
    beside it. Use the pin button to hide the drawer when not in use; your
    choice is remembered.
 2. Split with **Cmd/Alt+D** and **Cmd/Alt+Shift+D**, open a tab with
-   **Cmd/Alt+T** and a screen with **Ctrl+Shift+Space**. **Ctrl+B** opens the
-   drawer when it is unpinned.
+   **Cmd/Alt+T** and a screen with **Ctrl+Shift+Space**. **Cmd/Alt+Shift+B**
+   opens the drawer when it is unpinned.
 3. For a remote screen, open **Hosts** at the bottom of the drawer (or
    **Connect to Host…** in the command palette), pick a host and choose
    **New Screen**. Connect to a new host once with plain `ssh` first to
@@ -199,24 +199,27 @@ More in [`docs/architecture.md`](docs/architecture.md).
 
 ## Keyboard shortcuts
 
-| Action | macOS | Linux, Windows |
-|---|---|---|
-| Split right / down | Cmd+D / Cmd+Shift+D | Alt+D / Alt+Shift+D |
-| New tab | Cmd+T | Alt+T |
-| Close tab | Cmd+W | Alt+W |
-| New screen | Ctrl+Shift+Space | Ctrl+Shift+Space |
-| Switch to screen 1–9 | Cmd+Shift+1–9 | Alt+Shift+1–9 |
-| Next / previous pane | Cmd+Shift+→ / ← | Alt+Shift+→ / ← |
-| Focus up / down | Cmd+Shift+↑ / ↓ | Alt+Shift+↑ / ↓ |
-| Resize pane | Ctrl+Shift+Arrow | Ctrl+Shift+Arrow |
-| Maximize pane | Cmd+M | Alt+M |
-| Scratchpad | Cmd+J | Alt+J |
-| Open URL or port in the browser | Cmd+O | Alt+O |
-| Templates | Cmd+P | Alt+P |
-| Command palette | Cmd+Shift+P | Alt+Shift+P |
-| Drawer | Ctrl+B | Ctrl+B |
-| Settings | Ctrl+, | Ctrl+, |
-| Zoom in / out / reset | Cmd+= / Cmd+- / Cmd+0 | Ctrl+= / Ctrl+- / Ctrl+0 |
+The most used keys; `Mod` is Cmd on macOS and Alt on Linux and Windows.
+
+| Action | Key |
+|---|---|
+| New tab / close tab | Mod+T / Mod+W |
+| Split right / down | Mod+D / Mod+Shift+D |
+| Focus the pane in a direction | Mod+Shift+Arrow |
+| Next / previous tab | Mod+PageDown / Mod+PageUp |
+| New screen | Ctrl+Shift+Space |
+| Next / previous screen | Ctrl+Tab / Ctrl+Shift+Tab |
+| Screen 1 to 9 | Mod+1 to Mod+9 |
+| Maximize pane | Mod+M |
+| Arrange panes (resize and move with the arrow keys) | Mod+R |
+| Scratchpad | Mod+J |
+| Command palette | Mod+Shift+P |
+| Drawer | Mod+Shift+B |
+| Settings | Ctrl+, (macOS: Cmd+,) |
+
+Every command, its default key on each platform and how to change keys (in
+Settings, Keyboard, or in `keybindings.json`) are in
+[`docs/keyboard.md`](docs/keyboard.md).
 
 ## Configuration
 
