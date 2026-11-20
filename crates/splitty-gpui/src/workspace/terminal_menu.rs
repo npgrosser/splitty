@@ -1066,11 +1066,11 @@ impl Workspace {
                     || submenu_open;
             let selector = format!("terminal-context-{}", action.key());
             let id = SharedString::from(selector.clone());
-            let label = menu_style::label(colors, entry.label, entry.detail.clone());
+            let label = menu_style::label(colors, entry.label, entry.detail.clone(), selected);
             let meta = (entry.shortcut.is_some() || entry.has_submenu).then(|| {
                 let mut meta = menu_style::meta();
                 if let Some(shortcut) = entry.shortcut {
-                    meta = meta.child(menu_style::shortcut(colors, shortcut));
+                    meta = meta.child(menu_style::shortcut(colors, shortcut, selected));
                 }
                 if entry.has_submenu {
                     meta = meta.child(menu_style::chevron());
@@ -1183,7 +1183,7 @@ impl Workspace {
                         .when(cfg!(all(test, feature = "ui-test-support")), |row| {
                             row.debug_selector(move || selector.clone())
                         })
-                        .child(menu_style::label(colors, label.clone(), None))
+                        .child(menu_style::label(colors, label.clone(), None, selected))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             this.choose_terminal_transfer(picked.clone(), window, cx);
@@ -1229,7 +1229,7 @@ impl Workspace {
                         .when(cfg!(all(test, feature = "ui-test-support")), |row| {
                             row.debug_selector(move || selector.clone())
                         })
-                        .child(menu_style::label(colors, choice.label(), None))
+                        .child(menu_style::label(colors, choice.label(), None, selected))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             this.choose_terminal_editor(picked, window, cx);
@@ -1241,7 +1241,7 @@ impl Workspace {
                         .when(cfg!(all(test, feature = "ui-test-support")), |row| {
                             row.debug_selector(move || selector.clone())
                         })
-                        .child(menu_style::label(colors, choice.label(), None))
+                        .child(menu_style::label(colors, choice.label(), None, false))
                         .into_any_element()
                 };
                 sub = sub.child(element);

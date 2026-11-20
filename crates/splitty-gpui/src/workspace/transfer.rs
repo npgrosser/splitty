@@ -1013,11 +1013,16 @@ impl Workspace {
             let action = row.action;
             let id = SharedString::from(format!("tab-context-{}-{pane}", action.key()));
             let selector = format!("tab-context-{}", action.key());
-            let label = menu_style::label(colors, row.label, row.detail);
+            let expanded = menu.transfer_open_for(action);
+            let focused =
+                menu.focus_visible && !keyboard_in_transfer && menu.selected == Some(action);
+            let label = menu_style::label(
+                colors,
+                row.label,
+                row.detail,
+                row.enabled && (focused || expanded),
+            );
             let element = if row.enabled {
-                let expanded = menu.transfer_open_for(action);
-                let focused =
-                    menu.focus_visible && !keyboard_in_transfer && menu.selected == Some(action);
                 menu_style::item(colors, focused || expanded, action == TabMenuAction::Close)
                     .id(id)
                     .debug_selector(move || selector)
@@ -1093,7 +1098,7 @@ impl Workspace {
                     menu_style::item(colors, focused, false)
                         .id(SharedString::from(id))
                         .debug_selector(move || selector)
-                        .child(menu_style::label(colors, label, None))
+                        .child(menu_style::label(colors, label, None, focused))
                         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
                             this.choose_transfer(&pane, existing.as_deref(), window, cx);

@@ -55,17 +55,22 @@ pub(super) fn panel(appearance: &NativeAppearance) -> Div {
         .font_weight(FontWeight::MEDIUM)
 }
 
+/// The group every row forms, so its secondary text follows the pointer's
+/// highlight of the row.
+const ROW_GROUP: &str = "menu-row";
+
 /// A row. `highlighted` marks the keyboard focus or the row whose submenu is
-/// open, with the plain hover background even on a danger row; only pointer
-/// hover turns a danger row red.
+/// open, with the plain highlight even on a danger row; only pointer hover
+/// turns a danger row red.
 pub(super) fn item(appearance: &NativeAppearance, highlighted: bool, danger: bool) -> Div {
     let (background, text) = if danger {
         (appearance.danger_hover, appearance.danger)
     } else {
-        (appearance.hover, appearance.text)
+        (appearance.menu_hover, appearance.menu_hover_text)
     };
-    let focus = appearance.hover;
+    let (focus, focus_text) = (appearance.menu_hover, appearance.menu_hover_text);
     div()
+        .group(ROW_GROUP)
         .flex()
         .flex_none()
         .items_center()
@@ -75,8 +80,62 @@ pub(super) fn item(appearance: &NativeAppearance, highlighted: bool, danger: boo
         .py(chrome_rems(ITEM_PADDING_Y))
         .rounded(chrome_rems(appearance.corner(ITEM_RADIUS)))
         .cursor_pointer()
-        .when(highlighted, |row| row.bg(rgb(focus)))
+        .when(highlighted, |row| {
+            row.bg(rgb(focus)).text_color(rgb(focus_text))
+        })
         .hover(move |row| row.bg(rgb(background)).text_color(rgb(text)))
+}
+
+/// `color` as it reads on a highlighted row: itself where it stands out on
+/// `menu_hover`, else moved toward the row's text.
+pub(super) fn on_highlight(appearance: &NativeAppearance, color: u32) -> u32 {
+    if contrast(color, appearance.menu_hover) >= 3. {
+        color
+    } else {
+        mix(color, appearance.menu_hover_text, 0.65)
+    }
+}
+
+/// Secondary text or icons of a row in `color`, kept readable while the
+/// keyboard (`highlighted`) or the pointer highlights the row.
+pub(super) fn secondary<E: InteractiveElement + Styled>(
+    element: E,
+    appearance: &NativeAppearance,
+    color: u32,
+    highlighted: bool,
+) -> E {
+    let lit = on_highlight(appearance, color);
+    element
+        .text_color(rgb(if highlighted { lit } else { color }))
+        .group_hover(ROW_GROUP, move |style| style.text_color(rgb(lit)))
+}
+
+/// The WCAG contrast ratio of two `0xRRGGBB` colors.
+fn contrast(a: u32, b: u32) -> f32 {
+    fn luminance(color: u32) -> f32 {
+        let channel = |shift: u32| {
+            let value = ((color >> shift) & 0xff) as f32 / 255.;
+            if value <= 0.03928 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+    }
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// `from` moved by `amount` (0 to 1) toward `to`, per channel.
+fn mix(from: u32, to: u32, amount: f32) -> u32 {
+    [16, 8, 0].into_iter().fold(0, |result, shift| {
+        let (from, to) = (
+            ((from >> shift) & 0xff) as f32,
+            ((to >> shift) & 0xff) as f32,
+        );
+        result | (((from + (to - from) * amount).round() as u32) << shift)
+    })
 }
 
 /// A row that cannot be chosen.
@@ -103,13 +162,17 @@ pub(super) fn separator(appearance: &NativeAppearance) -> Div {
         .bg(rgb(appearance.subtle_border))
 }
 
-/// Muted secondary text under or beside a label.
-pub(super) fn detail(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    div()
+/// Muted secondary text under or beside a label, of a row the keyboard
+/// highlights when `highlighted`.
+pub(super) fn detail(
+    appearance: &NativeAppearance,
+    text: impl Into<SharedString>,
+    highlighted: bool,
+) -> Div {
+    secondary(div(), appearance, appearance.muted, highlighted)
         .max_w(chrome_rems(DETAIL_MAX_WIDTH))
         .text_size(chrome_rems(DETAIL_TEXT))
         .font_weight(FontWeight::NORMAL)
-        .text_color(rgb(appearance.muted))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
@@ -121,6 +184,7 @@ pub(super) fn label(
     appearance: &NativeAppearance,
     text: impl Into<SharedString>,
     detail_text: Option<SharedString>,
+    highlighted: bool,
 ) -> Div {
     div()
         .flex()
@@ -129,7 +193,7 @@ pub(super) fn label(
         .gap(chrome_rems(DETAIL_GAP))
         .child(text.into())
         .when_some(detail_text, |label, text| {
-            label.child(detail(appearance, text))
+            label.child(detail(appearance, text, highlighted))
         })
 }
 
@@ -143,12 +207,15 @@ pub(super) fn meta() -> Div {
 }
 
 /// A shortcut hint in a row's trailing metadata area (`10px`, muted).
-pub(super) fn shortcut(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    div()
+pub(super) fn shortcut(
+    appearance: &NativeAppearance,
+    text: impl Into<SharedString>,
+    highlighted: bool,
+) -> Div {
+    secondary(div(), appearance, appearance.muted, highlighted)
         .flex_none()
         .text_size(chrome_rems(DETAIL_TEXT))
         .font_weight(FontWeight::NORMAL)
-        .text_color(rgb(appearance.muted))
         .whitespace_nowrap()
         .child(text.into())
 }
@@ -168,15 +235,19 @@ pub(super) fn submenu_panel(appearance: &NativeAppearance) -> Div {
 
 /// A caption above a group of rows.
 pub(super) fn caption(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    detail(appearance, text)
+    detail(appearance, text, false)
         .px(chrome_rems(ITEM_PADDING_X))
         .pt(chrome_rems(SEPARATOR_BELOW))
         .pb(chrome_rems(SEPARATOR_ABOVE))
 }
 
 /// A small outlined label such as "Default".
-pub(super) fn badge(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    div()
+pub(super) fn badge(
+    appearance: &NativeAppearance,
+    text: impl Into<SharedString>,
+    highlighted: bool,
+) -> Div {
+    secondary(div(), appearance, appearance.muted, highlighted)
         .flex_none()
         .px(chrome_rems(4.))
         .py(px(1.))
@@ -184,7 +255,6 @@ pub(super) fn badge(appearance: &NativeAppearance, text: impl Into<SharedString>
         .border_color(rgb(appearance.border))
         .rounded(chrome_rems(appearance.corner(BADGE_RADIUS)))
         .text_size(chrome_rems(BADGE_TEXT))
-        .text_color(rgb(appearance.muted))
         .child(text.into())
 }
 
@@ -368,8 +438,22 @@ impl Element for Placed {
 
 #[cfg(test)]
 mod tests {
-    use super::{beside_origin, shift_into};
+    use super::{beside_origin, contrast, mix, on_highlight, shift_into};
+    use crate::appearance::NativeAppearance;
     use gpui_kit::{point, px, size, Bounds};
+
+    #[test]
+    fn secondary_text_keeps_its_color_where_it_reads_on_the_highlight() {
+        assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 0.01);
+        assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
+        let mut appearance = NativeAppearance::fallback("UI");
+        let muted = appearance.muted;
+        assert_eq!(on_highlight(&appearance, muted), muted);
+        (appearance.menu_hover, appearance.menu_hover_text) = (0x000080, 0xffffff);
+        let lit = on_highlight(&appearance, 0x000000);
+        assert_eq!(lit, mix(0x000000, 0xffffff, 0.65));
+        assert!(contrast(lit, appearance.menu_hover) >= 3.);
+    }
 
     fn area() -> Bounds<gpui_kit::Pixels> {
         Bounds::from_corners(point(px(8.), px(8.)), point(px(792.), px(592.)))

@@ -1622,6 +1622,7 @@ impl Workspace {
                 ),
                 Lead::Dot(indicator) => Some(self.host_dot(indicator).into_any_element()),
             };
+            let highlighted = entry.enabled && selected == Some(index);
             let label = div()
                 .flex()
                 .flex_1()
@@ -1629,18 +1630,18 @@ impl Workspace {
                 .items_center()
                 .gap(chrome_rems(8.))
                 .when_some(lead, |row, lead| {
+                    let slot = div()
+                        .w(chrome_rems(LEAD_SLOT))
+                        .flex_none()
+                        .flex()
+                        .justify_center();
                     row.child(
-                        div()
-                            .w(chrome_rems(LEAD_SLOT))
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .text_color(if entry.danger {
-                                rgb(colors.danger).into()
-                            } else {
-                                muted
-                            })
-                            .child(lead),
+                        if entry.danger {
+                            slot.text_color(rgb(colors.danger))
+                        } else {
+                            menu_style::secondary(slot, colors, colors.muted, highlighted)
+                        }
+                        .child(lead),
                     )
                 })
                 .child(
@@ -1659,7 +1660,7 @@ impl Workspace {
                         .when_some(entry.detail.clone(), |label, detail| {
                             let selector = format!("popover-{}-detail-{detail}", entry.key);
                             label.child(
-                                menu_style::detail(colors, detail)
+                                menu_style::detail(colors, detail, highlighted)
                                     .when(cfg!(all(test, feature = "ui-test-support")), |detail| {
                                         detail.debug_selector(move || selector.clone())
                                     }),
@@ -1670,15 +1671,15 @@ impl Workspace {
             let selector = format!("popover-{key}");
             let mut meta = menu_style::meta().items_center();
             if let Some(text) = entry.meta.clone() {
-                meta = meta.child(menu_style::shortcut(colors, text));
+                meta = meta.child(menu_style::shortcut(colors, text, highlighted));
             }
             for (action_index, action) in entry.actions.iter().enumerate() {
                 let action_key = key.clone();
                 let tooltip = action.label.clone();
                 let hover: Hsla = rgba(colors.hover_overlay).into();
-                let text: Hsla = rgb(colors.text).into();
+                let text: Hsla = rgb(colors.menu_hover_text).into();
                 meta = meta.child(
-                    div()
+                    menu_style::secondary(div(), colors, colors.muted, highlighted)
                         .id(SharedString::from(format!(
                             "popover-action-{key}-{action_index}"
                         )))
@@ -1692,7 +1693,6 @@ impl Workspace {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(muted)
                         .hover(move |button| button.bg(hover).text_color(text))
                         .child(Icon::new(action.icon).size(chrome_rems(ROW_ACTION_ICON)))
                         .tooltip(move |window, cx| {

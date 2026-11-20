@@ -1242,6 +1242,9 @@ impl Workspace {
                             .flex_none()
                             .px_2()
                             .py_1()
+                            .when(selected == Some(id.as_str()), |tab| {
+                                tab.text_color(rgb(self.appearance.active_text))
+                            })
                             .bg(rgb(if selected == Some(id.as_str()) {
                                 self.appearance.active
                             } else {
@@ -1430,7 +1433,15 @@ fn row_style<E: Styled + StatefulInteractiveElement>(
     colors: &NativeAppearance,
     chosen: bool,
 ) -> E {
-    let hover: Hsla = rgb(colors.hover).into();
+    let text = if chosen {
+        colors.active_text
+    } else {
+        colors.secondary
+    };
+    let (hover, hover_text): (Hsla, Hsla) = (
+        rgb(colors.menu_hover).into(),
+        rgb(super::menu_style::on_highlight(colors, text)).into(),
+    );
     row.px(chrome_rems(10.))
         .py(chrome_rems(7.))
         .rounded(chrome_rems(colors.corner(4.)))
@@ -1440,12 +1451,8 @@ fn row_style<E: Styled + StatefulInteractiveElement>(
         } else {
             gpui::transparent_black()
         })
-        .text_color(rgb(if chosen {
-            colors.text
-        } else {
-            colors.secondary
-        }))
-        .hover(move |row| row.bg(hover))
+        .text_color(rgb(text))
+        .hover(move |row| row.bg(hover).text_color(hover_text))
 }
 
 /// A quiet action beside a row.

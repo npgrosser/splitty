@@ -135,12 +135,26 @@ pub(super) fn drawer_control(
     window: &Window,
     cx: &App,
 ) -> Button {
+    drawer_control_on(id, rest, appearance.text, radius, appearance, window, cx)
+}
+
+/// A `drawer_control` whose hover text is `hover_text`: `active_text` on a
+/// selected entry.
+pub(super) fn drawer_control_on(
+    id: impl Into<ElementId>,
+    rest: Hsla,
+    hover_text: u32,
+    radius: f32,
+    appearance: &NativeAppearance,
+    window: &Window,
+    cx: &App,
+) -> Button {
     let hover: Hsla = rgba(appearance.hover_overlay).into();
     Button::new(id)
         .focus_ring(focus_visible(cx))
         .custom(
             ButtonCustomVariant::new(cx)
-                .foreground(rgb(appearance.text).into())
+                .foreground(rgb(hover_text).into())
                 .hover(hover)
                 .active(hover),
         )
@@ -2620,14 +2634,19 @@ impl Workspace {
         window: &Window,
         cx: &App,
     ) -> Button {
-        drawer_control(
+        drawer_control_on(
             id,
             rgb(if active {
-                self.appearance.text
+                self.appearance.active_text
             } else {
                 self.appearance.secondary
             })
             .into(),
+            if active {
+                self.appearance.active_text
+            } else {
+                self.appearance.text
+            },
             self.appearance.corner(NAV_ITEM_RADIUS),
             &self.appearance,
             window,
@@ -2664,7 +2683,11 @@ impl Workspace {
                             .flex_none()
                             .font(font(self.ui_family.clone()))
                             .text_size(chrome_rems(NAV_SHORTCUT_TEXT))
-                            .text_color(rgb(self.appearance.muted))
+                            .text_color(rgb(if active {
+                                self.appearance.on_active(self.appearance.muted)
+                            } else {
+                                self.appearance.muted
+                            }))
                             .child(shortcut),
                     )
                 }),
@@ -2818,6 +2841,20 @@ impl Workspace {
                     }
                 }
                 let active = shown.as_ref() == Some(&key);
+                // The selected card's text and icons read on `active`.
+                let on_card = |color: u32| {
+                    if active {
+                        self.appearance.on_active(color)
+                    } else {
+                        color
+                    }
+                };
+                let card_text = if active {
+                    self.appearance.active_text
+                } else {
+                    self.appearance.text
+                };
+                let card_muted: Hsla = rgb(on_card(self.appearance.muted)).into();
                 let unreachable = remote
                     && super::drawer_ports::host_indicator(window_model.host(key.source_id()))
                         .unreachable();
@@ -2965,9 +3002,9 @@ impl Workspace {
                             .font(font(mono.clone()))
                             .text_align(TextAlign::Right)
                             .text_color(if active {
-                                rgb(self.appearance.accent)
+                                rgb(on_card(self.appearance.accent))
                             } else {
-                                muted.into()
+                                card_muted.into()
                             })
                             .child(format!("{}", index + 1)),
                     );
@@ -3045,9 +3082,9 @@ impl Workspace {
                                     .text_color(transition::<Hsla>(
                                         format!("drawer-screen-text-{key}"),
                                         rgb(if active || actions_visible {
-                                            self.appearance.text
+                                            card_text
                                         } else {
-                                            self.appearance.secondary
+                                            on_card(self.appearance.secondary)
                                         })
                                         .into(),
                                         hover_transition.clone(),
@@ -3145,7 +3182,7 @@ impl Workspace {
                             .flex_none()
                             .text_size(chrome_rems(NOTE_TEXT))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(muted)
+                            .text_color(card_muted)
                             .child(state),
                     );
                 }
@@ -3154,9 +3191,10 @@ impl Workspace {
                     let collapse_key = key.clone();
                     let weak = cx.entity().downgrade();
                     row_actions = row_actions.child(
-                        drawer_control(
+                        drawer_control_on(
                             SharedString::from(format!("drawer-collapse-{key}")),
-                            muted,
+                            card_muted,
+                            card_text,
                             self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
@@ -3207,9 +3245,10 @@ impl Workspace {
                     let menu_key = key.clone();
                     let menu_open = self.drawer_popover_screen() == Some(&key);
                     row_actions = row_actions.child(
-                        drawer_control(
+                        drawer_control_on(
                             SharedString::from(format!("drawer-more-{key}")),
-                            muted,
+                            card_muted,
+                            card_text,
                             self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
@@ -3246,9 +3285,10 @@ impl Workspace {
                         "Close screen"
                     };
                     row_actions = row_actions.child(
-                        drawer_control(
+                        drawer_control_on(
                             SharedString::from(format!("drawer-close-{key}")),
-                            muted,
+                            card_muted,
+                            card_text,
                             self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
@@ -3555,7 +3595,7 @@ impl Workspace {
                                     } else {
                                         PANE_ICON_TEXT
                                     }))
-                                    .when(busy, |icon| icon.text_color(rgb(self.appearance.text)))
+                                    .when(busy, |icon| icon.text_color(rgb(card_text)))
                                     .child(program_status::title_mark_glyph(mark, cx))
                                     .into_any_element()
                             } else {
@@ -3563,9 +3603,9 @@ impl Workspace {
                                     .size(chrome_rems(PANE_DOT))
                                     .rounded_full()
                                     .bg(if busy {
-                                        rgb(self.appearance.text).into()
+                                        rgb(card_text).into()
                                     } else {
-                                        muted
+                                        card_muted
                                     })
                                     .into_any_element()
                             };
@@ -3633,13 +3673,13 @@ impl Workspace {
                                             // hover, as the web rule order
                                             // has it.
                                             rgb(if is_viewer {
-                                                self.appearance.secondary
+                                                on_card(self.appearance.secondary)
                                             } else if pane_hovered {
-                                                self.appearance.text
+                                                card_text
                                             } else if busy {
-                                                self.appearance.secondary
+                                                on_card(self.appearance.secondary)
                                             } else {
-                                                self.appearance.muted
+                                                on_card(self.appearance.muted)
                                             })
                                             .into(),
                                             hover_transition.clone(),
@@ -3668,7 +3708,7 @@ impl Workspace {
                                                             .size(chrome_rems(PANE_GLOW_CORE))
                                                             .rounded_full()
                                                             .shadow(vec![BoxShadow {
-                                                                color: Hsla::from(rgb(self.appearance.text))
+                                                                color: Hsla::from(rgb(card_text))
                                                                     .opacity(PANE_GLOW_OPACITY),
                                                                 offset: point(px(0.), px(0.)),
                                                                 blur_radius: chrome_px(PANE_GLOW_BLUR, self.appearance.zoom.window_scale()),

@@ -340,11 +340,18 @@ impl Workspace {
                     list = list.child(
                         menu_style::item(colors, index == active, false)
                             .id(("palette-row", index))
-                            .child(menu_style::label(colors, entry.label, None))
+                            .child(menu_style::label(
+                                colors,
+                                entry.label,
+                                None,
+                                index == active,
+                            ))
                             .when_some(entry.shortcut, |row, text| {
-                                row.child(
-                                    menu_style::meta().child(menu_style::shortcut(colors, text)),
-                                )
+                                row.child(menu_style::meta().child(menu_style::shortcut(
+                                    colors,
+                                    text,
+                                    index == active,
+                                )))
                             })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.run_palette_row(index, window, cx)
@@ -388,7 +395,7 @@ impl Workspace {
                             .px(chrome_rems(10.))
                             .py(chrome_rems(4.))
                             .child(label)
-                            .child(menu_style::shortcut(colors, key)),
+                            .child(menu_style::shortcut(colors, key, false)),
                     );
                 }
                 panel
