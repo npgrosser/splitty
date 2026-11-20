@@ -8,6 +8,15 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`terminal-font` TF-1 to TF-7** (2026-11-21, provisional, tbd; recorded in the change's proposal):
+  - **TF-1:** `terminal.fontFamily` and `terminal.fontSize` are settings of the server (the local service), not of one computer's app. Alternative: keep them in the app beside `last-appearance.json`.
+  - **TF-2:** `terminal.fontSize` stores the size itself, default 14, within 8 to 32 listed as values, without a `0` for "default". Alternative: the form of `appearance.fontSize` with `0`, or its range 8 to 24.
+  - **TF-3:** the editor offers every installed family, not only monospace ones; the platform's listing gives names only, and telling fixed-pitch families apart would load every face. Alternative: measure the families once in the background and list only fixed-pitch ones.
+  - **TF-4:** a set family the computer does not have shows the bundled font with a notice; it does not fall through to the theme's `terminal-font-family`. Alternative: fall through to the theme's proposal first.
+  - **TF-5:** a glyph the chosen face lacks is drawn with the bundled font: each cell's character is checked against the chosen face, because only the Linux text system takes an in-memory font as a fallback family. Alternative: rely on the platform's system fallback (empty boxes for Nerd Font symbols on Windows and macOS).
+  - **TF-6:** chrome that shows text in the terminal face (viewer source, notes, drawer details, program status marks) keeps the bundled font. Alternative: let it follow the terminal font.
+  - **TF-7:** in `terminal-font-family`, `monospace` and `ui-monospace` name the bundled terminal font. Alternative: treat them as unknown names.
+
 - **`remove-web-only-surface` RWS-1 to RWS-7** (2026-11-15, provisional, tbd; recorded in the change's design):
   - **RWS-1:** browser windows of older releases, served by the gateway of an older hub (0.5.0 and earlier `splitty serve`), are not supported clients of hosts of this version: their `create`, `close` and `reorder_screens` are refused, and a refused `create` ends that relayed stream. Alternative: keep the host-side handling of these messages until the releases with the gateway are out of support.
   - **RWS-2:** `shellProfiles.update` is removed although a future desktop shell profile editor might use it; shell profiles are edited in `config.toml`. Alternative: keep the operation for that editor.

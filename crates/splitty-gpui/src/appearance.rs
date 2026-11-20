@@ -3,8 +3,9 @@
 //! A UI theme is a theme of the component toolkit, applied to its components
 //! as it is. The workspace chrome takes its own colors and sizes from the
 //! theme's optional `splitty` block and derives the rest from the toolkit
-//! colors. The terminal takes its colors from a palette in Ghostty's format.
-//! This module never writes settings or changes terminal font metrics.
+//! colors. The terminal takes its colors from a palette in Ghostty's format
+//! and its face from the terminal font setting, else the theme's proposal,
+//! else the bundled font. This module never writes settings.
 use crate::terminal::TerminalColors;
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::theme::{Theme, ThemeColor, ThemeConfig, ThemeMode};
@@ -13,6 +14,7 @@ use gpui_kit::{
 };
 use splitty_client_core::appearance::{
     terminal_palette_name, AppearanceSnapshot, ColorScheme, RememberedAppearance,
+    DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY,
 };
 use splitty_client_core::settings::SettingsField;
 use splitty_client_core::zoom::{Zoom, ZoomSteps};
@@ -161,6 +163,11 @@ pub struct NativeAppearance {
     pub terminal: TerminalColors,
     pub selection_foreground: u32,
     pub selection_background: u32,
+    /// The installed family terminals draw text in, chosen by the setting,
+    /// else the theme's proposal; `None` for the bundled terminal font.
+    pub terminal_font: Option<String>,
+    /// The terminal text size in pixels before zoom.
+    pub terminal_font_size: f32,
     pub zoom: Zoom,
     /// The levels zoom steps through, the local service's.
     pub zoom_steps: ZoomSteps,
@@ -187,9 +194,17 @@ pub struct ThemeSelection<'a> {
     pub font_size: i32,
     /// Empty for the theme's family.
     pub font_family: &'a str,
+    /// Empty for the theme's proposal, else the bundled terminal font.
+    pub terminal_font_family: &'a str,
+    /// Pixels before zoom.
+    pub terminal_font_size: u32,
 }
 
 const DEFAULT_FONT_SIZE: f32 = 12.;
+/// The terminal text sizes a window draws; a stored size outside them, which
+/// no server takes, shows the default size. A server's own limits are
+/// narrower and decide what an update may set.
+const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<u32> = 4..=128;
 
 impl NativeAppearance {
     /// The corner radius of a control whose own radius is `natural`: the
@@ -283,6 +298,8 @@ impl NativeAppearance {
             terminal: TerminalColors::default(),
             selection_foreground: 0xd9e2ef,
             selection_background: 0x345778,
+            terminal_font: None,
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE as f32,
             zoom: Zoom::default(),
             zoom_steps: ZoomSteps::default(),
             notice: None,
@@ -313,6 +330,8 @@ impl NativeAppearance {
                 terminal_theme_light: terminal.theme_light(),
                 font_size: settings.font_size,
                 font_family: &settings.font_family,
+                terminal_font_family: terminal.font_family(),
+                terminal_font_size: terminal.font_size(),
             },
             catalog,
             available_fonts,
@@ -355,6 +374,8 @@ impl NativeAppearance {
                 terminal_theme_light: &remembered.terminal_theme_light,
                 font_size: remembered.font_size,
                 font_family: &remembered.font_family,
+                terminal_font_family: &remembered.terminal_font_family,
+                terminal_font_size: remembered.terminal_font_size,
             },
             catalog,
             available_fonts,
@@ -440,6 +461,18 @@ impl NativeAppearance {
                 None => problems.push("The interface font is not installed.".to_owned()),
             }
         }
+        result.terminal_font = terminal_font(
+            selection.terminal_font_family,
+            theme.chrome.terminal_font_family.as_deref(),
+            available_fonts,
+            ui_family,
+            &mut problems,
+        );
+        result.terminal_font_size = if TERMINAL_FONT_SIZES.contains(&selection.terminal_font_size) {
+            selection.terminal_font_size as f32
+        } else {
+            DEFAULT_TERMINAL_FONT_SIZE as f32
+        };
 
         match terminal_palette(selection, theme, catalog, &mut problems) {
             Some(palette) => {
@@ -767,6 +800,37 @@ impl NativeAppearance {
     }
 }
 
+/// The installed family terminals draw text in: the first installed family
+/// of the setting, else of the theme's proposal; `None` for the bundled
+/// terminal font. A set family that is not installed shows the bundled font
+/// and is reported; a proposal that is not installed is passed over, as the
+/// theme's own fonts are.
+fn terminal_font(
+    setting: &str,
+    proposal: Option<&str>,
+    available_fonts: &[String],
+    ui_family: &str,
+    problems: &mut Vec<String>,
+) -> Option<String> {
+    let choose = |families: &str| {
+        // `monospace` names the bundled font, which the terminal draws
+        // without a family of its own.
+        choose_font(families, available_fonts, ui_family, TERMINAL_FONT_FAMILY)
+    };
+    let chosen = if setting.trim().is_empty() {
+        proposal.and_then(choose)
+    } else {
+        let chosen = choose(setting);
+        if chosen.is_none() {
+            problems.push(
+                "The terminal font is not installed; terminals show the bundled font.".to_owned(),
+            );
+        }
+        chosen
+    };
+    chosen.filter(|family| family != TERMINAL_FONT_FAMILY)
+}
+
 /// The terminal palette of a selection: the one the server's rule chooses
 /// for the UI theme's mode (the named palette, else the one named for the
 /// mode), looked up in the catalog; else the palette with the UI theme's
@@ -1030,6 +1094,8 @@ mod tests {
             terminal_theme_light: "default",
             font_size: 0,
             font_family: "",
+            terminal_font_family: "",
+            terminal_font_size: 14,
         }
     }
     fn resolve(selection: &ThemeSelection, catalog: &ThemeCatalog) -> NativeAppearance {
@@ -1143,10 +1209,34 @@ mod tests {
             terminal_theme: "default".into(),
             terminal_theme_dark: "default".into(),
             terminal_theme_light: "default".into(),
+            terminal_font_family: String::new(),
+            terminal_font_size: 14,
         };
         let shown = |remembered: &RememberedAppearance, scheme| {
             NativeAppearance::from_remembered(remembered, scheme, &catalog, &[], "UI", "Mono")
         };
+        // The terminal font starts as the settings it was taken from choose it.
+        let fonts = ["Fira Code".to_owned()];
+        let chosen = RememberedAppearance {
+            terminal_font_family: "Fira Code".into(),
+            terminal_font_size: 16,
+            ..remembered.clone()
+        };
+        let terminal = NativeAppearance::from_remembered(
+            &chosen,
+            ColorScheme::Dark,
+            &catalog,
+            &fonts,
+            "UI",
+            "Mono",
+        );
+        assert_eq!(
+            (
+                terminal.terminal_font.as_deref(),
+                terminal.terminal_font_size
+            ),
+            (Some("Fira Code"), 16.)
+        );
         let original = remembered.clone();
         remembered.interface_style = "system".into();
         let system = shown(&remembered, ColorScheme::Light);
@@ -1627,5 +1717,114 @@ mod tests {
         let shown = show(&chosen);
         assert_eq!((shown.font_size, shown.font_family.as_str()), (12., "UI"));
         assert!(shown.notice.unwrap().contains("font"));
+    }
+
+    /// settings, Native Terminal Font Choice: the setting, else the theme's
+    /// proposal, else the bundled font; only installed families count.
+    #[test]
+    fn the_terminal_font_comes_from_the_setting_then_the_theme_then_the_bundled_font() {
+        let catalog = ThemeCatalog::load(None);
+        let show = |selection: &ThemeSelection, fonts: &[&str]| {
+            let fonts: Vec<String> = fonts.iter().map(|font| (*font).to_owned()).collect();
+            NativeAppearance::resolve(selection, &catalog, &fonts, "UI", "Mono")
+        };
+        let terminal = |shown: &NativeAppearance| shown.terminal_font.clone();
+        // A theme without a proposal and no setting: the bundled font.
+        let plain = selection("splitty-classic");
+        assert_eq!(
+            catalog
+                .ui("splitty-classic")
+                .unwrap()
+                .chrome
+                .terminal_font_family,
+            None
+        );
+        let shown = show(&plain, &["Cascadia Mono", "Fira Code"]);
+        assert_eq!((terminal(&shown), shown.terminal_font_size), (None, 14.));
+        assert_eq!(shown.notice, None);
+
+        // settings, Windows 11 themes propose Cascadia: the first installed
+        // family of the proposal, else the bundled font, without a notice.
+        for theme in ["windows-11-dark", "windows-11-light"] {
+            let windows = selection(theme);
+            assert_eq!(
+                terminal(&show(
+                    &windows,
+                    &["Cascadia Code", "Cascadia Mono", "Fira Code"]
+                )),
+                Some("Cascadia Mono".to_owned()),
+                "{theme}"
+            );
+            assert_eq!(
+                terminal(&show(&windows, &["Cascadia Code", "Fira Code"])),
+                Some("Cascadia Code".to_owned())
+            );
+            let none = show(&windows, &["Fira Code"]);
+            assert_eq!((terminal(&none), none.notice), (None, None));
+        }
+        assert_eq!(
+            catalog
+                .ui("windows-classic")
+                .unwrap()
+                .chrome
+                .terminal_font_family,
+            None
+        );
+
+        // Setting before the theme's proposal.
+        let mut chosen = selection("windows-11-dark");
+        chosen.terminal_font_family = "Fira Code";
+        assert_eq!(
+            terminal(&show(&chosen, &["Cascadia Mono", "Fira Code"])),
+            Some("Fira Code".to_owned())
+        );
+        // Family not installed: the bundled font and a notice, not the
+        // theme's proposal.
+        chosen.terminal_font_family = "Missing Mono";
+        let missing = show(&chosen, &["Cascadia Mono", "Fira Code"]);
+        assert_eq!(terminal(&missing), None);
+        assert!(missing
+            .notice
+            .unwrap()
+            .contains("terminal font is not installed"));
+        // Names compare without case; the bundled family and `monospace`
+        // mean the bundled font.
+        chosen.terminal_font_family = "fira code";
+        assert_eq!(
+            terminal(&show(&chosen, &["Fira Code"])),
+            Some("Fira Code".to_owned())
+        );
+        for bundled in ["monospace", "ui-monospace", TERMINAL_FONT_FAMILY] {
+            chosen.terminal_font_family = bundled;
+            let shown = show(&chosen, &["Cascadia Mono", TERMINAL_FONT_FAMILY]);
+            assert_eq!((terminal(&shown), shown.notice), (None, None), "{bundled}");
+        }
+
+        // The size: the setting's within the window's bounds, else the default.
+        let mut sized = selection("splitty-classic");
+        for (size, shown) in [
+            (18, 18.),
+            (8, 8.),
+            (32, 32.),
+            (48, 48.),
+            (0, 14.),
+            (500, 14.),
+        ] {
+            sized.terminal_font_size = size;
+            assert_eq!(show(&sized, &[]).terminal_font_size, shown, "{size}");
+        }
+        // The interface font settings do not change the terminal's.
+        sized.terminal_font_size = 14;
+        sized.font_family = "Fira Code";
+        sized.font_size = 20;
+        let interface = show(&sized, &["Fira Code"]);
+        assert_eq!(
+            (
+                interface.font_family.as_str(),
+                terminal(&interface),
+                interface.terminal_font_size
+            ),
+            ("Fira Code", None, 14.)
+        );
     }
 }

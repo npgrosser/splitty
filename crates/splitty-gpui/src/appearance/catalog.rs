@@ -122,6 +122,10 @@ pub struct ChromeBlock {
     /// A comma-separated family list; `system-ui` and `monospace` name the
     /// platform's fonts.
     pub font_family: Option<String>,
+    /// The family list the theme proposes for terminal text, used while the
+    /// terminal font setting is empty; `monospace` names the bundled
+    /// terminal font.
+    pub terminal_font_family: Option<String>,
 }
 
 #[derive(Clone, Debug)]

@@ -1858,6 +1858,15 @@ impl Workspace {
         // A read that arrives while zoom steps are outstanding does not move
         // the display back: what is shown stands until they have settled.
         next.zoom = self.zoom.observe(next.zoom);
+        // Another terminal font restages every terminal at once; a zoom
+        // change alone steps them as zoom does.
+        if self.appearance.terminal_font != next.terminal_font
+            || self.appearance.terminal_font_size != next.terminal_font_size
+        {
+            self.appearance.terminal_font = next.terminal_font.clone();
+            self.appearance.terminal_font_size = next.terminal_font_size;
+            self.apply_terminal_font(next.zoom, cx);
+        }
         self.apply_zoom(next.zoom, window, cx);
         self.drawer_authoritative_pinned = snapshot.drawer().pinned;
         // A read already in flight can arrive after the click but before its
@@ -2076,13 +2085,38 @@ impl Workspace {
         gpui_kit::component::theme::Theme::update(cx, |theme| {
             theme.font_size = px(16. * zoom.window_scale());
         });
+        let scale = zoom.terminal_scale(self.appearance.terminal_font_size);
         for view in self.panes.values() {
-            view.terminal.update(cx, |terminal, cx| {
-                terminal.step_zoom(zoom.terminal_scale(terminal::BASE_FONT_SIZE), cx)
-            });
+            view.terminal
+                .update(cx, |terminal, cx| terminal.step_zoom(scale, cx));
         }
         self.appearance.zoom = zoom;
         cx.notify();
+    }
+
+    /// What terminals draw text in: the appearance's terminal font and size.
+    fn terminal_font(&self) -> terminal::TerminalFont {
+        terminal::TerminalFont {
+            family: self
+                .appearance
+                .terminal_font
+                .clone()
+                .map(SharedString::from),
+            size: self.appearance.terminal_font_size,
+        }
+    }
+
+    /// Give every terminal the appearance's terminal font, at the scale
+    /// `zoom` gives its size. Sessions and their output stay; each terminal
+    /// measures the face again and reports a grid size that changed.
+    fn apply_terminal_font(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
+        let font = self.terminal_font();
+        let scale = zoom.terminal_scale(font.size);
+        for view in self.panes.values() {
+            view.terminal.update(cx, |terminal, cx| {
+                terminal.set_font(font.clone(), scale, cx)
+            });
+        }
     }
 
     fn show_zoom_level(&mut self, zoom: Zoom) {
@@ -3116,10 +3150,8 @@ impl Workspace {
             self.smoke_last_input_pane.clone(),
         );
         let colors = self.appearance.terminal;
-        let terminal_scale = self
-            .appearance
-            .zoom
-            .terminal_scale(terminal::BASE_FONT_SIZE);
+        let terminal_font = self.terminal_font();
+        let terminal_scale = self.appearance.zoom.terminal_scale(terminal_font.size);
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, origin, cx));
@@ -3164,7 +3196,7 @@ impl Workspace {
         let clipboard_writes = self.clipboard_writes;
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
-            terminal.set_zoom(terminal_scale, cx);
+            terminal.set_font(terminal_font, terminal_scale, cx);
             terminal.set_scroll_to_bottom(scroll_to_bottom, cx);
             terminal.set_clipboard_writes(clipboard_writes);
             terminal.apply_colors(colors, selection_foreground, selection_background, cx)
@@ -3285,6 +3317,7 @@ impl Workspace {
             self.wheel_navigation.reset();
             self.appearance_error = None;
             self.appearance = NativeAppearance::fallback(&self.ui_family);
+            self.apply_terminal_font(self.appearance.zoom, cx);
             self.zoom_feedback = None;
             self.scheme_pending = true;
             self.profiles = None;

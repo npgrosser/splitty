@@ -13,7 +13,8 @@ const FILE_NAME: &str = "last-appearance.json";
 const MAX_BYTES: u64 = 16 * 1024;
 
 /// The settings a window resolves its look from: the names of the UI theme
-/// and the terminal palette, the interface font and the zoom.
+/// and the terminal palette, the interface font, the terminal font and the
+/// zoom.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RememberedAppearance {
@@ -38,6 +39,15 @@ pub struct RememberedAppearance {
     pub terminal_theme: String,
     pub terminal_theme_dark: String,
     pub terminal_theme_light: String,
+    /// Empty for the default; absent in files of earlier versions.
+    #[serde(default)]
+    pub terminal_font_family: String,
+    #[serde(default = "default_terminal_font_size")]
+    pub terminal_font_size: u32,
+}
+
+fn default_terminal_font_size() -> u32 {
+    splitty_core::config::DEFAULT_TERMINAL_FONT_SIZE
 }
 
 fn default_window_decoration() -> String {
@@ -71,6 +81,8 @@ impl RememberedAppearance {
             terminal_theme: terminal.theme().to_owned(),
             terminal_theme_dark: terminal.theme_dark().to_owned(),
             terminal_theme_light: terminal.theme_light().to_owned(),
+            terminal_font_family: terminal.font_family().to_owned(),
+            terminal_font_size: terminal.font_size(),
         }
     }
 
@@ -160,6 +172,8 @@ mod tests {
             terminal_theme: "default".into(),
             terminal_theme_dark: "dracula".into(),
             terminal_theme_light: "default".into(),
+            terminal_font_family: "Fira Code".into(),
+            terminal_font_size: 16,
         }
     }
 
@@ -198,6 +212,23 @@ mod tests {
                 .title_bar_style,
             "theme"
         );
+    }
+
+    /// settings, Native Appearance Before The Local Service Answers, File
+    /// from before the terminal font was remembered.
+    #[test]
+    fn the_terminal_font_is_remembered_and_older_files_take_the_default() {
+        let value = serde_json::to_value(appearance()).unwrap();
+        assert_eq!(value["terminalFontFamily"], "Fira Code");
+        assert_eq!(value["terminalFontSize"], 16);
+        let mut old = value;
+        for key in ["terminalFontFamily", "terminalFontSize"] {
+            old.as_object_mut().unwrap().remove(key);
+        }
+        let restored = serde_json::from_value::<RememberedAppearance>(old).unwrap();
+        assert_eq!(restored.terminal_font_family, "");
+        assert_eq!(restored.terminal_font_size, 14);
+        assert_eq!(restored.theme_dark, appearance().theme_dark);
     }
 
     #[test]

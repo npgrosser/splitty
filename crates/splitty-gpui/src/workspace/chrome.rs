@@ -305,6 +305,129 @@ pub(super) mod view_tests {
         });
     }
 
+    /// settings, Native Terminal Font Application: the local service's
+    /// terminal font size reaches new and existing terminals, composed with
+    /// terminal zoom; settings, Native Terminal Font Choice: a family the
+    /// computer does not have keeps the bundled face, with a notice.
+    #[test]
+    fn the_terminal_font_reaches_every_terminal_with_the_zoom() {
+        use splitty_client_core::appearance::test_support::settings_snapshot_with_terminal;
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            let source = model.lifecycle_token();
+            let owner = source.connection_id();
+            model
+                .source_mut(source.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner,
+                    &serde_json::json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"work","revision":2,
+                        "root":{"type":"slot","id":"only","paneIds":["p0"],"activePaneId":"p0"},
+                        "panes":{"p0":{"id":"p0","sessionId":"s0"}},
+                        "sessions":{"s0":{"id":"s0","status":"running"}}
+                    }}),
+                )
+                .unwrap();
+            let (commands, _receiver) = mpsc::channel(64);
+            let fonts = |window: &mut VisualTestContext| {
+                window.update(|_, cx| {
+                    let workspace = view.read(cx);
+                    assert!(!workspace.panes.is_empty(), "the fixture shows a terminal");
+                    workspace
+                        .panes
+                        .values()
+                        .map(|pane| {
+                            let (face, size) = pane.terminal.read(cx).ui_test_font();
+                            (face.family.to_string(), f32::from(size))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            };
+            let bundled = window.update(|_, cx| crate::terminal::terminal_family(cx).to_string());
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.destination = Destination::Screens;
+                    workspace.model = Some(model.clone());
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_terminal(
+                            owner,
+                            1,
+                            serde_json::json!({"fontSize": 18}),
+                            serde_json::json!({}),
+                        ),
+                        window,
+                        cx,
+                    );
+                    assert!(workspace.panes.is_empty());
+                    // Terminals made afterwards take the size.
+                    workspace.reconcile(model, window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            for (family, size) in fonts(window) {
+                assert_eq!((family.as_str(), size), (bundled.as_str(), 18.));
+            }
+            // settings, Size with terminal zoom: 18 px at 110 % is 20 px.
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_terminal(
+                            owner,
+                            2,
+                            serde_json::json!({"fontSize": 18}),
+                            serde_json::json!({"zoom": 1.1, "zoomScope": "terminals"}),
+                        ),
+                        window,
+                        cx,
+                    );
+                });
+                window.draw(cx).clear(cx);
+            });
+            for (_, size) in fonts(window) {
+                assert_eq!(size, 20.);
+            }
+            // A family the computer does not have: the bundled face.
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_terminal(
+                            owner,
+                            3,
+                            serde_json::json!({"fontFamily": "Missing Mono"}),
+                            serde_json::json!({}),
+                        ),
+                        window,
+                        cx,
+                    );
+                    assert!(workspace
+                        .appearance
+                        .notice
+                        .as_deref()
+                        .is_some_and(|notice| notice.contains("terminal font is not installed")));
+                });
+                window.draw(cx).clear(cx);
+            });
+            for (family, size) in fonts(window) {
+                assert_eq!((family.as_str(), size), (bundled.as_str(), 14.));
+            }
+            // An installed family the appearance chose reaches the terminals.
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.appearance.terminal_font = Some("Installed Mono".into());
+                    let zoom = workspace.appearance.zoom;
+                    workspace.apply_terminal_font(zoom, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            for (family, size) in fonts(window) {
+                assert_eq!((family.as_str(), size), ("Installed Mono", 14.));
+            }
+        });
+    }
+
     /// display-zoom, Levels from the server: the window steps through the
     /// local service's levels and shows one beyond 300 %.
     #[test]

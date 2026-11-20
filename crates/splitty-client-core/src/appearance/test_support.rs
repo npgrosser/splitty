@@ -47,11 +47,53 @@ pub fn settings_snapshot_with_metadata(
     snapshot(connection_id, generation, Some(metadata), true)
 }
 
+/// A snapshot with the server's metadata whose terminal settings add these
+/// values (`fontFamily`, `fontSize`, …) to the fixture's, and whose
+/// appearance settings take these (`zoom`, `zoomScope`, …).
+pub fn settings_snapshot_with_terminal(
+    connection_id: Uuid,
+    generation: u64,
+    terminal: serde_json::Value,
+    appearance: serde_json::Value,
+) -> Arc<AppearanceSnapshot> {
+    let mut stored = serde_json::json!({"theme": "default", "closeOnExit": "graceful"});
+    splitty_core::config::deep_merge(&mut stored, terminal);
+    let mut settings =
+        serde_json::to_value(AppearanceSettings::default()).expect("default appearance");
+    splitty_core::config::deep_merge(&mut settings, appearance);
+    build(
+        connection_id,
+        generation,
+        Some(settings_metadata()),
+        true,
+        stored,
+        serde_json::from_value(settings).expect("test appearance settings"),
+    )
+}
+
 fn snapshot(
     connection_id: Uuid,
     generation: u64,
     metadata: Option<serde_json::Value>,
     pinned: bool,
+) -> Arc<AppearanceSnapshot> {
+    build(
+        connection_id,
+        generation,
+        metadata,
+        pinned,
+        serde_json::json!({"theme": "default", "closeOnExit": "graceful"}),
+        AppearanceSettings::default(),
+    )
+}
+
+fn build(
+    connection_id: Uuid,
+    generation: u64,
+    metadata: Option<serde_json::Value>,
+    pinned: bool,
+    terminal: serde_json::Value,
+    appearance: AppearanceSettings,
 ) -> Arc<AppearanceSnapshot> {
     let budget = ConnectionBudget::default();
     let drawer = DrawerSettings {
@@ -59,12 +101,9 @@ fn snapshot(
         ..DrawerSettings::default()
     };
     let settings = HomePresentation {
-        appearance: AppearanceSettings::default(),
+        appearance,
         drawer,
-        terminal: serde_json::from_value(serde_json::json!({
-            "theme": "default", "closeOnExit": "graceful"
-        }))
-        .expect("test terminal preferences"),
+        terminal: serde_json::from_value(terminal).expect("test terminal preferences"),
         remote: Default::default(),
         native_tabs: Default::default(),
         editors: Default::default(),

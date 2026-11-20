@@ -26,6 +26,10 @@ pub enum SettingsField {
     TerminalTheme,
     TerminalThemeDark,
     TerminalThemeLight,
+    /// The terminal font (`terminal.fontFamily`); empty for the default.
+    TerminalFontFamily,
+    /// The terminal text size in pixels before zoom (`terminal.fontSize`).
+    TerminalFontSize,
     CloseOnExit,
     ScrollToBottom,
     DrawerPinned,
@@ -51,7 +55,7 @@ pub enum SettingsField {
     NotificationProgramStatus,
 }
 impl SettingsField {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 37] = [
         Self::ThemeMode,
         Self::InterfaceStyle,
         Self::WindowDecoration,
@@ -67,6 +71,8 @@ impl SettingsField {
         Self::TerminalTheme,
         Self::TerminalThemeDark,
         Self::TerminalThemeLight,
+        Self::TerminalFontFamily,
+        Self::TerminalFontSize,
         Self::CloseOnExit,
         Self::ScrollToBottom,
         Self::DrawerPinned,
@@ -117,6 +123,8 @@ impl SettingsField {
             Self::TerminalTheme => "terminal.theme",
             Self::TerminalThemeDark => "terminal.themeDark",
             Self::TerminalThemeLight => "terminal.themeLight",
+            Self::TerminalFontFamily => "terminal.fontFamily",
+            Self::TerminalFontSize => "terminal.fontSize",
             Self::CloseOnExit => "terminal.closeOnExit",
             Self::ScrollToBottom => "terminal.scrollToBottom",
             Self::DrawerPinned => "drawer.pinned",
@@ -179,6 +187,8 @@ impl SettingsField {
                 | Self::TabsLocked
                 | Self::TerminalThemeDark
                 | Self::TerminalThemeLight
+                | Self::TerminalFontFamily
+                | Self::TerminalFontSize
         )
     }
 }
@@ -242,7 +252,7 @@ impl SettingsEdit {
             // Ranges and choices are the server's (`SettingsMetadata`), or
             // the fallback for a server without metadata (`fallback_limits`);
             // a value only has the field's shape here.
-            (SettingsValue::Number(n), F::FontSize | F::DrawerWidth) => {
+            (SettingsValue::Number(n), F::FontSize | F::DrawerWidth | F::TerminalFontSize) => {
                 n.fract() == 0.0 && (0.0..=MAX_SETTING_NUMBER).contains(n)
             }
             (SettingsValue::Number(n), F::Zoom) => {
@@ -261,7 +271,7 @@ impl SettingsEdit {
                 | F::EditorFolder
                 | F::CloseOnExit,
             ) => !s.is_empty() && s.len() <= MAX_CHOICE_BYTES && !s.chars().any(char::is_control),
-            (SettingsValue::Text(s), F::FontFamily) => {
+            (SettingsValue::Text(s), F::FontFamily | F::TerminalFontFamily) => {
                 s.len() <= 4096 && !s.chars().any(char::is_control)
             }
             (SettingsValue::Text(s), f) if f.is_theme() => {
@@ -291,9 +301,12 @@ impl SettingsEdit {
             .expect("known setting path");
         let value = match (&self.value, self.field) {
             // These fields are wire integers, not integral JSON floats.
-            (SettingsValue::Number(n), SettingsField::FontSize | SettingsField::DrawerWidth) => {
-                serde_json::from_str(&format!("{n:.0}")).expect("bounded integer")
-            }
+            (
+                SettingsValue::Number(n),
+                SettingsField::FontSize
+                | SettingsField::DrawerWidth
+                | SettingsField::TerminalFontSize,
+            ) => serde_json::from_str(&format!("{n:.0}")).expect("bounded integer"),
             _ => serde_json::to_value(&self.value).expect("bounded setting value"),
         };
         serde_json::json!({"body": {group: {key: value}}})
@@ -382,6 +395,20 @@ pub fn fallback_limits(field: SettingsField) -> Option<&'static SettingsLimits> 
                     range(0.5, 3.0, 0.1, splitty_core::config::ZOOM_LEVELS.to_vec()),
                 ),
                 (F::DrawerWidth, range(150.0, 400.0, 10.0, Vec::new())),
+                // The sizes this build's server lists. A server without
+                // metadata does not know the field, which is not edited
+                // there (`needs_metadata`); these bound only its display.
+                (
+                    F::TerminalFontSize,
+                    range(
+                        f64::from(*splitty_core::config::TERMINAL_FONT_SIZES.start()),
+                        f64::from(*splitty_core::config::TERMINAL_FONT_SIZES.end()),
+                        1.0,
+                        splitty_core::config::TERMINAL_FONT_SIZES
+                            .map(f64::from)
+                            .collect(),
+                    ),
+                ),
                 (F::ThemeMode, choices(&["fixed", "auto"])),
                 (F::InterfaceStyle, choices(&["system", "theme"])),
                 (F::WindowDecoration, choices(&["system", "splitty"])),
@@ -466,6 +493,50 @@ impl<'de> Deserialize<'de> for SettingsLimits {
 mod tests {
     use super::*;
 
+    /// settings, Terminal Font Settings: the edits have the fields' shapes,
+    /// the size goes out as a wire integer, and both need the server's
+    /// metadata.
+    #[test]
+    fn terminal_font_edits_are_a_bounded_family_and_a_whole_size() {
+        use SettingsField as F;
+        use SettingsValue as V;
+        assert_eq!(F::TerminalFontFamily.path(), "terminal.fontFamily");
+        assert_eq!(F::TerminalFontSize.path(), "terminal.fontSize");
+        for field in [F::TerminalFontFamily, F::TerminalFontSize] {
+            assert_eq!(field.domain(), SettingsDomain::Appearance);
+            assert!(field.needs_metadata(), "{field:?}");
+            assert!(!field.is_theme());
+        }
+        let family = SettingsEdit::new(F::TerminalFontFamily, V::Text("Fira Code".into())).unwrap();
+        assert_eq!(
+            family.args(),
+            serde_json::json!({"body":{"terminal":{"fontFamily":"Fira Code"}}})
+                .as_object()
+                .unwrap()
+                .clone()
+        );
+        assert!(SettingsEdit::new(F::TerminalFontFamily, V::Text(String::new())).is_ok());
+        for wrong in [
+            V::Text("Fira\u{7}Code".into()),
+            V::Text("x".repeat(4097)),
+            V::Number(14.0),
+        ] {
+            assert!(SettingsEdit::new(F::TerminalFontFamily, wrong).is_err());
+        }
+        let size = SettingsEdit::new(F::TerminalFontSize, V::Number(16.0)).unwrap();
+        assert_eq!(
+            size.args()["body"]["terminal"]["fontSize"].as_u64(),
+            Some(16),
+            "a wire integer"
+        );
+        for wrong in [V::Number(14.5), V::Number(-1.0), V::Text("16".into())] {
+            assert!(SettingsEdit::new(F::TerminalFontSize, wrong).is_err());
+        }
+        let limits = fallback_limits(F::TerminalFontSize).unwrap();
+        assert_eq!((limits.min(), limits.max()), (Some(8.0), Some(32.0)));
+        assert_eq!(limits.values().len(), 25);
+    }
+
     #[test]
     fn notification_edits_are_boolean_fields_in_their_own_domain() {
         use SettingsField as F;
@@ -503,7 +574,7 @@ mod tests {
                 .into_iter()
                 .filter(|field| field.domain() == SettingsDomain::Appearance)
                 .count(),
-            28
+            30
         );
     }
 }

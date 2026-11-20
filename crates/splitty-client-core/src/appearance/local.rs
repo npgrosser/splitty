@@ -45,6 +45,7 @@ impl HomeAppearance {
         .iter()
         .any(|s| s.len() > 64)
             || self.appearance.font_family.len() > 4096
+            || self.terminal.font_family().len() > 4096
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

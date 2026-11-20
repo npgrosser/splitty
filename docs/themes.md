@@ -45,6 +45,21 @@ system. Settings, Terminal:
   (Catppuccin Mocha gets the Catppuccin Mocha palette; spaces and dashes do
   not matter, so Tokyo Night gets TokyoNight) and the Splitty palette of that
   mode where there is none.
+- **Terminal font**: an installed font family, or "Default": the UI theme's
+  terminal font (`terminal-font-family`) where it is installed, else the
+  bundled JetBrains Mono Nerd Font. A family that is not installed shows the
+  bundled font, and the status line says so. The list holds every installed
+  family; a proportional one is drawn in the terminal's fixed cells.
+- **Terminal font size**: pixels before zoom, 8 to 32, 14 by default.
+
+Both apply to every terminal at once, without restarting a session: the window
+measures the face again and tells each program its new number of columns and
+rows. Display zoom scales the size (with the "Terminals" scope only the
+terminals). The interface font settings on the Appearance page do not change
+terminal text. Characters the chosen family has no glyph for, such as the
+Nerd Font symbols of a prompt, are drawn in the bundled font, so a prompt
+that relies on them keeps its icons; what neither font has falls to the
+platform's fallback.
 
 ## Native appearance and window decoration
 
@@ -212,9 +227,13 @@ derived from the theme's colors.
 | `title-bar` | object, see below | the chrome's colors, a centered title |
 | `font-size` | pixels, 8 to 24 | 12 |
 | `font-family` | family list; `system-ui` and `monospace` name the platform's fonts | the system font |
+| `terminal-font-family` | family list for terminal text, used while the Terminal font setting is "Default"; the first installed family wins; `monospace` names the bundled font | the bundled terminal font |
 
 Colors are `#rgb`, `#rrggbb` or `#rrggbbaa`. A value outside these forms or
-ranges keeps its derived value, and the app says so in its status line.
+ranges keeps its derived value, and the app says so in its status line. A
+`terminal-font-family` none of whose families is installed is no error: the
+terminals show the bundled font. The Windows 11 themes propose
+`"Cascadia Mono", "Cascadia Code"`.
 
 ### Shape
 

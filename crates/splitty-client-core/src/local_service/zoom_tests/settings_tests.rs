@@ -44,6 +44,8 @@ fn edit(field: F) -> SettingsEdit {
             | F::TerminalThemeLight => V::Text("splitty-light".into()),
             F::FontSize => V::Number(18.0),
             F::FontFamily => V::Text("Owned Test Font".into()),
+            F::TerminalFontFamily => V::Text("Owned Test Mono".into()),
+            F::TerminalFontSize => V::Number(16.0),
             F::Zoom => V::Number(1.25),
             F::ZoomScope => V::Text("window".into()),
             F::CloseOnExit => V::Text("never".into()),

@@ -20,6 +20,9 @@ pub use terminal_preferences::TerminalPreferences;
 /// The family of the bundled terminal font.
 pub const TERMINAL_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
+/// The terminal text size of settings that name none (`terminal.fontSize`).
+pub const DEFAULT_TERMINAL_FONT_SIZE: u32 = splitty_core::config::DEFAULT_TERMINAL_FONT_SIZE;
+
 /// The bundled terminal font, compiled into the native client.
 pub fn terminal_font_data() -> Option<std::borrow::Cow<'static, [u8]>> {
     Some(std::borrow::Cow::Borrowed(include_bytes!(
@@ -177,6 +180,8 @@ impl AppearanceSnapshot {
             F::TerminalTheme => V::Text(self.terminal().theme().into()),
             F::TerminalThemeDark => V::Text(self.terminal().theme_dark().into()),
             F::TerminalThemeLight => V::Text(self.terminal().theme_light().into()),
+            F::TerminalFontFamily => V::Text(self.terminal().font_family().into()),
+            F::TerminalFontSize => V::Number(f64::from(self.terminal().font_size())),
             F::CloseOnExit => V::Text(self.terminal().close_on_exit().into()),
             F::ScrollToBottom => V::Bool(self.terminal().scroll_to_bottom()),
             F::DrawerPinned => V::Bool(self.drawer().pinned),
@@ -347,6 +352,31 @@ mod tests {
         }
         assert!(accepts(&current, F::FontSize, V::Number(0.0)));
         assert!(!accepts(&current, F::EditorFile, V::Text("helix".into())));
+
+        // settings, Terminal Font Settings: the sizes the server lists, any
+        // family the window offers.
+        for value in [8.0, 14.0, 32.0] {
+            assert!(accepts(&current, F::TerminalFontSize, V::Number(value)));
+        }
+        for value in [0.0, 7.0, 33.0] {
+            assert!(!accepts(&current, F::TerminalFontSize, V::Number(value)));
+        }
+        assert!(accepts(
+            &current,
+            F::TerminalFontFamily,
+            V::Text("Fira Code".into())
+        ));
+        assert!(accepts(
+            &current,
+            F::TerminalFontFamily,
+            V::Text(String::new())
+        ));
+        let mut metadata = splitty_core::config::settings_metadata();
+        metadata["limits"]["terminal.fontSize"] =
+            serde_json::json!({"min": 6, "max": 48, "step": 1});
+        let wide = snapshot(Some(metadata));
+        assert!(accepts(&wide, F::TerminalFontSize, V::Number(40.0)));
+        assert!(!accepts(&wide, F::TerminalFontSize, V::Number(49.0)));
     }
 
     /// settings, Older server without metadata: compatible updates go on
@@ -370,5 +400,37 @@ mod tests {
         ));
         assert!(!accepts(&old, F::DrawerPinned, V::Bool(false)));
         assert!(!accepts(&old, F::TabsCloseButton, V::Text("always".into())));
+        // settings, Native Terminal Font Choice, Older local service.
+        assert!(!accepts(&old, F::TerminalFontSize, V::Number(16.0)));
+        assert!(!accepts(
+            &old,
+            F::TerminalFontFamily,
+            V::Text("Fira Code".into())
+        ));
+        assert_eq!(old.value(F::TerminalFontSize), Some(V::Number(14.0)));
+        assert_eq!(
+            old.value(F::TerminalFontFamily),
+            Some(V::Text(String::new()))
+        );
+        // A server whose metadata names no default for them is one that
+        // does not know them.
+        let mut metadata = splitty_core::config::settings_metadata();
+        for key in ["fontFamily", "fontSize"] {
+            metadata["defaults"]["terminal"]
+                .as_object_mut()
+                .unwrap()
+                .remove(key);
+        }
+        metadata["limits"]
+            .as_object_mut()
+            .unwrap()
+            .remove("terminal.fontSize");
+        let unaware = snapshot(Some(metadata));
+        assert!(!accepts(&unaware, F::TerminalFontSize, V::Number(16.0)));
+        assert!(!accepts(
+            &unaware,
+            F::TerminalFontFamily,
+            V::Text("Fira Code".into())
+        ));
     }
 }

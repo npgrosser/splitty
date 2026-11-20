@@ -2994,6 +2994,12 @@ interface HubCatalogObservation {
 // appearance.zoom lists the zoom levels clients step through and offer as its
 // `values` (with min and max, no step); older servers publish
 // { min: 0.5, max: 3, step: 0.1 } and accept any level in that range.
+// terminal.fontFamily is a font family name, "" (default) for the theme's
+// terminal font or the bundled one; at most 4096 bytes, no control characters.
+// terminal.fontSize is whole pixels before zoom (default 14); its limits list
+// the sizes 8 to 32 as `values`. The TOML keys are terminal.font_family and
+// terminal.font_size. Both are metadata-gated: a server without the limit
+// does not know the field, and clients do not edit it there.
 export interface SettingsChangedEvent {
   type: "settings.changed"; id: string; timestamp: number; settings: unknown;
 }

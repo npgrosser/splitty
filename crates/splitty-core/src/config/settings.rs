@@ -160,6 +160,31 @@ pub struct TerminalSettings {
     pub size_policy: String,
     /// How long after its user's last action a client still counts as active.
     pub size_idle_seconds: u32,
+    /// The family terminals draw text in; empty for the default (the UI
+    /// theme's proposal, else the bundled font). Absent in older settings.
+    #[serde(default)]
+    pub font_family: String,
+    /// The terminal text size in pixels before zoom, within
+    /// [`TERMINAL_FONT_SIZES`]. Absent in older settings, which means the
+    /// size terminals had before the setting existed.
+    #[serde(default = "default_terminal_font_size")]
+    pub font_size: u32,
+}
+
+/// The terminal text size of settings that name none.
+pub const DEFAULT_TERMINAL_FONT_SIZE: u32 = 14;
+/// The terminal text sizes an update may set, listed in the metadata.
+pub const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<u32> = 8..=32;
+/// The longest font family a setting holds.
+const MAX_FONT_FAMILY_BYTES: usize = 4096;
+
+fn default_terminal_font_size() -> u32 {
+    DEFAULT_TERMINAL_FONT_SIZE
+}
+
+/// A family name a setting can hold: bounded, without control characters.
+fn valid_font_family(family: &str) -> bool {
+    family.len() <= MAX_FONT_FAMILY_BYTES && !family.chars().any(char::is_control)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -312,6 +337,8 @@ impl Default for TerminalSettings {
             allow_osc52_write: true,
             size_policy: "active".into(),
             size_idle_seconds: 120,
+            font_family: String::new(),
+            font_size: DEFAULT_TERMINAL_FONT_SIZE,
         }
     }
 }
@@ -411,6 +438,12 @@ impl HomeConfig {
         if !(10..=3600).contains(&self.terminal.size_idle_seconds) {
             self.terminal.size_idle_seconds = 120;
         }
+        if !TERMINAL_FONT_SIZES.contains(&self.terminal.font_size) {
+            self.terminal.font_size = DEFAULT_TERMINAL_FONT_SIZE;
+        }
+        if !valid_font_family(&self.terminal.font_family) {
+            self.terminal.font_family.clear();
+        }
 
         if !matches!(self.native_tabs.close_button.as_str(), "always" | "active") {
             self.native_tabs.close_button = "always".into();
@@ -474,6 +507,12 @@ pub fn settings_metadata() -> Value {
             "terminal.closeOnExit": {"values": ["always", "never", "graceful"]},
             "terminal.sizePolicy": {"values": ["active", "latest", "smallest"]},
             "terminal.sizeIdleSeconds": {"min": 10, "max": 3600, "step": 10},
+            "terminal.fontSize": {
+                "min": TERMINAL_FONT_SIZES.start(),
+                "max": TERMINAL_FONT_SIZES.end(),
+                "step": 1,
+                "values": TERMINAL_FONT_SIZES.collect::<Vec<_>>()
+            },
             "appearance.themeMode": {"values": ["fixed", "auto"]},
             "appearance.interfaceStyle": {"values": ["system", "theme"]},
             "appearance.windowDecoration": {"values": ["system", "splitty"]},
@@ -527,6 +566,10 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
                     validate_editor_projects(child, &field)?;
                 } else if field == "remote.reconnectHosts" {
                     validate_reconnect_hosts(child, &field)?;
+                } else if field == "terminal.fontFamily" {
+                    if !child.as_str().is_some_and(valid_font_family) {
+                        return Err(invalid(&field, "expected a font family"));
+                    }
                 } else if field == "shells" { /* Shell profiles have their own update validation. */
                 } else {
                     walk(child, expected_child, limits, &field)?;
@@ -845,6 +888,95 @@ mod tests {
         assert_eq!(updated.terminal.theme_light, "default");
         assert_eq!(load_from(&path).terminal.theme_dark, "catppuccin-mocha");
         assert_eq!(updated.terminal.theme, "default");
+    }
+
+    /// settings, Terminal Font Settings.
+    #[test]
+    fn terminal_font_settings_default_persist_and_are_validated() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        // Settings stored before the font settings existed keep today's look.
+        fs::write(&path, "[terminal]\ntheme = 'default'\n").unwrap();
+        let older = load_from(&path);
+        assert_eq!(older.terminal.font_family, "");
+        assert_eq!(older.terminal.font_size, 14);
+        let json = serde_json::to_value(&older).unwrap();
+        assert_eq!(json["terminal"]["fontFamily"], "");
+        assert_eq!(json["terminal"]["fontSize"], 14);
+        let metadata = settings_metadata();
+        assert_eq!(metadata["defaults"]["terminal"]["fontFamily"], "");
+        assert_eq!(metadata["defaults"]["terminal"]["fontSize"], 14);
+        let limit = &metadata["limits"]["terminal.fontSize"];
+        assert_eq!(
+            (limit["min"].clone(), limit["max"].clone()),
+            (8.into(), 32.into())
+        );
+        assert_eq!(
+            limit["values"],
+            serde_json::json!((8..=32).collect::<Vec<u32>>())
+        );
+
+        // Both persist, snake_case on disk, and reach the effective settings.
+        let updated = update_at(
+            &path,
+            serde_json::json!({"terminal": {"fontFamily": "Fira Code", "fontSize": 16}}),
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                updated.terminal.font_family.as_str(),
+                updated.terminal.font_size
+            ),
+            ("Fira Code", 16)
+        );
+        let saved: toml::Value = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(saved["terminal"]["font_family"].as_str(), Some("Fira Code"));
+        assert_eq!(saved["terminal"]["font_size"].as_integer(), Some(16));
+        let reloaded = load_from(&path);
+        assert_eq!(reloaded.terminal.font_family, "Fira Code");
+        assert_eq!(reloaded.terminal.font_size, 16);
+        // The interface font is a setting of its own.
+        assert_eq!(reloaded.appearance.font_family, "");
+        assert_eq!(reloaded.appearance.font_size, 0);
+
+        // A size the metadata does not list, or an unusable family, is refused
+        // and nothing changes.
+        let saved = fs::read(&path).unwrap();
+        for (patch, field) in [
+            (serde_json::json!({"fontSize": 7}), "terminal.fontSize"),
+            (serde_json::json!({"fontSize": 33}), "terminal.fontSize"),
+            (serde_json::json!({"fontSize": 14.5}), "terminal.fontSize"),
+            (serde_json::json!({"fontSize": "16"}), "terminal.fontSize"),
+            (
+                serde_json::json!({"fontFamily": "Fira\nCode"}),
+                "terminal.fontFamily",
+            ),
+            (
+                serde_json::json!({"fontFamily": "x".repeat(4097)}),
+                "terminal.fontFamily",
+            ),
+            (serde_json::json!({"fontFamily": 3}), "terminal.fontFamily"),
+        ] {
+            let err = update_at(&path, serde_json::json!({ "terminal": patch })).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidField { field: ref actual, .. } if actual == field),
+                "{err}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), saved);
+        }
+        // The default family is empty again.
+        let cleared = update_at(&path, serde_json::json!({"terminal": {"fontFamily": ""}}));
+        assert_eq!(cleared.unwrap().terminal.font_family, "");
+
+        // A stored value outside the limits falls back to the default.
+        fs::write(
+            &path,
+            "[terminal]\nfont_size = 99\nfont_family = \"Bad\\u0007Name\"\n",
+        )
+        .unwrap();
+        let repaired = load_from(&path);
+        assert_eq!(repaired.terminal.font_size, 14);
+        assert_eq!(repaired.terminal.font_family, "");
     }
 
     #[test]

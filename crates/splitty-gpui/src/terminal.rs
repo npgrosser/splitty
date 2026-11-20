@@ -143,6 +143,7 @@ use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::keymap::Command as KeyCommand;
 use std::{
+    cell::RefCell,
     collections::HashMap,
     ops::Range,
     sync::Arc,
@@ -161,11 +162,21 @@ const SIZE_REPORT_HOLD: Duration = Duration::from_millis(120);
 /// How long a program's synchronized update (DEC private mode 2026) may keep
 /// its output from the screen, counted from the moment it began.
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
-/// The web client's terminal font size; display zoom scales it.
-pub(crate) const BASE_FONT_SIZE: f32 = 14.;
-/// Provisional row height until layout measures the face: rows use the
-/// font's own ascent and descent, as the web client's line height of 1.0.
+/// The terminal text size of settings that name none; display zoom scales
+/// the configured size.
+pub(crate) const BASE_FONT_SIZE: f32 =
+    splitty_client_core::appearance::DEFAULT_TERMINAL_FONT_SIZE as f32;
+/// Provisional row height at the base size until layout measures the face:
+/// rows use the font's own ascent and descent, as the web client's line
+/// height of 1.0.
 const BASE_LINE_HEIGHT: f32 = 18.;
+/// Provisional cell width at the base size until layout measures the face.
+const BASE_CELL_WIDTH: f32 = 9.;
+/// A character Unicode never assigns, which no font has a glyph for.
+const NO_CHARACTER: char = '\u{10FFFF}';
+/// How many characters a terminal remembers the face of before it starts
+/// over; a screen of text holds far fewer distinct ones.
+const MAX_REMEMBERED_FACES: usize = 4096;
 const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
@@ -173,12 +184,14 @@ const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
 /// the link: the common platform default for a double click.
 const LINK_CLICK_DELAY: Duration = Duration::from_millis(500);
 
-/// The terminal face: the web client's bundled font, or Kit's monospace
-/// family when that font cannot be registered.
+/// The bundled terminal face, or Kit's monospace family when that font
+/// cannot be registered. Terminals draw in it unless a setting or the theme
+/// chooses another family, and draw the glyphs that family lacks in it.
 struct TerminalFamily(SharedString);
 impl Global for TerminalFamily {}
 
-/// The terminal face's family, also used by chrome that shows text in it.
+/// The bundled terminal face's family, also used by chrome that shows text
+/// in it, whichever family the terminals draw in.
 pub(crate) fn terminal_family(cx: &App) -> SharedString {
     cx.try_global::<TerminalFamily>().map_or_else(
         || {
@@ -477,6 +490,56 @@ impl RenderOnce for TerminalPresentation {
     }
 }
 
+/// What a terminal draws text in: a family other than the bundled terminal
+/// font, or `None` for that font, and the size in pixels before zoom.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TerminalFont {
+    pub family: Option<SharedString>,
+    pub size: f32,
+}
+
+impl Default for TerminalFont {
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: BASE_FONT_SIZE,
+        }
+    }
+}
+
+/// The bundled face where a terminal draws another family, and per character
+/// whether it draws that character in it.
+struct FallbackFace {
+    face: Font,
+    chosen: RefCell<HashMap<char, bool>>,
+}
+
+impl FallbackFace {
+    fn new(face: Font) -> Self {
+        Self {
+            face,
+            chosen: RefCell::default(),
+        }
+    }
+}
+
+/// The face of `font` and, for a family other than the bundled one, the
+/// bundled face that draws the glyphs that family lacks.
+fn terminal_faces(font: &TerminalFont, bundled: SharedString) -> (Font, Option<FallbackFace>) {
+    match &font.family {
+        Some(family) if *family != bundled => {
+            let mut face = gpui_kit::font(family.clone());
+            // The Linux text system takes the bundled font as a fallback
+            // family per character, also within a cell; the other platforms
+            // look fallback families up only among installed fonts, so
+            // `cell_face` chooses the bundled face per cell there.
+            face.fallbacks = Some(FontFallbacks::from_fonts(vec![bundled.to_string()]));
+            (face, Some(FallbackFace::new(gpui_kit::font(bundled))))
+        }
+        _ => (gpui_kit::font(bundled), None),
+    }
+}
+
 /// One desired terminal scale. Cell width becomes authoritative only after a
 /// visible layout measures the current font on the current display.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -488,19 +551,26 @@ struct TerminalMetrics {
 }
 
 impl TerminalMetrics {
-    /// `scale` is the zoom's, within the levels of the local service.
-    fn new(scale: f32) -> Self {
+    /// `size` is the configured text size in pixels, `scale` the zoom's,
+    /// within the levels of the local service.
+    fn new(size: f32, scale: f32) -> Self {
         let scale = if scale.is_finite() && scale > 0. {
             scale
         } else {
             1.
         };
+        let size = if size.is_finite() && size > 0. {
+            size
+        } else {
+            BASE_FONT_SIZE
+        };
+        let relative = size / BASE_FONT_SIZE * scale;
         Self {
             scale,
-            font_size: px(BASE_FONT_SIZE * scale),
-            line_height: px(BASE_LINE_HEIGHT * scale),
+            font_size: px(size * scale),
+            line_height: px(BASE_LINE_HEIGHT * relative),
             // This value is provisional until layout measures the actual face.
-            cell_width: px(9. * scale),
+            cell_width: px(BASE_CELL_WIDTH * relative),
         }
     }
 
@@ -749,7 +819,12 @@ pub struct Terminal {
     /// The engine holds the frame from before a synchronized update: this
     /// releases it when that update, known by its number, takes too long.
     held_frame_release: Option<(u64, Task<()>)>,
+    /// The family and size asked for; `face` and `fallback_face` follow it.
+    font: TerminalFont,
     face: Font,
+    /// The bundled face where `face` is another family: it draws the
+    /// characters `face` has no glyph for.
+    fallback_face: Option<FallbackFace>,
     /// The emulator's grid: the session's PTY size when its server decides
     /// sizes and told it, else the pane's.
     size: Size,
@@ -816,6 +891,9 @@ impl Terminal {
         cx: &mut Context<Self>,
     ) -> Self {
         let size = Size { cols: 80, rows: 24 };
+        let font = TerminalFont::default();
+        // GPUI font lookup takes concrete family names, not CSS generic families.
+        let (face, fallback_face) = terminal_faces(&font, terminal_family(cx));
         let (engine, status) = match Engine::new(size.cols, size.rows) {
             Ok(engine) => (Some(engine), "Connecting…".into()),
             Err(error) => (None, format!("Terminal engine: {error:#}")),
@@ -826,7 +904,7 @@ impl Terminal {
             command_error: None,
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
-            metrics: TerminalMetrics::new(1.),
+            metrics: TerminalMetrics::new(font.size, 1.),
             geometry_ready: false,
             presentation_epoch: 0,
             display_scale: 1.,
@@ -834,8 +912,9 @@ impl Terminal {
             size_report_hold: None,
             resized_pixel_cell: None,
             held_frame_release: None,
-            // GPUI font lookup takes concrete family names, not CSS generic families.
-            face: font(terminal_family(cx)),
+            font,
+            face,
+            fallback_face,
             size,
             pane_size: size,
             pty: None,
@@ -944,10 +1023,35 @@ impl Terminal {
     /// Stage the confirmed scale. The next visible layout measures the font
     /// before any painting, hit testing or PTY size claim uses new geometry.
     pub fn set_zoom(&mut self, scale: f32, cx: &mut Context<Self>) {
-        let metrics = TerminalMetrics::new(scale);
+        let metrics = TerminalMetrics::new(self.font.size, scale);
         if self.metrics.scale == metrics.scale {
             return;
         }
+        self.restage(metrics, cx);
+    }
+
+    /// Stage another family or size, with the zoom's `scale` for that size.
+    /// As after `set_zoom`, the next visible layout measures the face before
+    /// any painting, hit testing or PTY size claim uses the new geometry,
+    /// and the PTY learns a grid size that changed.
+    pub(crate) fn set_font(&mut self, font: TerminalFont, scale: f32, cx: &mut Context<Self>) {
+        let metrics = TerminalMetrics::new(font.size, scale);
+        if self.font == font && self.metrics.scale == metrics.scale {
+            return;
+        }
+        if self.font != font {
+            (self.face, self.fallback_face) = terminal_faces(&font, terminal_family(cx));
+            self.font = font;
+        }
+        self.restage(metrics, cx);
+    }
+
+    #[cfg(all(test, feature = "ui-test-support"))]
+    pub(crate) fn ui_test_font(&self) -> (&Font, Pixels) {
+        (&self.face, self.metrics.font_size)
+    }
+
+    fn restage(&mut self, metrics: TerminalMetrics, cx: &mut Context<Self>) {
         self.cancel_pointer();
         self.metrics = metrics;
         self.geometry_ready = false;
@@ -964,7 +1068,7 @@ impl Terminal {
     /// the next layout as after `set_zoom`; the PTY learns its size once no
     /// further step came for a moment, so a burst costs one resize.
     pub fn step_zoom(&mut self, scale: f32, cx: &mut Context<Self>) {
-        if self.metrics.scale == TerminalMetrics::new(scale).scale {
+        if self.metrics.scale == TerminalMetrics::new(self.font.size, scale).scale {
             return;
         }
         self.set_zoom(scale, cx);
@@ -2513,7 +2617,10 @@ impl Terminal {
             if needs_shape(self.row_cache.get(&id), row.dirty, full_dirty) {
                 let cached = shape_row(
                     &mut row,
-                    &self.face,
+                    RowFaces {
+                        face: &self.face,
+                        fallback: self.fallback_face.as_ref(),
+                    },
                     geometry.metrics,
                     base,
                     SelectionColors {
@@ -2739,13 +2846,14 @@ fn needs_shape(cached: Option<&CachedRow>, row_dirty: bool, full_dirty: bool) ->
 
 fn shape_row(
     row: &mut Row<'_>,
-    face: &Font,
+    faces: RowFaces<'_>,
     metrics: TerminalMetrics,
     base_background: u32,
     selection: SelectionColors,
     window: &mut Window,
     frame: usize,
 ) -> Result<CachedRow> {
+    let face = faces.face;
     let mut cached = CachedRow {
         last_frame: frame,
         backgrounds: Vec::new(),
@@ -2819,6 +2927,7 @@ fn shape_row(
         } else {
             flush_ascii(&mut pending, &mut cached.runs, face, metrics, window);
             if visible {
+                let face = faces.cell_face(cell.text, window);
                 cached.runs.push(ShapedRun {
                     col: cell.col,
                     line: shape_text(cell.text, style, face, metrics.font_size, None, window),
@@ -2828,6 +2937,58 @@ fn shape_row(
     }
     flush_ascii(&mut pending, &mut cached.runs, face, metrics, window);
     Ok(cached)
+}
+
+/// The face a row is shaped in, and the bundled face for the glyphs it lacks.
+#[derive(Clone, Copy)]
+struct RowFaces<'a> {
+    face: &'a Font,
+    fallback: Option<&'a FallbackFace>,
+}
+
+impl<'a> RowFaces<'a> {
+    /// The face a cell of other than ASCII text is drawn in: the bundled
+    /// face where the chosen one has no glyph for the cell's character and
+    /// the bundled one has, as for the Nerd Font symbols; otherwise the
+    /// chosen face, whose platform fallback draws what neither has.
+    fn cell_face(self, text: &str, window: &Window) -> &'a Font {
+        let (Some(fallback), Some(ch)) = (self.fallback, text.chars().next()) else {
+            return self.face;
+        };
+        let mut chosen = fallback.chosen.borrow_mut();
+        if chosen.len() >= MAX_REMEMBERED_FACES && !chosen.contains_key(&ch) {
+            chosen.clear();
+        }
+        let bundled = *chosen.entry(ch).or_insert_with(|| {
+            !has_glyph(self.face, ch, window) && has_glyph(&fallback.face, ch, window)
+        });
+        if bundled {
+            &fallback.face
+        } else {
+            self.face
+        }
+    }
+}
+
+/// Whether `face` itself has a glyph for `ch`.
+fn has_glyph(face: &Font, ch: char, window: &Window) -> bool {
+    let text = window.text_system();
+    let id = text.resolve_font(face);
+    let size = px(BASE_FONT_SIZE);
+    glyph_present(text.typographic_bounds(id, size, ch).ok(), || {
+        text.typographic_bounds(id, size, NO_CHARACTER).ok()
+    })
+}
+
+/// Whether a lookup that found these bounds found a glyph. The Linux and
+/// macOS text systems answer a missing glyph with an error; the Windows one
+/// answers with the glyph that stands for missing ones, whose bounds are
+/// those of a character no font has.
+fn glyph_present(
+    bounds: Option<Bounds<Pixels>>,
+    missing: impl FnOnce() -> Option<Bounds<Pixels>>,
+) -> bool {
+    bounds.is_some_and(|bounds| missing() != Some(bounds))
 }
 
 fn push_background(spans: &mut Vec<BackgroundSpan>, col: u16, width: u16, color: u32) {
@@ -4279,6 +4440,72 @@ mod presentation_tests {
         });
     }
 
+    /// settings, Native Terminal Font Application, Live change: another
+    /// family and size are measured in the next frame and the PTY learns
+    /// the grid that fits, without a new session.
+    #[test]
+    fn a_font_change_is_measured_and_reports_the_grid_that_fits() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                view.read(cx).terminal.clone()
+            });
+            let resizes = || {
+                commands
+                    .borrow()
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::Resize(cols, rows) => Some((*cols, *rows)),
+                        Command::Input { .. } | Command::TakeOver => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let (grid, generation) = window.update(|_, cx| {
+                let terminal = terminal.read(cx);
+                (terminal.size, terminal.generation)
+            });
+            let before = resizes();
+            let font = super::TerminalFont {
+                family: Some("Other Mono".into()),
+                size: 28.,
+            };
+            window.update(|window, cx| {
+                terminal.update(cx, |terminal, cx| terminal.set_font(font.clone(), 1., cx));
+                window.draw(cx).clear(cx);
+                let terminal = terminal.read(cx);
+                assert!(terminal.geometry_ready);
+                let (face, size) = terminal.ui_test_font();
+                assert_eq!((face.family.as_ref(), size), ("Other Mono", px(28.)));
+                assert!(terminal.fallback_face.is_some());
+                assert!(terminal.size.cols < grid.cols && terminal.size.rows < grid.rows);
+                assert_eq!(terminal.generation, generation, "the same session");
+                assert!(terminal.engine_ready());
+            });
+            let fitted = window.update(|_, cx| terminal.read(cx).size);
+            let mut expected = before;
+            expected.push((fitted.cols, fitted.rows));
+            assert_eq!(resizes(), expected, "the PTY learns the new grid at once");
+            // The same font again changes nothing; zoom scales the size.
+            window.update(|window, cx| {
+                terminal.update(cx, |terminal, cx| terminal.set_font(font.clone(), 1., cx));
+                window.draw(cx).clear(cx);
+            });
+            assert_eq!(resizes(), expected);
+            window.update(|window, cx| {
+                terminal.update(cx, |terminal, cx| terminal.set_zoom(0.5, cx));
+                window.draw(cx).clear(cx);
+                assert_eq!(terminal.read(cx).ui_test_font().1, px(14.));
+                terminal.update(cx, |terminal, cx| {
+                    terminal.set_font(super::TerminalFont::default(), 1., cx)
+                });
+                window.draw(cx).clear(cx);
+                let terminal = terminal.read(cx);
+                assert_eq!(terminal.size, grid, "back to the bundled face and size");
+                assert!(terminal.fallback_face.is_none());
+            });
+        });
+    }
+
     #[test]
     fn outgoing_painter_rejects_obsolete_geometry_and_rebound_entities() {
         with_view(|window, view, commands| {
@@ -4323,9 +4550,10 @@ mod presentation_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_wheel_input, each_unselected_segment, engine_mouse_button, link_gesture,
-        link_modifier, mouse_modifiers, needs_shape, wheel_button, wheel_lines, wheel_route,
-        CachedRow, LinkGesture, PointerGestures, PointerRoute, TerminalMetrics, WheelRoute,
+        alternate_wheel_input, each_unselected_segment, engine_mouse_button, glyph_present,
+        link_gesture, link_modifier, mouse_modifiers, needs_shape, terminal_faces, wheel_button,
+        wheel_lines, wheel_route, CachedRow, LinkGesture, PointerGestures, PointerRoute,
+        TerminalFont, TerminalMetrics, WheelRoute,
     };
     use crate::terminal_engine::{
         Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
@@ -4335,7 +4563,7 @@ mod tests {
     #[test]
     fn scaled_text_grid_and_hit_cells_share_the_same_metrics() {
         for (scale, font, row) in [(0.5, 7., 9.), (1.25, 17.5, 22.5), (3., 42., 54.)] {
-            let mut metrics = TerminalMetrics::new(scale);
+            let mut metrics = TerminalMetrics::new(super::BASE_FONT_SIZE, scale);
             metrics.cell_width = px(9. * scale);
             assert_eq!(f32::from(metrics.font_size), font);
             assert_eq!(f32::from(metrics.line_height), row);
@@ -4353,7 +4581,7 @@ mod tests {
 
     #[test]
     fn leftover_space_is_split_evenly_without_changing_the_grid() {
-        let mut metrics = TerminalMetrics::new(1.);
+        let mut metrics = TerminalMetrics::new(super::BASE_FONT_SIZE, 1.);
         metrics.cell_width = px(10.);
         metrics.line_height = px(20.);
         let bounds = Bounds::new(point(px(100.), px(50.)), size(px(105.), px(47.)));
@@ -4374,8 +4602,9 @@ mod tests {
 
     #[test]
     fn pixel_cell_change_refreshes_vt_even_when_grid_dimensions_match() {
-        let baseline = TerminalMetrics::new(1.);
-        let enlarged = TerminalMetrics::new(1.25);
+        let new = |scale| TerminalMetrics::new(super::BASE_FONT_SIZE, scale);
+        let baseline = new(1.);
+        let enlarged = new(1.25);
         let small_bounds = (px(20.), px(20.));
         assert_eq!(
             baseline.grid_size(small_bounds.0, small_bounds.1),
@@ -4383,17 +4612,77 @@ mod tests {
         );
         assert_ne!(baseline.pixel_cell(1.), enlarged.pixel_cell(1.));
         assert_ne!(baseline.pixel_cell(1.), baseline.pixel_cell(1.5));
-        assert_eq!(TerminalMetrics::new(f32::NAN).scale, 1.);
+        assert_eq!(new(f32::NAN).scale, 1.);
         // display-zoom, Levels from the server: the levels bound the zoom,
         // not the metrics, so a level beyond 300 % is shown.
-        assert_eq!(TerminalMetrics::new(4.).scale, 4.);
-        assert_eq!(
-            TerminalMetrics::new(4.).font_size,
-            px(super::BASE_FONT_SIZE * 4.)
-        );
+        assert_eq!(new(4.).scale, 4.);
+        assert_eq!(new(4.).font_size, px(super::BASE_FONT_SIZE * 4.));
         for invalid in [0., -1., f32::INFINITY] {
-            assert_eq!(TerminalMetrics::new(invalid).scale, 1.);
+            assert_eq!(new(invalid).scale, 1.);
         }
+    }
+
+    /// settings, Native Terminal Font Application: the configured size is
+    /// the size zoom scales, and the provisional cell follows it until the
+    /// face is measured.
+    #[test]
+    fn metrics_scale_the_configured_size() {
+        let sized = TerminalMetrics::new(18., 1.);
+        assert_eq!(
+            (sized.scale, sized.font_size, sized.line_height),
+            (1., px(18.), px(18. * 18. / 14.))
+        );
+        let zoomed = TerminalMetrics::new(20., 1.5);
+        assert_eq!((zoomed.scale, zoomed.font_size), (1.5, px(30.)));
+        assert_eq!(zoomed.cell_width, px(9. * 20. / 14. * 1.5));
+        // A size no setting holds is the base size.
+        for invalid in [0., -3., f32::NAN] {
+            assert_eq!(
+                TerminalMetrics::new(invalid, 1.),
+                TerminalMetrics::new(super::BASE_FONT_SIZE, 1.)
+            );
+        }
+    }
+
+    /// settings, Native Terminal Font Application, Glyph the chosen family
+    /// lacks: a missing glyph is an error on Linux and macOS and the
+    /// stand-in for missing glyphs on Windows.
+    #[test]
+    fn a_glyph_counts_as_present_unless_it_is_missing_or_the_stand_in() {
+        let bounds = |width: f32| Some(Bounds::new(point(px(0.), px(0.)), size(px(width), px(9.))));
+        assert!(!glyph_present(None, || bounds(5.)));
+        assert!(!glyph_present(bounds(5.), || bounds(5.)), "the stand-in");
+        assert!(glyph_present(bounds(7.), || bounds(5.)));
+        assert!(glyph_present(bounds(7.), || None));
+    }
+
+    #[test]
+    fn a_family_other_than_the_bundled_one_falls_back_to_it() {
+        let bundled = gpui_kit::SharedString::from("Bundled Mono");
+        let (face, fallback) = terminal_faces(&TerminalFont::default(), bundled.clone());
+        assert_eq!(
+            (face.family.as_ref(), face.fallbacks),
+            ("Bundled Mono", None)
+        );
+        assert!(fallback.is_none());
+        let same = TerminalFont {
+            family: Some(bundled.clone()),
+            size: 18.,
+        };
+        assert!(terminal_faces(&same, bundled.clone()).1.is_none());
+        let other = TerminalFont {
+            family: Some("Fira Code".into()),
+            size: 18.,
+        };
+        let (face, fallback) = terminal_faces(&other, bundled);
+        assert_eq!(face.family.as_ref(), "Fira Code");
+        assert_eq!(
+            face.fallbacks
+                .as_ref()
+                .map(|fallbacks| fallbacks.fallback_list()),
+            Some(&["Bundled Mono".to_owned()][..])
+        );
+        assert_eq!(fallback.unwrap().face.family.as_ref(), "Bundled Mono");
     }
 
     #[test]

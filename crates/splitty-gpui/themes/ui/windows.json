@@ -44,7 +44,8 @@
           "buttons": "wide"
         },
         "font-size": 13.0,
-        "font-family": "\"Segoe UI Variable Text\", \"Segoe UI Variable\", \"Segoe UI\", Selawik, system-ui, sans-serif"
+        "font-family": "\"Segoe UI Variable Text\", \"Segoe UI Variable\", \"Segoe UI\", Selawik, system-ui, sans-serif",
+        "terminal-font-family": "\"Cascadia Mono\", \"Cascadia Code\""
       },
       "colors": {
         "accent.background": "#2d2d2d",
@@ -209,7 +210,8 @@
           "buttons": "wide"
         },
         "font-size": 13.0,
-        "font-family": "\"Segoe UI Variable Text\", \"Segoe UI Variable\", \"Segoe UI\", Selawik, system-ui, sans-serif"
+        "font-family": "\"Segoe UI Variable Text\", \"Segoe UI Variable\", \"Segoe UI\", Selawik, system-ui, sans-serif",
+        "terminal-font-family": "\"Cascadia Mono\", \"Cascadia Code\""
       },
       "colors": {
         "accent.background": "#e3e3e3",

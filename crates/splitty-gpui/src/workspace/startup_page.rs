@@ -316,6 +316,8 @@ mod view_tests {
             terminal_theme: "default".into(),
             terminal_theme_dark: "default".into(),
             terminal_theme_light: "default".into(),
+            terminal_font_family: String::new(),
+            terminal_font_size: 18,
         };
         AppearanceMemory::open(path.clone())
             .remember(remembered.clone())
@@ -335,6 +337,7 @@ mod view_tests {
                 assert_eq!(appearance.scheme, ColorScheme::Light);
                 assert_ne!(appearance.surface, fallback);
                 assert_eq!(appearance.zoom.level(), 1.25);
+                assert_eq!(appearance.terminal_font_size, 18.);
                 assert!(!cx.theme().mode.is_dark());
             });
 
@@ -351,6 +354,7 @@ mod view_tests {
                 let appearance = view.read(cx).appearance();
                 assert_eq!(appearance.scheme, ColorScheme::Dark);
                 assert_eq!(appearance.zoom.level(), 1.);
+                assert_eq!(appearance.terminal_font_size, 14.);
             });
             assert_eq!(
                 AppearanceMemory::open(path.clone()).stored(),

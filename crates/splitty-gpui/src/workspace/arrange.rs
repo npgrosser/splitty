@@ -298,11 +298,8 @@ impl Workspace {
 
     /// The width or height of one terminal cell at the terminals' zoom.
     fn arrange_cell(&self, horizontal: bool) -> f32 {
-        let font = terminal::BASE_FONT_SIZE
-            * self
-                .appearance
-                .zoom
-                .terminal_scale(terminal::BASE_FONT_SIZE);
+        let size = self.appearance.terminal_font_size;
+        let font = size * self.appearance.zoom.terminal_scale(size);
         font * if horizontal { CELL_EM.0 } else { CELL_EM.1 }
     }
 

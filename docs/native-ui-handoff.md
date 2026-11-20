@@ -141,9 +141,10 @@ provisional choices are NSP-1 to NSP-3 in `openspec/open-decisions.md`.
 The page is drawn in the appearance the last window applied. The settings
 live with the local service, on Windows inside the WSL distribution, so the
 app keeps the selection it applied (UI theme mode and names, interface font,
-zoom, terminal palette names) in `last-appearance.json` in the configuration
-directory of the computer it runs on, on Windows `%APPDATA%\splitty\`
-(`AppearanceMemory` in `splitty-client-core`'s `appearance/remembered.rs`).
+zoom, terminal palette names, terminal font and size) in `last-appearance.json`
+in the configuration directory of the computer it runs on, on Windows
+`%APPDATA%\splitty\` (`AppearanceMemory` in `splitty-client-core`'s
+`appearance/remembered.rs`).
 `Workspace::new` resolves it in the theme catalog while the window is built
 (`remember_appearance`), and every applied snapshot of the local service
 rewrites the file when its selection differs. The file is no setting: no
@@ -229,6 +230,21 @@ window buttons. `appearance/titlebar.rs` resolves geometry and color sources;
 interface's System profile follows desktop light/dark and typography while
 preserving the saved named theme and font choices. See
 [themes](themes.md#native-appearance-and-window-decoration).
+
+Terminal text has its own font: `NativeAppearance::resolve` chooses the
+installed family of the `terminal.fontFamily` setting, else of the UI theme's
+`terminal-font-family`, else none (the bundled font), and takes
+`terminal.fontSize`. `Workspace::apply_terminal_font` hands both to every
+`Terminal::set_font`, which restages like a zoom change: the next layout
+measures the face and the PTY learns a grid that changed; zoom scales the
+configured size. A face other than the bundled one carries the bundled font as
+its fallback family, which GPUI's Linux text system honors per character. The
+Windows and macOS text systems look fallback families up only among installed
+fonts, not among fonts the app registered, so `shape_row` also draws a non-ASCII
+cell in the bundled face where the chosen face has no glyph and the bundled
+one has (`cell_face`; on Windows a missing glyph is the `.notdef` glyph, told
+apart by its bounds). Chrome that shows text in the terminal face (viewer,
+notes, drawer, program status) keeps the bundled font.
 
 The GNOME decoration profile uses libadwaita header metrics: 34px hit targets,
 3px control spacing, 24px circular faces, original 16px symbolic canvases and a

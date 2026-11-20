@@ -41,6 +41,8 @@ const TERMINAL: &[SettingsField] = &[
     SettingsField::TerminalTheme,
     SettingsField::TerminalThemeDark,
     SettingsField::TerminalThemeLight,
+    SettingsField::TerminalFontFamily,
+    SettingsField::TerminalFontSize,
     SettingsField::CloseOnExit,
     SettingsField::ScrollToBottom,
 ];
@@ -65,6 +67,14 @@ const NOTIFICATIONS: &[SettingsField] = &[
     SettingsField::NotificationProcessCrashed,
     SettingsField::NotificationProgramStatus,
 ];
+
+/// A field that names an installed font family, empty for its default.
+fn is_font_family(field: SettingsField) -> bool {
+    matches!(
+        field,
+        SettingsField::FontFamily | SettingsField::TerminalFontFamily
+    )
+}
 
 fn is_switch(field: SettingsField) -> bool {
     matches!(
@@ -145,7 +155,7 @@ impl Section {
     fn description(self) -> &'static str {
         match self {
             Self::Appearance => "Interface colors, type and display scale",
-            Self::Terminal => "Terminal colors and exit behavior",
+            Self::Terminal => "Terminal colors, font and exit behavior",
             Self::Workspace => "Drawer placement and size",
             Self::Remote => "Hosts and their ports",
             Self::Notifications => "Activity from other terminals",
@@ -293,7 +303,7 @@ impl SettingsView {
             }
             let select = cx.new(|cx| {
                 SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx)
-                    .searchable(field.is_theme() || field == SettingsField::FontFamily)
+                    .searchable(field.is_theme() || is_font_family(field))
             });
             subscriptions.push(cx.subscribe_in(
                 &select,
@@ -819,7 +829,7 @@ impl SettingsView {
             | SettingsField::TerminalTheme
             | SettingsField::TerminalThemeDark
             | SettingsField::TerminalThemeLight => None,
-            SettingsField::FontFamily => {
+            SettingsField::FontFamily | SettingsField::TerminalFontFamily => {
                 let mut fonts = self
                     .available_fonts
                     .iter()
@@ -867,40 +877,41 @@ impl SettingsView {
             | SettingsField::TabsCloseButton => snapshot
                 .choices(field)
                 .map(|choices| choices.iter().cloned().map(SettingsValue::Text).collect()),
-            SettingsField::FontSize | SettingsField::Zoom | SettingsField::DrawerWidth => {
-                snapshot.limits(field).and_then(|limits| {
-                    if !limits.values().is_empty() {
-                        return Some(
-                            limits
-                                .values()
-                                .iter()
-                                .copied()
-                                .map(SettingsValue::Number)
-                                .collect(),
-                        );
-                    }
-                    let (min, max, step) = (limits.min()?, limits.max()?, limits.step()?);
-                    if !min.is_finite()
-                        || !max.is_finite()
-                        || !step.is_finite()
-                        || step <= 0.
-                        || max < min
-                        || (max - min) / step > 100.
-                    {
-                        return None;
-                    }
-                    let count = ((max - min) / step).round() as usize;
-                    Some(
-                        (0..=count)
-                            .map(|index| {
-                                SettingsValue::Number(
-                                    ((min + step * index as f64) * 1000.).round() / 1000.,
-                                )
-                            })
+            SettingsField::FontSize
+            | SettingsField::TerminalFontSize
+            | SettingsField::Zoom
+            | SettingsField::DrawerWidth => snapshot.limits(field).and_then(|limits| {
+                if !limits.values().is_empty() {
+                    return Some(
+                        limits
+                            .values()
+                            .iter()
+                            .copied()
+                            .map(SettingsValue::Number)
                             .collect(),
-                    )
-                })
-            }
+                    );
+                }
+                let (min, max, step) = (limits.min()?, limits.max()?, limits.step()?);
+                if !min.is_finite()
+                    || !max.is_finite()
+                    || !step.is_finite()
+                    || step <= 0.
+                    || max < min
+                    || (max - min) / step > 100.
+                {
+                    return None;
+                }
+                let count = ((max - min) / step).round() as usize;
+                Some(
+                    (0..=count)
+                        .map(|index| {
+                            SettingsValue::Number(
+                                ((min + step * index as f64) * 1000.).round() / 1000.,
+                            )
+                        })
+                        .collect(),
+                )
+            }),
         };
         values
             .unwrap_or_default()
@@ -1395,6 +1406,8 @@ fn field_label(field: SettingsField) -> &'static str {
         SettingsField::TerminalTheme => "Terminal colors",
         SettingsField::TerminalThemeDark => "Terminal colors, dark",
         SettingsField::TerminalThemeLight => "Terminal colors, light",
+        SettingsField::TerminalFontFamily => "Terminal font",
+        SettingsField::TerminalFontSize => "Terminal font size",
         SettingsField::CloseOnExit => "Close on exit",
         SettingsField::ScrollToBottom => "Scroll to bottom",
         SettingsField::DrawerPinned => "Show drawer",
@@ -1451,6 +1464,10 @@ fn field_description(field: SettingsField) -> &'static str {
         SettingsField::TerminalTheme => "One palette, or one for each mode of the interface theme",
         SettingsField::TerminalThemeDark => "Used with a dark interface theme",
         SettingsField::TerminalThemeLight => "Used with a light interface theme",
+        SettingsField::TerminalFontFamily => {
+            "An installed font; Default is the theme's terminal font or the bundled one"
+        }
+        SettingsField::TerminalFontSize => "Terminal text before display zoom",
         SettingsField::CloseOnExit => "When a terminal session ends",
         SettingsField::ScrollToBottom => {
             "Show a control that returns to the newest output while scrolled up"
@@ -1490,6 +1507,11 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
         SettingsValue::Text(text) if field == SettingsField::FontFamily && text.is_empty() => {
             "Theme default".into()
         }
+        SettingsValue::Text(text)
+            if field == SettingsField::TerminalFontFamily && text.is_empty() =>
+        {
+            "Default".into()
+        }
         SettingsValue::Text(text) if field == SettingsField::TerminalTheme && text == "default" => {
             "By interface mode".into()
         }
@@ -1521,7 +1543,12 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
         SettingsValue::Number(number) if field == SettingsField::FontSize && *number == 0. => {
             "Theme default".into()
         }
-        SettingsValue::Number(number) if field == SettingsField::FontSize => {
+        SettingsValue::Number(number)
+            if matches!(
+                field,
+                SettingsField::FontSize | SettingsField::TerminalFontSize
+            ) =>
+        {
             format!("{number:.0} px")
         }
         SettingsValue::Number(number) if field == SettingsField::DrawerWidth => {
@@ -1857,6 +1884,128 @@ mod tests {
                 state.choices[&SettingsField::TerminalTheme].len()
             );
         });
+    }
+
+    /// settings, Experimental Native Settings Editor, Supported controls and
+    /// reset: the terminal font rows offer the default and the installed
+    /// families, the server's sizes, and reset to its defaults; settings,
+    /// Native Terminal Font Choice, Older local service: without metadata
+    /// they are not edited.
+    #[test]
+    fn the_terminal_page_offers_the_installed_fonts_and_the_servers_sizes() {
+        use splitty_client_core::appearance::test_support::settings_snapshot_with_terminal;
+        let mut cx = TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let (view, window) = cx.add_window_view(|window, cx| {
+            SettingsView::new(
+                Rc::new(ThemeCatalog::load(None)),
+                vec!["Test Mono".into(), "Other Sans".into()],
+                gpui_kit::WeakEntity::new_invalid(),
+                window,
+                cx,
+            )
+        });
+        let owner = Uuid::new_v4();
+        window.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.set_owner(owner, window, cx);
+                view.section = super::Section::Terminal;
+            });
+        });
+        let family = SettingsField::TerminalFontFamily;
+        let size = SettingsField::TerminalFontSize;
+        show(
+            &view,
+            window,
+            settings_snapshot(owner, 1, Availability::MissingMetadata),
+        );
+        window.update(|_, cx| {
+            let state = view.read(cx);
+            assert!(!state.enabled(family) && !state.enabled(size));
+            assert_eq!(state.value(size), Some(SettingsValue::Number(14.)));
+        });
+        show(
+            &view,
+            window,
+            settings_snapshot_with_terminal(
+                owner,
+                2,
+                serde_json::json!({"fontFamily": "Test Mono", "fontSize": 16}),
+                serde_json::json!({}),
+            ),
+        );
+        assert!(window
+            .debug_bounds("settings-control-terminal.fontFamily")
+            .is_some());
+        assert!(window
+            .debug_bounds("settings-control-terminal.fontSize")
+            .is_some());
+        window.update(|_, cx| {
+            let state = view.read(cx);
+            assert!(state.enabled(family) && state.enabled(size));
+            assert_eq!(
+                state.choices[&family],
+                vec![
+                    ("Default".to_owned(), SettingsValue::Text(String::new())),
+                    (
+                        "Other Sans".to_owned(),
+                        SettingsValue::Text("Other Sans".into())
+                    ),
+                    (
+                        "Test Mono".to_owned(),
+                        SettingsValue::Text("Test Mono".into())
+                    ),
+                ]
+            );
+            let sizes = &state.choices[&size];
+            assert_eq!(sizes.len(), 25);
+            assert_eq!(sizes[0], ("8 px".to_owned(), SettingsValue::Number(8.)));
+            assert_eq!(sizes[24], ("32 px".to_owned(), SettingsValue::Number(32.)));
+            assert_eq!(
+                state.default_value(family),
+                Some(SettingsValue::Text(String::new()))
+            );
+            assert_eq!(state.default_value(size), Some(SettingsValue::Number(14.)));
+            assert_eq!(
+                state.selects[&family]
+                    .read(cx)
+                    .selected_value()
+                    .map(String::as_str),
+                Some("Test Mono")
+            );
+            assert_eq!(
+                state.selects[&size]
+                    .read(cx)
+                    .selected_value()
+                    .map(String::as_str),
+                Some("16 px")
+            );
+        });
+        // A choice and a reset send the edit of their field.
+        let edits = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = edits.clone();
+        let _recorder = window.update(|_, cx| {
+            cx.subscribe(&view, move |_, event: &super::SettingsEvent, _| {
+                if let super::SettingsEvent::Update { edit, .. } = event {
+                    recorded
+                        .borrow_mut()
+                        .push((edit.field(), edit.value().clone()));
+                }
+            })
+        });
+        window.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.request(size, SettingsValue::Number(20.), cx);
+                view.reset_captured(Some(owner), family, SettingsValue::Text(String::new()), cx);
+            });
+        });
+        assert_eq!(
+            *edits.borrow(),
+            vec![
+                (size, SettingsValue::Number(20.)),
+                (family, SettingsValue::Text(String::new())),
+            ]
+        );
     }
 
     #[test]
