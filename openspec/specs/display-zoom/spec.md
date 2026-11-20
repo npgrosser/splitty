@@ -6,7 +6,7 @@ Display zoom controls how application surfaces and terminal content are enlarged
 ## Requirements
 
 ### Requirement: Zoom Shortcuts
-The client SHALL zoom in with Cmd (macOS) or Ctrl (Linux, Windows) and `+` or `=`, zoom out with `-`, and return to 100 % with `0`, also from a focused terminal, which SHALL NOT receive these keys. The level SHALL move through the levels the `values` of `appearance.zoom` in the server's settings metadata list, to the next listed level above or below the current one, and stay within them; a level between two listed ones moves to its neighbour. The server SHALL list 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250 and 300 %. A native window whose local service lists no levels, with or without metadata, SHALL move through these levels within that service's bounds. The client SHALL briefly show the new level.
+The client SHALL zoom in, zoom out and return to 100 % with the keys bound to its zoom commands (see `key-bindings`), by default Cmd (macOS) or Ctrl (Linux, Windows) with `+` or `=`, with `-`, and with `0`, also from a focused terminal, which SHALL NOT receive these keys. The level SHALL move through the levels the `values` of `appearance.zoom` in the server's settings metadata list, to the next listed level above or below the current one, and stay within them; a level between two listed ones moves to its neighbour. The server SHALL list 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250 and 300 %. A native window whose local service lists no levels, with or without metadata, SHALL move through these levels within that service's bounds. The client SHALL briefly show the new level.
 
 #### Scenario: Zoom in from a terminal
 - **WHEN** a terminal has the focus at 100 % and the user presses Cmd+`+` on macOS

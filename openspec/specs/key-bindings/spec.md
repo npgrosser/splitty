@@ -1,4 +1,9 @@
-## ADDED Requirements
+# key-bindings Specification
+
+## Purpose
+TBD - created by archiving change native-key-bindings. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: Window Commands
 The native window SHALL name every action a key can start as a command with a stable identifier (lowercase words joined by `.` and `-`, such as `screen.next`, `tab.move-left`, `screen.select.3`). Every command other than the palette's own SHALL be reachable from the command palette whether or not a key is bound to it. Wherever the window shows the key of a command (the palette, menus, tooltips, hints, the Keyboard page), it SHALL show the key currently bound, and none for an unbound command. The `--help` text SHALL list the default keys.
