@@ -45,6 +45,15 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **RTS-10:** the Tauri Make targets go without aliases, `uninstall-tauri` included; `docs/development.md` names the files an earlier `make install-tauri` left. Alternative: keep `uninstall-tauri` for a release or two.
   - **RTS-11:** entries of this file that concern only the Tauri shell are removed, as RES-3 did for Electron; `docs/security/findings.md` keeps its entries with a dated note; `deny.toml` keeps `unmaintained = "workspace"` with a comment without Tauri. Alternative: keep the entries marked as moot, or check unmaintained crates for all dependencies.
   - **RTS-12:** CI keeps building the frontend in the macOS job and in `server-payloads.yml` while the server embeds it; `remove-browser-access` removes those steps. Alternative: an empty `frontend/dist` as the release's version-skew job uses.
+- **`expressive-native-themes` ENT-1 to ENT-8** (2026-11-20, provisional, tbd; recorded in the change's design, behavior in the `settings` spec):
+  - **ENT-1:** a theme's title-bar colors follow `titleBarStyle: theme`, its title-bar shape (height, alignment, weight, window buttons, frame corner) follows `windowDecoration: splitty`; NWC-1 stays. Alternative: a theme that names a title-bar shape shows it under system decoration too.
+  - **ENT-2:** the theme's radius bounds every control corner, so the square bundled themes are square throughout. Alternative: keep fixed control radii and let a theme opt in.
+  - **ENT-3:** one fixed 3D edge described by four colors (`bevel`). Alternative: a general border language per element class.
+  - **ENT-4:** the vendored component toolkit is patched to draw the bevel and the field background. Alternative: leave its components flat in a beveled theme.
+  - **ENT-5:** Windows Classic keeps a dark terminal palette under a light interface. Alternative: a light palette, so every bundled theme's palette has its mode.
+  - **ENT-6:** text on a highlight falls back to black or white when the theme's text does not read there. Alternative: require `active-text` and keep the theme's text otherwise.
+  - **ENT-7:** no backdrop material; themes stay opaque. Alternative: a platform backdrop token.
+  - **ENT-8:** themes name installed fonts and none is bundled. Alternative: bundle a face per theme.
 - **`native-window-chrome` NWC-1 to NWC-4** (2026-11-17, provisional, tbd; recorded in the change's design):
   - **NWC-1:** independent interface, decoration, title-bar colors and button policy. Alternative: coupled appearance presets.
   - **NWC-2:** built-in desktop interface profile plus pinned component/renderer support for rounded client silhouettes. Alternatives: GTK integration or waiting for upstream clipping support.

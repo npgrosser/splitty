@@ -13,6 +13,11 @@ Both come with the app and can be added as files.
 - The Splitty themes (Splitty Dark, Splitty Light, Classic, Retro, Aurora, Neon,
   Cozy, the gray variants, Adwaita), each as a UI theme and as a terminal
   palette.
+- The Windows themes, which also change the shape of the interface: Windows 11
+  Dark and Light (soft panels, small control corners, wide window buttons) and
+  Windows Classic (3D edges, square corners, a navy selection, a gradient title
+  bar with boxed window buttons, and a black console as its terminal palette).
+  Their title-bar shape shows with Splitty window decoration; see below.
 - The theme sets of [GPUI Kit](https://github.com/longbridge/gpui-kit)
   (Catppuccin, Gruvbox, Tokyo Night, Solarized, Ayu, Everforest and others).
 - About 270 terminal palettes from
@@ -173,15 +178,76 @@ derived from the theme's colors.
 | `text`, `text-secondary`, `text-muted` | color | `foreground`, `muted.foreground`, a dimmer step of it |
 | `border`, `border-subtle` | color | `border`, `title_bar.border` |
 | `active`, `hover` | color: selected and hovered entries | `accent.background`, halfway to it |
+| `active-text` | color: text on selected entries | `text` where it reads on `active`, else black or white |
+| `menu-hover` | color: the highlighted row of a menu | `hover` |
+| `field` | color: the background of text fields | each field's own background |
 | `accent` | color | `primary.background` |
 | `danger`, `danger-hover`, `success`, `warning` | color | `danger`, a tint of it, `success`, `warning` |
 | `hover-overlay`, `shadow` | `#rrggbbaa`: drop marker fill, menu shadow | text at 6 %, black |
 | `drag-over-border` | `{ "width": 1, "color": "#…" }` or `"none"` | none |
 | `tab-height`, `tab-font-size` | pixels, 16 to 64 and 8 to 24 | 32, 12 |
 | `tab-accent` | `{ "color", "thickness" (0 to 8), "position": "top" or "bottom" }` or `"none"` | none |
-| `radius` | pixels, 0 to 24: menu corners | the theme's `radius` |
+| `radius` | pixels, 0 to 24: corners of menus, panels and dialogs; the largest corner of a control | the theme's `radius` |
+| `control-radius` | pixels, 0 to 24: the largest corner of a control, where it differs | `radius` |
+| `bevel` | `{ "highlight", "light", "shadow", "dark-shadow" }` or `"none"`: 3D edges in place of flat borders | none |
+| `title-bar` | object, see below | the chrome's colors, a centered title |
 | `font-size` | pixels, 8 to 24 | 12 |
 | `font-family` | family list; `system-ui` and `monospace` name the platform's fonts | the system font |
 
 Colors are `#rgb`, `#rrggbb` or `#rrggbbaa`. A value outside these forms or
 ranges keeps its derived value, and the app says so in its status line.
+
+### Shape
+
+A theme shapes the interface with four tokens.
+
+**Corners.** Every control (card, row, button, field) has a corner of its own,
+at most `control-radius`; menus, panels and dialogs use `radius`. With
+`"radius": 0` nothing is rounded except marks that are round by meaning, such as
+status dots.
+
+**Edges.** With a `bevel`, controls are drawn raised, text fields sunken, and
+menus, panels and dialogs framed, each with two lines lit from the top left:
+`highlight` and `light` on the lit sides, `shadow` and `dark-shadow` on the
+others. Separators become grooves. A bevel is square, so set `radius` to 0 with
+it, and make `shadow` transparent if floating surfaces should cast none. The
+components of settings and dialogs follow the same edges and `field`.
+
+```json
+"splitty": {
+  "radius": 0,
+  "field": "#ffffff",
+  "shadow": "#00000000",
+  "bevel": { "highlight": "#ffffff", "light": "#dfdfdf", "shadow": "#808080", "dark-shadow": "#000000" }
+}
+```
+
+**Highlights.** `active-text` is the text of selected entries and `menu-hover`
+the highlighted row of a menu. Text on either stays readable without them.
+
+**Title bar.** `title-bar` describes the title bar the app draws itself:
+
+```json
+"title-bar": {
+  "background": { "from": "#000080", "to": "#1084d0" },
+  "foreground": "#ffffff",
+  "inactive-background": "#808080",
+  "inactive-foreground": "#c0c0c0",
+  "height": 22,
+  "align": "start",
+  "weight": "bold",
+  "buttons": "boxed"
+}
+```
+
+| Key | Value | Applies |
+|---|---|---|
+| `background`, `inactive-background` | color, or `{ "from", "to" }` for a gradient along the bar | with title bar colors set to Match app theme |
+| `foreground`, `inactive-foreground` | color | with title bar colors set to Match app theme |
+| `height` | pixels, 20 to 64 | with Splitty window decoration |
+| `align` | `center` or `start` | with Splitty window decoration |
+| `weight` | `normal`, `medium`, `semibold` or `bold` | with Splitty window decoration |
+| `buttons` | `plain` (symbols with a hover background), `boxed` (small raised buttons) or `wide` (cells as tall as the bar) | with Splitty window decoration |
+
+Each key is read alone: an unsupported one keeps its derived value without
+costing the others.
