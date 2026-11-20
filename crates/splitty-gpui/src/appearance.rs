@@ -1468,7 +1468,7 @@ mod tests {
         // The classic console under a light interface.
         assert_eq!(
             (classic.terminal.background, classic.terminal.foreground),
-            (0x000000, 0xc0c0c0)
+            (0x000000, 0xaaaaaa)
         );
         for (id, scheme) in [
             ("windows-11-dark", ColorScheme::Dark),
