@@ -3,17 +3,13 @@
 its state with the program status protocol (OSC 7501), as agents in Splitty
 terminals can.
 
-  agent plan       works out a plan, has it reviewed with `splitty review PLAN.md`
-                   and revises it when changes are requested
   agent <task>     works on one of the tasks below; it waits at a step until
                    the file ~/.agent/<task>.<event> exists, so a scene decides
                    when it asks or finishes
 """
 import base64
-import os
 import random
 import shutil
-import subprocess
 import sys
 import termios
 import time
@@ -63,10 +59,6 @@ def step(verb: str, what: str, note: str = "", pause: float | None = None):
         rng.uniform(0.35, 0.8) if pause is None else pause)
 
 
-def think(text: str, seconds: float):
-    say(f"  \033[2m{text}\033[0m", seconds)
-
-
 def wait_for(event: str, task: str):
     flag = SIGNALS / f"{task}.{event}"
     while not flag.exists():
@@ -91,53 +83,7 @@ def header(task: str, title: str):
     say(f"\033[2m  task {task} · model local-2 · ~/project\033[0m\n")
 
 
-def plan():
-    header("plan", "plan the search route")
-    status("working", "Planning the search route")
-    step("Read", "src/router.rs", "212 lines", pause=0.4)
-    step("Read", "src/store.rs", "148 lines", pause=0.3)
-    step("Search", "\"fn route\"", "6 matches", pause=0.4)
-    think("No index: a search reads every title.", 0.6)
-    step("Write", "PLAN.md", "+38 lines", pause=0.2)
-    say("")
-    say("\033[1mPlan written.\033[0m Waiting for your review…")
-    status("blocked", "Waiting for a review of PLAN.md", "question")
-    # Shown first, then waited on in the same pane: the viewer has read the
-    # file before the review asks about it.
-    subprocess.run(["splitty", "open", "PLAN.md"], capture_output=True)
-    time.sleep(1.0)
-    answer = subprocess.run(["splitty", "review", "PLAN.md"], capture_output=True, text=True)
-    status("working", "Revising the plan")
-    say("")
-    if answer.returncode == 0:
-        say("\033[32m✓\033[0m Approved. Starting with the route.", 0.6)
-    else:
-        say("\033[33m↺\033[0m Changes requested. Revising the plan…", 0.7)
-        step("Read", "the review", "2 comments", pause=0.5)
-        think("20 per page; index per item.", 0.6)
-        revise(Path("PLAN.md"))
-        step("Edit", "PLAN.md", "+2 −2", pause=0.3)
-    say("")
-    say("\033[1mPLAN.md revised.\033[0m Ready for another look.")
-    status("done", "PLAN.md is revised")
-    # The prompt does not come back, as with an agent that waits for its next task.
-    while True:
-        time.sleep(60)
-
-
-def revise(path: Path):
-    """What the review asked for, applied to the plan."""
-    try:
-        text = path.read_text()
-    except OSError:
-        return
-    text = text.replace("- At most 50 results;", "- At most 20 results;")
-    text = text.replace("The index is rebuilt in full after every write.",
-                        "A write updates the changed item only.")
-    path.write_text(text)
-
-
-# The tasks of the agents in the second clip. An agent works through its
+# The tasks of the agents. An agent works through its
 # steps, round again if the scene needs longer, until an event.
 TASKS = {
     "search": ("add the search route", [
@@ -220,14 +166,12 @@ def finish(title: str):
 
 def main():
     SIGNALS.mkdir(exist_ok=True)
-    name = sys.argv[1] if len(sys.argv) > 1 else "plan"
+    name = sys.argv[1] if len(sys.argv) > 1 else "search"
     try:
-        if name == "plan":
-            plan()
-        elif name in TASKS:
+        if name in TASKS:
             task(name)
         else:
-            sys.exit(f"agent: no task {name}; there are plan, {', '.join(TASKS)}")
+            sys.exit(f"agent: no task {name}; there are {', '.join(TASKS)}")
     except KeyboardInterrupt:
         status("clear")
         print()

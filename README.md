@@ -1,294 +1,87 @@
 # Splitty
 
-A graphical terminal multiplexer for Linux, macOS and Windows.
+Terminals from your own machine and from SSH hosts in one window, in splits,
+tabs and screens. Remote sessions keep running when you close the app.
 
-## The idea
-
-Splitty brings terminals from your own machine and multiple SSH hosts into
-one window. Organize them in splits, tabs and named screens. Remote sessions
-keep running when you close the app or lose the connection, so you can
-reconnect and continue where you left off.
-
-Working with coding agents helped shape Splitty: keeping track of many
-Claude Code or Codex sessions running in parallel, sometimes across several
-projects, with dev servers and tests alongside them, locally or on remote VMs.
-
-> **Status:** a personal project in active development (0.x), used daily on
-> all three systems. Expect rough edges and changes between versions.
-
-## Contents
-
-- [Features](#features)
-- [Install](#install)
-- [Getting started](#getting-started)
-- [Advanced: the `splitty` command](#advanced-the-splitty-command)
-- [How it works](#how-it-works)
-- [Keyboard shortcuts](#keyboard-shortcuts)
-- [Configuration](#configuration)
-- [Security](#security)
-- [Limitations](#limitations)
-- [Documentation](#documentation)
-- [Building from source](#building-from-source)
-
-## Features
-
-### Screens, splits and tabs
-
-Arrange terminals in splits and tabs with drag and drop or shortcuts, and keep
-separate layouts on named screens. The drawer lists every screen, local and
-remote, with what runs in it.
-
-### Remote hosts
-
-- **Remote screens.** Pick a host from your `~/.ssh/config` or type one in,
-  and its screens open next to your local ones. Splitty installs itself on the
-  host over SSH, so Linux and macOS hosts need no setup.
-- **Reconnect where you left off.** Your remote sessions keep running when
-  you close your laptop or switch networks. Reconnect and carry on.
-- **Ports.** Splitty notices when a program in a remote terminal listens on a
-  port, such as a dev server. Forward it with a click; `localhost` links in
-  remote terminals then open through the forward.
-- **Plain SSH.** Splitty connects with your `ssh` and its configuration, and
-  needs no exposed Splitty port on the host.
-
-More in [Remote development](docs/remote.md).
-
-### Files between machines
-
-- **Drop files onto a terminal** to copy them to its machine, local or remote,
-  and insert their paths.
-- **Paste a screenshot** with Ctrl+V (Cmd+V on macOS). It is stored on the
-  terminal's machine, so Claude Code on a remote host can read it.
-- **Download a file** from a terminal with `splitty download <file>`; the
-  window offers to save it.
-- **Open a terminal's folder** in VS Code or Zed on your computer from its
-  context menu, remote folders included.
-
-More in [Files and editors](docs/files-and-editors.md).
-
-### For coding agents
-
-- **Let your coding agent use Splitty.** It can start dev servers, run tests
-  or launch other agents in tabs and splits alongside your own terminals.
-  You can follow along and interact with them directly.
-- **Scratchpad.** Each terminal has one (Cmd/Alt+J) for drafting the next
-  prompt while the agent works. It stays with the session, and the agent
-  can't read it.
-- **Viewer panes.** `splitty open PLAN.md` shows a file next to the terminal,
-  Markdown and HTML rendered, and follows its changes, so an agent can show
-  you its plan or report. A terminal selection opens the same way from the
-  context menu. Comment on passages or suggest changes, send the review to
-  the agent's terminal as Markdown, and follow the agent's replies in each
-  thread; `splitty review` lets an agent wait for your verdict, and as a
-  hook of Claude Code it opens each plan for approval
-  ([setup](docs/files-and-editors.md#plans-of-claude-code)).
-
-To get started, add this to your `CLAUDE.md` or `AGENTS.md`:
-
-> Use Splitty to run commands and launch other agents in tabs and splits;
-> first read `splitty agent guide`.
-
-More in [Managed terminal jobs](docs/cli-jobs.md).
+![Several screens with terminals in splits and tabs](https://github.com/npgrosser/splitty/raw/media/overview.webp)
 
 ## Install
 
 Download the package for your system from the
-[latest release](https://github.com/npgrosser/splitty/releases/latest), or with
-the GitHub CLI, for example
-`gh release download --repo npgrosser/splitty --pattern 'Splitty_*_aarch64.dmg'`.
+[latest release](https://github.com/npgrosser/splitty/releases/latest):
+Windows 10/11 (with WSL 2), macOS (Apple silicon and Intel) and Linux (deb,
+rpm, tar.gz). The notes for each system are in [Install](docs/install.md).
 
-| System | File | Notes |
-|---|---|---|
-| Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian): the app uses the default distribution and installs its backend there. To update, run the newer installer; it replaces an installed earlier version. |
-| macOS | `Splitty_<version>_aarch64.dmg` (Apple silicon) or `Splitty_<version>_x64.dmg` (Intel) | Clear the quarantine flag after installing (below). |
-| Linux (x86_64) | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm` or `splitty-<version>-linux-x86_64.tar.gz` | Install the deb (Debian, Ubuntu) or rpm (Fedora, openSUSE) with the system's package manager and start Splitty from the application menu or as `splitty-gpui`. The tar.gz runs from where it is unpacked: `./splitty-gpui`. |
+> A personal project in active development (0.x), used daily on all three
+> systems. Expect rough edges and changes between versions.
 
-The app draws its own interface on the GPU (Vulkan on Linux, Wayland or X11)
-and needs no browser engine. The deb and rpm install to `/opt/splitty` and name
-the libraries they need; with the tar.gz, keep the `splitty` command and the
-`shell-integration/` folder next to `splitty-gpui`.
+## A terminal
 
-On macOS, clear the quarantine flag after installing:
+![One terminal with a Git graph, a test run and a diff](https://github.com/npgrosser/splitty/raw/media/terminal.webp)
 
-```bash
-xattr -dr com.apple.quarantine /Applications/Splitty.app
-```
+## Splits and tabs from the keyboard
 
-Local and remote terminals have the
-[`splitty` command](#advanced-the-splitty-command) for the agent features and
-`splitty download`.
+![Splits and tabs opened with keys, a pane maximized and restored](https://github.com/npgrosser/splitty/raw/media/splits.webp)
 
-## Getting started
+Every key can be changed: [Keyboard](docs/keyboard.md).
 
-1. Start the app. It opens one screen with one terminal and the drawer pinned
-   beside it. Use the pin button to hide the drawer when not in use; your
-   choice is remembered.
-2. Split with **Cmd/Alt+D** and **Cmd/Alt+Shift+D**, open a tab with
-   **Cmd/Alt+T** and a screen with **Ctrl+Shift+Space**. **Cmd/Alt+Shift+B**
-   opens the drawer when it is unpinned.
-3. For a remote screen, open **Hosts** at the bottom of the drawer (or
-   **Connect to Host…** in the command palette), pick a host and choose
-   **New Screen**. Connect to a new host once with plain `ssh` first to
-   accept its key.
-4. **Cmd/Alt+Shift+P** opens the command palette with everything else, and
-   **Ctrl+,** the settings.
+## Drag tabs into a layout
 
-Cmd is for macOS, Alt for Linux and Windows; all shortcuts are listed
-[below](#keyboard-shortcuts).
+![Tabs dragged out of a group into splits, splits resized](https://github.com/npgrosser/splitty/raw/media/pointer.webp)
 
-**Templates** (Cmd+P on macOS, Alt+P elsewhere) opens the saved-template
-library. Save the current Screen by
-reviewing its extracted layout and choosing which commands to retain. Loading
-a template lets you create a new Screen or replace the current one. Replacement
-ends that Screen's existing terminals, including with **Layout only**; use
-**Run displayed commands** only after reviewing the exact command list.
+## A screen per task
 
-## Advanced: the `splitty` command
+![Named screens in the drawer, switched from the keyboard and the pointer](https://github.com/npgrosser/splitty/raw/media/screens.webp)
 
-Day to day, everything happens in the UI. The `splitty` command adds a few
-things on top:
+## Remote hosts beside your local screens
 
-| Command | What it does |
+![A screen of an SSH host opened next to the local ones](https://github.com/npgrosser/splitty/raw/media/remote.webp)
+
+Splitty connects with your `ssh` and installs itself on the host:
+[Remote development](docs/remote.md).
+
+## Disconnect, and the host keeps working
+
+![A host is closed and opened again; its programs kept running](https://github.com/npgrosser/splitty/raw/media/reconnect.webp)
+
+## Forward a remote port with a click
+
+![A port a program opened on the host is forwarded and reached locally](https://github.com/npgrosser/splitty/raw/media/ports.webp)
+
+A remote terminal's folder also opens in VS Code or Zed on your computer:
+[Files and editors](docs/files-and-editors.md).
+
+## See which agent needs you
+
+![Marks on tabs and screens show which agent works, waits or is done](https://github.com/npgrosser/splitty/raw/media/agents.webp)
+
+A program reports its status with an escape sequence; each terminal has a
+scratchpad for the next prompt. To let a coding agent open tabs and splits
+itself, add to your `CLAUDE.md` or `AGENTS.md`:
+
+> Use Splitty to run commands and launch other agents in tabs and splits;
+> first read `splitty agent guide`.
+
+## Themes and keys
+
+![Themes change the whole window; the settings list every key](https://github.com/npgrosser/splitty/raw/media/customize.webp)
+
+[Themes](docs/themes.md) · [Keyboard](docs/keyboard.md)
+
+## More
+
+| | |
 |---|---|
-| `splitty attach` | Shows a session in a plain terminal, without the UI |
-| `splitty daemon start` | Starts an independent persistent local backend (macOS, Linux) |
-| `splitty open <path>` | From inside a pane: shows a file in a viewer pane next to it; folders and `--editor` go to your editor |
-| `splitty run`, `splitty logs` | Managed background processes, mostly for agents |
+| [Guide](docs/guide.md) | First steps, templates, how it works |
+| [Install](docs/install.md) | Packages, the `splitty` command, building from source |
+| [Remote development](docs/remote.md) | Remote screens, ports, host requirements |
+| [Files and editors](docs/files-and-editors.md) | Uploads, screenshots, `splitty download`, `splitty open`, editors |
+| [The `splitty` command](docs/cli.md) · [Managed jobs](docs/cli-jobs.md) | `attach`, `daemon`, in-pane commands, `splitty run` |
+| [Keyboard](docs/keyboard.md) · [Themes](docs/themes.md) | Every command and its keys; themes and palettes |
+| [Security](SECURITY.md) | Threat model and guarantees |
+| [Known issues](docs/known-issues.md) | Platform quirks, with workarounds |
+| [Architecture](docs/architecture.md) · [Networking](docs/networking.md) · [Development](docs/development.md) | How it is built |
 
-Everything about the command is in [`docs/cli.md`](docs/cli.md).
-
-### Installing the command
-
-Terminals of the app and on remote hosts have it already. The app doesn't put
-it on the `PATH` of other terminals; take it from the archive of the same
-release:
-
-```bash
-# Linux x86_64; on other systems splitty-wsl-aarch64 or splitty-darwin-<arch>
-mkdir -p ~/.local/share/splitty-cli
-tar -xzf splitty-wsl-x86_64.tar.gz -C ~/.local/share/splitty-cli
-export PATH="$HOME/.local/share/splitty-cli:$PATH"   # add this to your shell profile
-```
-
-Keep the `shell-integration/` folder next to the binary. On a Mac, if the
-browser downloaded the archive, run
-`xattr -dr com.apple.quarantine ~/.local/share/splitty-cli`.
-
-## How it works
-
-| Connection | Transport | Session lifetime |
-|---|---|---|
-| Desktop, local terminals | In-process service on macOS and Linux, owned child pipes to the WSL backend on Windows | End when the app quits |
-| Explicit local daemon | Private Unix socket | Independent of the app |
-| SSH host | SSH data channel to the host’s private socket | Survive disconnects and app exit |
-
-- The server holds the layout and the terminals, so several windows can show
-  the same screens and stay in sync.
-- The desktop app owns its local backend and closes its local sessions when
-  you quit. A separately started daemon runs independently. On an SSH host,
-  Splitty runs as a daemon and keeps each session in a small keeper process,
-  so sessions survive disconnects and daemon restarts or updates.
-- For remote screens, the local server is a hub: it installs and starts
-  Splitty on the host and relays it over SSH.
-- The server and the desktop app are Rust. The server uses Tokio, Axum and
-  portable-pty; the desktop app is built with [GPUI](https://www.gpui.rs) and
-  parses terminal output with libghostty-vt, Ghostty's terminal library. On
-  Windows the server runs in WSL 2.
-
-More in [`docs/architecture.md`](docs/architecture.md).
-
-## Keyboard shortcuts
-
-The most used keys; `Mod` is Cmd on macOS and Alt on Linux and Windows.
-
-| Action | Key |
-|---|---|
-| New tab / close tab | Mod+T / Mod+W |
-| Split right / down | Mod+D / Mod+Shift+D |
-| Focus the pane in a direction | Mod+Shift+Arrow |
-| Next / previous tab | Mod+PageDown / Mod+PageUp |
-| New screen | Ctrl+Shift+Space |
-| Next / previous screen | Ctrl+Tab / Ctrl+Shift+Tab |
-| Screen 1 to 9 | Mod+1 to Mod+9 |
-| Maximize pane | Mod+M |
-| Arrange panes (resize and move with the arrow keys) | Mod+R |
-| Scratchpad | Mod+J |
-| Command palette | Mod+Shift+P |
-| Drawer | Mod+Shift+B |
-| Settings | Ctrl+, (macOS: Cmd+,) |
-
-Every command, its default key on each platform and how to change keys (in
-Settings, Keyboard, or in `keybindings.json`) are in
-[`docs/keyboard.md`](docs/keyboard.md).
-
-## Configuration
-
-The settings (Ctrl+,) are saved in `config.toml` in `~/.config/splitty/`
-(macOS: `~/Library/Application Support/splitty/`). Custom themes go into a
-`themes/` folder next to it: UI themes as GPUI Kit theme sets (`*.json`) and
-terminal palettes as Ghostty theme files. [Themes](docs/themes.md) describes
-both and what ships with the app.
-
-## Security
-
-Whoever controls Splitty gets a shell with your rights. Desktop connections use
-in-process channels or owned pipes; daemons use private Unix sockets, and
-remote connections travel over SSH. The terminal service has no TCP listener.
-Owner, grant and keeper sockets use private paths and peer checks. Deliberate
-application forwards and reverse shares have separate admission rules.
-Processes running as your own user are not isolated from Splitty.
-
-The full model is in [`SECURITY.md`](SECURITY.md). Please report
-vulnerabilities privately through
-[GitHub security advisories](https://github.com/npgrosser/splitty/security/advisories/new).
-
-## Limitations
-
-- The binaries are not code-signed (see [Install](#install)).
-- On Windows, local terminals need WSL 2. Without a supported
-  distribution the app says so and does not start.
-- On a Mac host, Splitty doesn't detect listening ports yet; forward them by
-  number.
-
-## Documentation
-
-| Document | Content |
-|---|---|
-| [Remote development](docs/remote.md) | Remote screens, ports, host requirements, installing Splitty on hosts |
-| [Files and editors](docs/files-and-editors.md) | Drop uploads, screenshots, `splitty download`, `splitty open`, VS Code, Zed and SFTP |
-| [The `splitty` command](docs/cli.md) | Server modes, `daemon`, `attach`, in-pane commands |
-| [Managed terminal jobs](docs/cli-jobs.md) | `splitty run`, logs, agent grants |
-| [`SECURITY.md`](SECURITY.md) | Threat model and guarantees |
-| [Known issues](docs/known-issues.md) | Upstream bugs and platform quirks, with workarounds |
-| [Architecture](docs/architecture.md) | How the server, protocol and UI fit together |
-| [Connections and networking](docs/networking.md) | Visual guides to IPC, SSH, listeners and session lifetime |
-| [Development](docs/development.md) | Building, packaging and releasing |
-| [Desktop app](docs/native-ui-handoff.md) | State, packages and open work of the desktop app |
-| [Roadmap](roadmap/README.md) | Milestones and what comes next (German) |
-
-## Building from source
-
-You need Rust (stable), Node.js 24 with pnpm for the architecture check only, Python 3 and a C toolchain for the terminal library and,
-on Linux, the development packages listed in
-[Development](docs/development.md#the-native-app).
-
-```bash
-make native-package       # deb, rpm and tar.gz (Linux) or dmg (macOS) in build/
-make install-no-gui       # only splitty, to ~/.local/bin
-```
-
-Running the app from a checkout, the Windows installer and releases are
-described in [Development](docs/development.md). A
-build of your own installs itself on remote hosts only with a payload: set
-`SPLITTY_REMOTE_PAYLOAD` as
-[Remote development](docs/remote.md#installing-splitty-on-hosts) explains, or
-put `splitty` on the host's `PATH`.
-
-## Feedback
-
-Bugs, rough edges and ideas are welcome as
-[GitHub issues](https://github.com/npgrosser/splitty/issues).
-
-## License
-
-MIT, see [LICENSE](LICENSE).
+Bugs and ideas are welcome as
+[GitHub issues](https://github.com/npgrosser/splitty/issues). MIT, see
+[LICENSE](LICENSE).

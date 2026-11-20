@@ -349,6 +349,16 @@ Hardening candidates, not open holes.
 
 ### native app
 
+- **A review asked for before the viewer has read its file says the document changed** (found on 2026-11-20,
+  read in the code, not observed in isolation). `splitty review <file>` right after `splitty open <file>`
+  shows "The document changed since the review was asked for." although nothing changed:
+  `refresh_viewer_notes` (`crates/splitty-gpui/src/workspace/viewer/notes.rs`) records the version the
+  wait was seen at from `entry.version`, which is still unset before the viewer's first read, so that read
+  counts as a change. Waiting a moment between the two commands avoids it, which the stand-in agent of the
+  README's clips does (`scripts/demo/home/bin/agent`).
+- **Ctrl+Enter does not save a suggested change** (found on 2026-11-20 while recording the README's clips).
+  In the review panel it saves a comment, but in the replacement field of Suggest change only the Add button
+  does.
 - **Fixed (2026-11-14): a replay before a view's first layout was parsed at 80×24.** A server that decides
   sizes sends a session's PTY size before its replay, and the terminal view takes that grid so the replay is
   read at the size it was written at. A view without a layout yet only stored the size (`set_pty_size`,
@@ -529,6 +539,10 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-20 in local full runs under load, one test per run, in `splitty-remote`:
+  `tunnel::reverse::tests::failed_setup_preserves_ssh_diagnostics_after_cleanup` (the error lost its SSH
+  classification) and `tunnel::forward::tests::exact_ports_refuse_both_loopback_families`. Two of three
+  repeated runs of the crate passed all 151 tests. Not investigated.
 - Seen on 2026-11-14 in CI on `main` for the v0.4.3 version commit, in the Rust tests job, one in each of two
   attempts; neither is investigated:
   `native_workspace::ssh_prompts::tests::a_question_of_the_local_service_reaches_the_window_and_its_answer_the_helper`

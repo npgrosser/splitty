@@ -297,8 +297,11 @@ def key_label(chord: str) -> str:
 
 def demo_home(root: Path) -> Path:
     """A home with a small project, a plain prompt and nothing personal:
-    a copy of `home/` with a Git history of its own."""
-    home = root / "home"
+    a copy of `home/` with a Git history of its own. It gets a short path
+    where that is free, since the app shows a file's whole path in places."""
+    home = Path(tempfile.gettempdir()) / "demo"
+    if home.exists():
+        home = root / "home"
     shutil.copytree(HOME, home)
     (home / ".hushlogin").touch()
     (home / ".bashrc").write_text(
@@ -447,7 +450,7 @@ def save(images, durations, out: Path, name: str):
 def record(scene, args, out: Path, display: str):
     size = scene.size or DEFAULT_SIZE
     root = Path(tempfile.mkdtemp(prefix="splitty-demo-"))
-    xvfb = app = host = None
+    xvfb = app = host = home = None
     try:
         home = demo_home(root)
         app_config(root / "config", scene, args.font)
@@ -528,6 +531,8 @@ def record(scene, args, out: Path, display: str):
         if host:
             host.stop()
         if not args.keep:
+            if home and home.parent != root:
+                shutil.rmtree(home, ignore_errors=True)
             shutil.rmtree(root, ignore_errors=True)
         else:
             print(f"kept {root}")

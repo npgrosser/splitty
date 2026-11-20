@@ -1,7 +1,6 @@
-"""The scenes of work with coding agents, played with the stand-in `agent`
-(see `home/bin/agent`): `review` hands a plan back through the viewer's
-review, `agents` follows the status agents report (OSC 7501) through marks
-and the window's notices, which its configuration turns on.
+"""The scene of work with coding agents, played with the stand-in `agent`
+(see `home/bin/agent`): `agents` follows the status agents report (OSC 7501)
+through marks and the window's notices, which its configuration turns on.
 
 Pointer positions are pixels of the clip.
 """
@@ -9,47 +8,6 @@ Pointer positions are pixels of the clip.
 from __future__ import annotations
 
 from scenes import Scene, rename
-
-# The split between the agent's terminal and the viewer, before and after
-# the viewer gets more room.
-SPLIT = (640, 400)
-SPLIT_TO = (440, 400)
-# The viewer's bar: its review button opens the annotation panel.
-REVIEW_WAITING = (1203, 49)
-# Passages of PLAN.md, rendered, with the panel open: start and end of each.
-RESULTS = ((480, 381), (632, 381))
-REBUILT = ((461, 644), (851, 644))
-# The annotation panel: the comment field, "Suggest change", "Add" below the
-# replacement it opens, and the verdict "Request changes".
-COMMENT = (1093, 248)
-SUGGEST = (1210, 172)
-ADD = (1247, 423)
-REQUEST_CHANGES = (1063, 121)
-
-
-def review(stage):
-    """An agent's plan, reviewed in a viewer pane and sent back."""
-    stage.wait(0.2)
-    # The agent works, writes PLAN.md and waits for `splitty review PLAN.md`.
-    stage.run("agent plan", pause=3.4)
-    stage.drag(SPLIT, SPLIT_TO, pause=0.15, pace=0.8)
-    stage.click(*REVIEW_WAITING, pause=0.4)
-    # A comment on a passage.
-    stage.drag(*RESULTS, pause=0.2, pace=0.8)
-    stage.click(*COMMENT, pause=0.2)
-    stage.type("20 are enough here.", delay=0.035, pause=0.3)
-    stage.key("ctrl+Return", pause=0.6)
-    # A suggested change for another.
-    stage.drag(*REBUILT, pause=0.2, pace=0.8)
-    # Its field takes the keys at once, holding the passage.
-    stage.click(*SUGGEST, pause=0.3)
-    stage.key("ctrl+a", label="", pause=0.15)
-    stage.type("A write updates the changed item only.", delay=0.03, pause=0.3)
-    stage.click(*ADD, pause=0.5)
-    # The verdict goes back to the waiting agent, which revises the plan;
-    # the viewer follows the file.
-    stage.click(*REQUEST_CHANGES, pause=3.0)
-
 
 # "Show" on the window's notice of a program that waits or is done.
 SHOW = (1218, 754)
@@ -103,6 +61,5 @@ def agents(stage):
 NOTICES = "[notifications]\ntoasts = true\n"
 
 SCENES = [
-    Scene("review", review),
     Scene("agents", agents, setup=agents_setup, drawer=True, config=NOTICES),
 ]
