@@ -36,7 +36,8 @@ pub(super) const CARD_INSET: f32 = 8.;
 const CARD_GAP: f32 = 1.;
 const CARD_PADDING_TOP: f32 = 1.;
 const CARD_PADDING_BOTTOM: f32 = 3.;
-/// `.drawer-screen`: `border-radius: 6px`, fixed rather than themed.
+/// `.drawer-screen`: `border-radius: 6px`, bounded by the theme's control
+/// radius.
 const CARD_RADIUS: f32 = 6.;
 /// `.drawer-screen.unreachable:not(.active)`: a Screen of a host that failed
 /// or went offline.
@@ -124,9 +125,25 @@ pub(super) struct NavItem {
 /// A Drawer control in the web client's `.drawer-icon-btn` manner: `rest` at
 /// rest; on hover the primary text color over one `hover-bg` layer, which
 /// stacks over a hovered or active card as the translucent web color does.
+/// `radius` applies as given: a control passes `NativeAppearance::corner`
+/// of its own, a pill its half height.
 pub(super) fn drawer_control(
     id: impl Into<ElementId>,
     rest: Hsla,
+    radius: f32,
+    appearance: &NativeAppearance,
+    window: &Window,
+    cx: &App,
+) -> Button {
+    drawer_control_on(id, rest, appearance.text, radius, appearance, window, cx)
+}
+
+/// A `drawer_control` whose hover text is `hover_text`: `active_text` on a
+/// selected entry.
+pub(super) fn drawer_control_on(
+    id: impl Into<ElementId>,
+    rest: Hsla,
+    hover_text: u32,
     radius: f32,
     appearance: &NativeAppearance,
     window: &Window,
@@ -137,7 +154,7 @@ pub(super) fn drawer_control(
         .focus_ring(focus_visible(cx))
         .custom(
             ButtonCustomVariant::new(cx)
-                .foreground(rgb(appearance.text).into())
+                .foreground(rgb(hover_text).into())
                 .hover(hover)
                 .active(hover),
         )
@@ -147,6 +164,25 @@ pub(super) fn drawer_control(
         .cursor_pointer()
         // A ring marks keyboard focus only; a click leaves none behind.
         .focus_ring(focus_visible(cx))
+}
+
+/// A Drawer control of `size` with a button face: a bevel theme raises it
+/// in a frame of that size, a flat theme draws `button` as it is.
+pub(super) fn raised_control(
+    appearance: &NativeAppearance,
+    size: f32,
+    button: Button,
+) -> AnyElement {
+    if appearance.bevel.is_some() {
+        div()
+            .flex_none()
+            .size(chrome_rems(size))
+            .edged(appearance, Relief::Raised)
+            .child(button.size_full())
+            .into_any_element()
+    } else {
+        button.into_any_element()
+    }
 }
 
 fn pane_list_transition() -> Transition {
@@ -782,6 +818,61 @@ mod view_tests {
                 "a stacked pane sits past the indent and the rail",
             );
             assert_near(single.left(), first.left(), "a single pane indents inside");
+        });
+    }
+
+    #[test]
+    fn a_bevel_theme_edges_the_drawer_and_selects_in_its_own_text_color() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B")], None)
+                .unwrap();
+            let shown = model.shown_key().expect("a Screen is shown");
+            let other = keys.iter().find(|key| **key != shown).unwrap().clone();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let flat = block_bounds(window, &shown);
+            let bevel = crate::appearance::edges::bevel_test_appearance();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.appearance = bevel.clone();
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let beveled = block_bounds(window, &shown);
+            assert_near(
+                beveled.size.width,
+                flat.size.width - px(1.),
+                "the Drawer's etched edge is 2 px where the flat line is 1",
+            );
+            assert_near(beveled.left(), flat.left(), "the edge is on the right");
+            let selected: &'static str = Box::leak(
+                format!("drawer-screen-text-{shown}-{:06x}", bevel.active_text).into_boxed_str(),
+            );
+            assert!(
+                window.debug_bounds(selected).is_some(),
+                "the selected Screen's name is drawn in active-text"
+            );
+            let unselected: &'static str = Box::leak(
+                format!("drawer-screen-text-{other}-{:06x}", bevel.secondary).into_boxed_str(),
+            );
+            assert!(
+                window.debug_bounds(unselected).is_some(),
+                "an unselected Screen keeps the secondary text"
+            );
+            let create = window.debug_bounds("drawer-create").unwrap();
+            assert_near(
+                create.size.width,
+                px(26. - 4.),
+                "the new Screen button sits inside its raised edge",
+            );
         });
     }
 
@@ -2617,15 +2708,20 @@ impl Workspace {
         window: &Window,
         cx: &App,
     ) -> Button {
-        drawer_control(
+        drawer_control_on(
             id,
             rgb(if active {
-                self.appearance.text
+                self.appearance.active_text
             } else {
                 self.appearance.secondary
             })
             .into(),
-            NAV_ITEM_RADIUS,
+            if active {
+                self.appearance.active_text
+            } else {
+                self.appearance.text
+            },
+            self.appearance.corner(NAV_ITEM_RADIUS),
             &self.appearance,
             window,
             cx,
@@ -2637,6 +2733,14 @@ impl Workspace {
         .px(chrome_rems(NAV_ITEM_PADDING_X))
         .child(
             div()
+                .when(cfg!(all(test, feature = "ui-test-support")), |row| {
+                    let text = if active {
+                        self.appearance.active_text
+                    } else {
+                        self.appearance.secondary
+                    };
+                    row.debug_selector(move || format!("drawer-nav-{label}-{text:06x}"))
+                })
                 .w_full()
                 .min_w_0()
                 .flex()
@@ -2661,7 +2765,11 @@ impl Workspace {
                             .flex_none()
                             .font(font(self.ui_family.clone()))
                             .text_size(chrome_rems(NAV_SHORTCUT_TEXT))
-                            .text_color(rgb(self.appearance.muted))
+                            .text_color(rgb(if active {
+                                self.appearance.on_active(self.appearance.muted)
+                            } else {
+                                self.appearance.muted
+                            }))
                             .child(shortcut),
                     )
                 }),
@@ -2680,11 +2788,13 @@ impl Workspace {
             .text_color(rgb(self.appearance.secondary))
             .child(Icon::new(IconName::Monitor).size(chrome_rems(14.)))
             .child(div().flex_1().child("This computer"))
-            .child(
+            .child(raised_control(
+                &self.appearance,
+                26.,
                 drawer_control(
                     "drawer-create",
                     rgb(self.appearance.secondary).into(),
-                    CARD_RADIUS,
+                    self.appearance.corner(CARD_RADIUS),
                     &self.appearance,
                     window,
                     cx,
@@ -2701,7 +2811,7 @@ impl Workspace {
                         this.create_screen(window, cx);
                     }
                 })),
-            )
+            ))
             .into_any_element()
     }
 
@@ -2815,6 +2925,20 @@ impl Workspace {
                     }
                 }
                 let active = shown.as_ref() == Some(&key);
+                // The selected card's text and icons read on `active`.
+                let on_card = |color: u32| {
+                    if active {
+                        self.appearance.on_active(color)
+                    } else {
+                        color
+                    }
+                };
+                let card_text = if active {
+                    self.appearance.active_text
+                } else {
+                    self.appearance.text
+                };
+                let card_muted: Hsla = rgb(on_card(self.appearance.muted)).into();
                 let unreachable = remote
                     && super::drawer_ports::host_indicator(window_model.host(key.source_id()))
                         .unreachable();
@@ -2896,8 +3020,19 @@ impl Workspace {
                 } else {
                     actions as f32 * ICON_BUTTON + (actions - 1) as f32 * ACTION_GAP + ROW_GAP
                 };
+                let label_color = if active || actions_visible {
+                    card_text
+                } else {
+                    on_card(self.appearance.secondary)
+                };
                 let mut row = div()
                     .id(SharedString::from(format!("drawer-screen-{key}")))
+                    .when(cfg!(all(test, feature = "ui-test-support")), |row| {
+                        let key = key.clone();
+                        row.debug_selector(move || {
+                            format!("drawer-screen-text-{key}-{label_color:06x}")
+                        })
+                    })
                     .flex()
                     .relative()
                     .items_center()
@@ -2962,9 +3097,9 @@ impl Workspace {
                             .font(font(mono.clone()))
                             .text_align(TextAlign::Right)
                             .text_color(if active {
-                                rgb(self.appearance.accent)
+                                rgb(on_card(self.appearance.accent))
                             } else {
-                                muted.into()
+                                card_muted.into()
                             })
                             .child(format!("{}", index + 1)),
                     );
@@ -2986,10 +3121,17 @@ impl Workspace {
                                 .min_w_0()
                                 .py(chrome_rems(RENAME_PADDING[0]))
                                 .px(chrome_rems(RENAME_PADDING[1]))
-                                .border_1()
-                                .border_color(rgb(self.appearance.accent))
-                                .rounded(chrome_rems(RENAME_RADIUS))
-                                .bg(rgb(self.appearance.surface))
+                                .edged_sides(
+                                    &self.appearance,
+                                    Relief::Sunken,
+                                    Sides::ALL,
+                                    self.appearance.accent,
+                                )
+                                .rounded(chrome_rems(self.appearance.corner(RENAME_RADIUS)))
+                                .bg(rgb(self
+                                    .appearance
+                                    .field
+                                    .unwrap_or(self.appearance.surface)))
                                 .text_color(rgb(self.appearance.text))
                                 .text_size(chrome_rems(SIDEBAR_TEXT))
                                 .font_weight(FontWeight::MEDIUM)
@@ -3041,12 +3183,7 @@ impl Workspace {
                                     .text_size(chrome_rems(SIDEBAR_TEXT))
                                     .text_color(transition::<Hsla>(
                                         format!("drawer-screen-text-{key}"),
-                                        rgb(if active || actions_visible {
-                                            self.appearance.text
-                                        } else {
-                                            self.appearance.secondary
-                                        })
-                                        .into(),
+                                        rgb(label_color).into(),
                                         hover_transition.clone(),
                                         window,
                                         cx,
@@ -3142,7 +3279,7 @@ impl Workspace {
                             .flex_none()
                             .text_size(chrome_rems(NOTE_TEXT))
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(muted)
+                            .text_color(card_muted)
                             .child(state),
                     );
                 }
@@ -3151,10 +3288,11 @@ impl Workspace {
                     let collapse_key = key.clone();
                     let weak = cx.entity().downgrade();
                     row_actions = row_actions.child(
-                        drawer_control(
+                        drawer_control_on(
                             SharedString::from(format!("drawer-collapse-{key}")),
-                            muted,
-                            ICON_BUTTON_RADIUS,
+                            card_muted,
+                            card_text,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3204,10 +3342,11 @@ impl Workspace {
                     let menu_key = key.clone();
                     let menu_open = self.drawer_popover_screen() == Some(&key);
                     row_actions = row_actions.child(
-                        drawer_control(
+                        drawer_control_on(
                             SharedString::from(format!("drawer-more-{key}")),
-                            muted,
-                            ICON_BUTTON_RADIUS,
+                            card_muted,
+                            card_text,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3243,10 +3382,11 @@ impl Workspace {
                         "Close screen"
                     };
                     row_actions = row_actions.child(
-                        drawer_control(
+                        drawer_control_on(
                             SharedString::from(format!("drawer-close-{key}")),
-                            muted,
-                            ICON_BUTTON_RADIUS,
+                            card_muted,
+                            card_text,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3347,7 +3487,7 @@ impl Workspace {
                     .relative()
                     .top(px(offset))
                     .when(opacity < 1., |block| block.opacity(opacity))
-                    .rounded(chrome_rems(CARD_RADIUS))
+                    .rounded(chrome_rems(self.appearance.corner(CARD_RADIUS)))
                     .bg(block_background)
                     .when(!editing, |block| {
                         let select = key.clone();
@@ -3482,7 +3622,9 @@ impl Workspace {
                                         .top(chrome_rems(STACK_RAIL_INSET))
                                         .bottom(chrome_rems(STACK_RAIL_INSET))
                                         .w(chrome_rems(STACK_RAIL_WIDTH))
-                                        .rounded(chrome_rems(STACK_RAIL_RADIUS))
+                                        .rounded(chrome_rems(
+                                            self.appearance.corner(STACK_RAIL_RADIUS),
+                                        ))
                                         .bg(rgb(self.appearance.border)),
                                 );
                         }
@@ -3550,7 +3692,7 @@ impl Workspace {
                                     } else {
                                         PANE_ICON_TEXT
                                     }))
-                                    .when(busy, |icon| icon.text_color(rgb(self.appearance.text)))
+                                    .when(busy, |icon| icon.text_color(rgb(card_text)))
                                     .child(program_status::title_mark_glyph(mark, cx))
                                     .into_any_element()
                             } else {
@@ -3558,9 +3700,9 @@ impl Workspace {
                                     .size(chrome_rems(PANE_DOT))
                                     .rounded_full()
                                     .bg(if busy {
-                                        rgb(self.appearance.text).into()
+                                        rgb(card_text).into()
                                     } else {
-                                        muted
+                                        card_muted
                                     })
                                     .into_any_element()
                             };
@@ -3628,13 +3770,13 @@ impl Workspace {
                                             // hover, as the web rule order
                                             // has it.
                                             rgb(if is_viewer {
-                                                self.appearance.secondary
+                                                on_card(self.appearance.secondary)
                                             } else if pane_hovered {
-                                                self.appearance.text
+                                                card_text
                                             } else if busy {
-                                                self.appearance.secondary
+                                                on_card(self.appearance.secondary)
                                             } else {
-                                                self.appearance.muted
+                                                on_card(self.appearance.muted)
                                             })
                                             .into(),
                                             hover_transition.clone(),
@@ -3663,7 +3805,7 @@ impl Workspace {
                                                             .size(chrome_rems(PANE_GLOW_CORE))
                                                             .rounded_full()
                                                             .shadow(vec![BoxShadow {
-                                                                color: Hsla::from(rgb(self.appearance.text))
+                                                                color: Hsla::from(rgb(card_text))
                                                                     .opacity(PANE_GLOW_OPACITY),
                                                                 offset: point(px(0.), px(0.)),
                                                                 blur_radius: chrome_px(PANE_GLOW_BLUR, self.appearance.zoom.window_scale()),
@@ -3837,8 +3979,12 @@ impl Workspace {
             .h_full()
             .bg(rgb(self.appearance.raised))
             .occlude()
-            .border_r_1()
-            .border_color(rgb(self.appearance.subtle_border))
+            .edged_sides(
+                &self.appearance,
+                Relief::Etched,
+                Sides::RIGHT,
+                self.appearance.subtle_border,
+            )
             .on_click(cx.listener(|this, _, window, cx| {
                 if this.has_drawer_panel() && !GlobalState::is_in_deferred_context(cx) {
                     this.close_drawer_panel(window, cx);
@@ -3900,7 +4046,7 @@ impl Workspace {
                             } else {
                                 muted
                             },
-                            ICON_BUTTON_RADIUS,
+                            self.appearance.corner(ICON_BUTTON_RADIUS),
                             &self.appearance,
                             window,
                             cx,
@@ -3943,8 +4089,12 @@ impl Workspace {
                     .pt(chrome_rems(NAV_PADDING[0]))
                     .px(chrome_rems(NAV_PADDING[1]))
                     .pb(chrome_rems(NAV_PADDING[2]))
-                    .border_t_1()
-                    .border_color(rgb(self.appearance.subtle_border))
+                    .edged_sides(
+                        &self.appearance,
+                        Relief::Etched,
+                        Sides::TOP,
+                        self.appearance.subtle_border,
+                    )
                     .child(self.render_hosts_navigation(window, cx))
                     .child(templates)
                     .child(

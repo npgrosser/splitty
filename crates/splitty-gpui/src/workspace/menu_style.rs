@@ -1,6 +1,6 @@
 //! The web client's context menu look and placement, shared by the tab menu
-//! and the new-tab profile picker. Colors and the panel radius come from the
-//! theme (`NativeAppearance`); the sizes here are the web client's fixed values.
+//! and the new-tab profile picker. Colors and corners come from the theme
+//! (`NativeAppearance`); the sizes here are the web client's fixed values.
 use super::*;
 
 /// Inner padding of the panel and its minimum width.
@@ -18,6 +18,7 @@ const ITEM_META_GAP: f32 = 20.;
 /// Secondary text: details, section captions, shortcuts and badges.
 const DETAIL_TEXT: f32 = 10.;
 const BADGE_TEXT: f32 = 9.;
+const BADGE_RADIUS: f32 = 3.;
 /// A separator line inset from the panel edge, with its space above and below.
 const SEPARATOR_INSET: f32 = 6.;
 const SEPARATOR_ABOVE: f32 = 4.;
@@ -32,15 +33,14 @@ const META_GAP: f32 = 6.;
 const SUBMENU_GAP: f32 = 4.;
 const VIEWPORT_MARGIN: f32 = 8.;
 
-pub(super) fn panel(appearance: &NativeAppearance) -> Div {
+/// A panel's surface without its edge.
+fn surface(appearance: &NativeAppearance) -> Div {
     div()
         .flex()
         .flex_col()
         .p(chrome_rems(PANEL_PADDING))
         .min_w(chrome_rems(PANEL_MIN_WIDTH))
         .bg(rgb(appearance.overlay))
-        .border_1()
-        .border_color(rgb(appearance.border))
         .rounded(chrome_rems(appearance.radius))
         .shadow(vec![BoxShadow {
             color: rgba(appearance.shadow).into(),
@@ -54,17 +54,54 @@ pub(super) fn panel(appearance: &NativeAppearance) -> Div {
         .font_weight(FontWeight::MEDIUM)
 }
 
+pub(super) fn panel(appearance: &NativeAppearance) -> Div {
+    surface(appearance).edged(appearance, Relief::Frame)
+}
+
+/// A panel that scrolls its rows itself. A bevel would scroll away with
+/// them, so a bevel theme leaves it to `framed`; a flat theme draws the
+/// border on the panel as `panel` does.
+pub(super) fn scrolling_panel(appearance: &NativeAppearance) -> Div {
+    if appearance.bevel.is_some() {
+        surface(appearance)
+    } else {
+        panel(appearance)
+    }
+}
+
+/// `scrolling` in the frame a bevel theme draws around it; a flat theme's
+/// panel already has its border.
+pub(super) fn framed(appearance: &NativeAppearance, scrolling: impl IntoElement) -> AnyElement {
+    if appearance.bevel.is_some() {
+        div()
+            .flex()
+            .flex_col()
+            .bg(rgb(appearance.overlay))
+            .rounded(chrome_rems(appearance.radius))
+            .edged(appearance, Relief::Frame)
+            .child(scrolling)
+            .into_any_element()
+    } else {
+        scrolling.into_any_element()
+    }
+}
+
+/// The group every row forms, so its secondary text follows the pointer's
+/// highlight of the row.
+const ROW_GROUP: &str = "menu-row";
+
 /// A row. `highlighted` marks the keyboard focus or the row whose submenu is
-/// open, with the plain hover background even on a danger row; only pointer
-/// hover turns a danger row red.
+/// open, with the plain highlight even on a danger row; only pointer hover
+/// turns a danger row red.
 pub(super) fn item(appearance: &NativeAppearance, highlighted: bool, danger: bool) -> Div {
     let (background, text) = if danger {
         (appearance.danger_hover, appearance.danger)
     } else {
-        (appearance.hover, appearance.text)
+        (appearance.menu_hover, appearance.menu_hover_text)
     };
-    let focus = appearance.hover;
+    let (focus, focus_text) = (appearance.menu_hover, appearance.menu_hover_text);
     div()
+        .group(ROW_GROUP)
         .flex()
         .flex_none()
         .items_center()
@@ -72,10 +109,32 @@ pub(super) fn item(appearance: &NativeAppearance, highlighted: bool, danger: boo
         .gap(chrome_rems(ITEM_META_GAP))
         .px(chrome_rems(ITEM_PADDING_X))
         .py(chrome_rems(ITEM_PADDING_Y))
-        .rounded(chrome_rems(ITEM_RADIUS))
+        .rounded(chrome_rems(appearance.corner(ITEM_RADIUS)))
         .cursor_pointer()
-        .when(highlighted, |row| row.bg(rgb(focus)))
+        .when(highlighted, |row| {
+            row.bg(rgb(focus)).text_color(rgb(focus_text))
+        })
         .hover(move |row| row.bg(rgb(background)).text_color(rgb(text)))
+}
+
+/// `color` as it reads on a highlighted row: itself where it stands out on
+/// `menu_hover`, else moved toward the row's text.
+pub(super) fn on_highlight(appearance: &NativeAppearance, color: u32) -> u32 {
+    appearance.on_menu_hover(color)
+}
+
+/// Secondary text or icons of a row in `color`, kept readable while the
+/// keyboard (`highlighted`) or the pointer highlights the row.
+pub(super) fn secondary<E: InteractiveElement + Styled>(
+    element: E,
+    appearance: &NativeAppearance,
+    color: u32,
+    highlighted: bool,
+) -> E {
+    let lit = on_highlight(appearance, color);
+    element
+        .text_color(rgb(if highlighted { lit } else { color }))
+        .group_hover(ROW_GROUP, move |style| style.text_color(rgb(lit)))
 }
 
 /// A row that cannot be chosen.
@@ -92,23 +151,29 @@ pub(super) fn disabled_item(appearance: &NativeAppearance) -> Div {
         .opacity(0.4)
 }
 
+/// A line between groups of rows; a groove in a bevel theme.
 pub(super) fn separator(appearance: &NativeAppearance) -> Div {
-    div()
+    let line = div()
         .flex_none()
         .mt(chrome_rems(SEPARATOR_ABOVE))
         .mb(chrome_rems(SEPARATOR_BELOW))
-        .mx(chrome_rems(SEPARATOR_INSET))
-        .h(px(1.))
-        .bg(rgb(appearance.subtle_border))
+        .mx(chrome_rems(SEPARATOR_INSET));
+    line.edged_or(appearance, Relief::Etched, Sides::TOP, |line| {
+        line.h(px(1.)).bg(rgb(appearance.subtle_border))
+    })
 }
 
-/// Muted secondary text under or beside a label.
-pub(super) fn detail(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    div()
+/// Muted secondary text under or beside a label, of a row the keyboard
+/// highlights when `highlighted`.
+pub(super) fn detail(
+    appearance: &NativeAppearance,
+    text: impl Into<SharedString>,
+    highlighted: bool,
+) -> Div {
+    secondary(div(), appearance, appearance.muted, highlighted)
         .max_w(chrome_rems(DETAIL_MAX_WIDTH))
         .text_size(chrome_rems(DETAIL_TEXT))
         .font_weight(FontWeight::NORMAL)
-        .text_color(rgb(appearance.muted))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
@@ -120,6 +185,7 @@ pub(super) fn label(
     appearance: &NativeAppearance,
     text: impl Into<SharedString>,
     detail_text: Option<SharedString>,
+    highlighted: bool,
 ) -> Div {
     div()
         .flex()
@@ -128,7 +194,7 @@ pub(super) fn label(
         .gap(chrome_rems(DETAIL_GAP))
         .child(text.into())
         .when_some(detail_text, |label, text| {
-            label.child(detail(appearance, text))
+            label.child(detail(appearance, text, highlighted))
         })
 }
 
@@ -142,12 +208,15 @@ pub(super) fn meta() -> Div {
 }
 
 /// A shortcut hint in a row's trailing metadata area (`10px`, muted).
-pub(super) fn shortcut(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    div()
+pub(super) fn shortcut(
+    appearance: &NativeAppearance,
+    text: impl Into<SharedString>,
+    highlighted: bool,
+) -> Div {
+    secondary(div(), appearance, appearance.muted, highlighted)
         .flex_none()
         .text_size(chrome_rems(DETAIL_TEXT))
         .font_weight(FontWeight::NORMAL)
-        .text_color(rgb(appearance.muted))
         .whitespace_nowrap()
         .child(text.into())
 }
@@ -167,23 +236,26 @@ pub(super) fn submenu_panel(appearance: &NativeAppearance) -> Div {
 
 /// A caption above a group of rows.
 pub(super) fn caption(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    detail(appearance, text)
+    detail(appearance, text, false)
         .px(chrome_rems(ITEM_PADDING_X))
         .pt(chrome_rems(SEPARATOR_BELOW))
         .pb(chrome_rems(SEPARATOR_ABOVE))
 }
 
 /// A small outlined label such as "Default".
-pub(super) fn badge(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
-    div()
+pub(super) fn badge(
+    appearance: &NativeAppearance,
+    text: impl Into<SharedString>,
+    highlighted: bool,
+) -> Div {
+    secondary(div(), appearance, appearance.muted, highlighted)
         .flex_none()
         .px(chrome_rems(4.))
         .py(px(1.))
         .border_1()
         .border_color(rgb(appearance.border))
-        .rounded(chrome_rems(3.))
+        .rounded(chrome_rems(appearance.corner(BADGE_RADIUS)))
         .text_size(chrome_rems(BADGE_TEXT))
-        .text_color(rgb(appearance.muted))
         .child(text.into())
 }
 
@@ -367,8 +439,20 @@ impl Element for Placed {
 
 #[cfg(test)]
 mod tests {
-    use super::{beside_origin, shift_into};
+    use super::{beside_origin, on_highlight, shift_into};
+    use crate::appearance::NativeAppearance;
     use gpui_kit::{point, px, size, Bounds};
+
+    #[test]
+    fn secondary_text_keeps_its_color_where_it_reads_on_the_highlight() {
+        let mut appearance = NativeAppearance::fallback("UI");
+        let muted = appearance.muted;
+        assert_eq!(on_highlight(&appearance, muted), muted);
+        // A highlight with a text color of its own lifts what does not read.
+        (appearance.menu_hover, appearance.menu_hover_text) = (0x000080, 0xffffff);
+        assert_eq!(on_highlight(&appearance, 0xc0c0c0), 0xc0c0c0);
+        assert_eq!(on_highlight(&appearance, 0x000000), 0xa6a6a6);
+    }
 
     fn area() -> Bounds<gpui_kit::Pixels> {
         Bounds::from_corners(point(px(8.), px(8.)), point(px(792.), px(592.)))

@@ -8,7 +8,9 @@
 use crate::terminal::TerminalColors;
 use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::component::theme::{Theme, ThemeColor, ThemeConfig, ThemeMode};
-use gpui_kit::{px, rgb, App, Hsla, Rgba};
+use gpui_kit::{
+    linear_color_stop, linear_gradient, px, rgb, App, Background, FontWeight, Hsla, Rgba,
+};
 use splitty_client_core::appearance::{
     terminal_palette_name, AppearanceSnapshot, ColorScheme, RememberedAppearance,
 };
@@ -17,10 +19,11 @@ use splitty_client_core::zoom::{Zoom, ZoomSteps};
 use std::rc::Rc;
 
 mod catalog;
+pub mod edges;
 mod palette;
 pub mod titlebar;
 
-pub use catalog::{ChromeBlock, Maybe, ThemeCatalog, UiTheme};
+pub use catalog::{ChromeBlock, FillBlock, Maybe, ThemeCatalog, UiTheme};
 pub use palette::TerminalPalette;
 
 /// A solid border of the given width and color.
@@ -38,6 +41,71 @@ pub struct TabAccent {
     pub bottom: bool,
 }
 
+/// The colors of 3D edges, lightest to darkest. A theme with a bevel draws
+/// raised controls, sunken fields and frames with them (see `edges`) where a
+/// flat theme draws a one-color border.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bevel {
+    pub highlight: u32,
+    pub light: u32,
+    pub shadow: u32,
+    pub dark_shadow: u32,
+}
+
+/// A solid color, or a gradient from the start to the end of the bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarFill {
+    Solid(u32),
+    Gradient { from: u32, to: u32 },
+}
+
+impl BarFill {
+    pub fn background(self) -> Background {
+        match self {
+            Self::Solid(color) => rgb(color).into(),
+            Self::Gradient { from, to } => linear_gradient(
+                90.,
+                linear_color_stop(rgb(from), 0.),
+                linear_color_stop(rgb(to), 1.),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TitleAlign {
+    #[default]
+    Center,
+    Start,
+}
+
+/// How an application-drawn title bar shows its window buttons.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CaptionButtons {
+    /// Symbols with a hover background.
+    #[default]
+    Plain,
+    /// Small buttons with the theme's raised edge.
+    Boxed,
+    /// Cells as tall as the bar, the close cell red under the pointer.
+    Wide,
+}
+
+/// The theme's own title bar: its colors apply while title-bar colors follow
+/// the theme, its shape while the decoration is Splitty's. Absent parts keep
+/// what the chrome derives.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TitleBarTheme {
+    pub background: Option<BarFill>,
+    pub foreground: Option<u32>,
+    pub inactive_background: Option<BarFill>,
+    pub inactive_foreground: Option<u32>,
+    pub height: Option<f32>,
+    pub align: TitleAlign,
+    pub weight: Option<FontWeight>,
+    pub buttons: CaptionButtons,
+}
+
 #[derive(Clone, Debug)]
 pub struct NativeAppearance {
     pub system_style: bool,
@@ -53,7 +121,13 @@ pub struct NativeAppearance {
     pub border: u32,
     pub subtle_border: u32,
     pub active: u32,
+    /// Primary text on `active`, readable there.
+    pub active_text: u32,
     pub hover: u32,
+    /// The row of a menu under the pointer or the keyboard focus, and
+    /// primary text readable on it.
+    pub menu_hover: u32,
+    pub menu_hover_text: u32,
     pub accent: u32,
     pub font_family: String,
     pub font_size: f32,
@@ -65,7 +139,16 @@ pub struct NativeAppearance {
     /// Menus: destructive entries and the corner radius.
     pub danger: u32,
     pub danger_hover: u32,
+    /// Corners of menus, panels and dialogs.
     pub radius: f32,
+    /// The largest corner of a control; see `corner`.
+    pub control_radius: f32,
+    /// 3D edges; `None` for flat borders.
+    pub bevel: Option<Bevel>,
+    /// The background of fields that hold text; `None` keeps each field's
+    /// own background.
+    pub field: Option<u32>,
+    pub title_bar: TitleBarTheme,
     /// Status colors, as host connection dots use them.
     pub success: u32,
     pub warning: u32,
@@ -109,6 +192,35 @@ pub struct ThemeSelection<'a> {
 const DEFAULT_FONT_SIZE: f32 = 12.;
 
 impl NativeAppearance {
+    /// The corner radius of a control whose own radius is `natural`: the
+    /// theme's control radius bounds it, so a square theme is square
+    /// throughout. Round marks (dots, pills) do not use this.
+    pub fn corner(&self, natural: f32) -> f32 {
+        natural.min(self.control_radius)
+    }
+
+    /// `color` as it reads on `active`, for secondary and muted text of a
+    /// selected entry. Where the theme's own text is the text of selected
+    /// entries, its subdued colors stay as they are, as on every other
+    /// surface; where selection has a text color of its own, a color that
+    /// does not stand out there moves toward it.
+    pub fn on_active(&self, color: u32) -> u32 {
+        Self::on_highlight(color, self.active, self.active_text, self.text)
+    }
+
+    /// `color` as it reads on the highlighted row of a menu; see `on_active`.
+    pub fn on_menu_hover(&self, color: u32) -> u32 {
+        Self::on_highlight(color, self.menu_hover, self.menu_hover_text, self.text)
+    }
+
+    fn on_highlight(color: u32, highlight: u32, highlight_text: u32, text: u32) -> u32 {
+        if highlight_text == text || contrast(rgb(color).into(), rgb(highlight).into()) >= 3. {
+            color
+        } else {
+            mix(color, highlight_text, 0.65)
+        }
+    }
+
     fn system_theme(scheme: ColorScheme) -> &'static str {
         match scheme {
             ColorScheme::Dark => "adwaita-dark",
@@ -127,6 +239,7 @@ impl NativeAppearance {
             self.tab_font_size = desktop.font.size;
             self.tab_height = if desktop.gnome { 38. } else { 34. };
             self.radius = if desktop.gnome { 12. } else { 6. };
+            self.control_radius = self.radius;
         }
     }
 
@@ -145,7 +258,10 @@ impl NativeAppearance {
             border: 0x416783,
             subtle_border: 0x263544,
             active: 0x30475b,
+            active_text: 0xd9e2ef,
             hover: 0x1f2c3a,
+            menu_hover: 0x1f2c3a,
+            menu_hover_text: 0xd9e2ef,
             accent: 0x76b8e8,
             font_family: ui_family.into(),
             font_size: 13.,
@@ -155,6 +271,10 @@ impl NativeAppearance {
             danger: 0xe06c75,
             danger_hover: 0x3a2730,
             radius: 8.,
+            control_radius: 8.,
+            bevel: None,
+            field: None,
+            title_bar: TitleBarTheme::default(),
             success: 0x98c379,
             warning: 0xe5c07b,
             hover_overlay: 0xffffff0f,
@@ -284,7 +404,8 @@ impl NativeAppearance {
         });
         kit.apply_config(&theme.config);
         result.derive_chrome(&kit, dark);
-        let (theme_font_size, theme_font_family, valid) = result.apply_block(&theme.chrome);
+        let (theme_font_size, theme_font_family, (active_text, menu_hover), valid) =
+            result.apply_block(&theme.chrome);
         if !valid {
             problems.push(format!(
                 "Some `splitty` values of theme “{}” are unsupported; derived values are in use.",
@@ -295,6 +416,13 @@ impl NativeAppearance {
         // muted text keep the theme's values: their low contrast is how a
         // theme subdues idle entries against running and selected ones.
         result.text = readable_rgb(result.text, result.surface);
+        result.active_text = active_text.unwrap_or_else(|| text_on(result.text, result.active));
+        result.menu_hover = menu_hover.unwrap_or(result.hover);
+        result.menu_hover_text = if result.menu_hover == result.active {
+            result.active_text
+        } else {
+            text_on(result.text, result.menu_hover)
+        };
 
         result.font_size = if (8..=24).contains(&selection.font_size) {
             selection.font_size as f32
@@ -353,6 +481,10 @@ impl NativeAppearance {
         self.success = solid(colors.success, self.surface);
         self.warning = solid(colors.warning, self.surface);
         self.radius = f32::from(kit.radius).clamp(0., 24.);
+        self.control_radius = self.radius;
+        self.bevel = None;
+        self.field = None;
+        self.title_bar = TitleBarTheme::default();
         self.hover_overlay = (self.text << 8) | 0x0f;
         self.shadow = if dark { 0x00000073 } else { 0x00000033 };
         self.drag_over_border = None;
@@ -362,9 +494,19 @@ impl NativeAppearance {
     }
 
     /// Lay the theme's `splitty` block over the derived chrome. Returns the
-    /// block's font size and family and whether every present value was
-    /// supported; an unsupported one keeps its derived value.
-    fn apply_block<'a>(&mut self, block: &'a ChromeBlock) -> (Option<f32>, Option<&'a str>, bool) {
+    /// block's font size and family, its text color on `active` and its menu
+    /// hover color, and whether every present value was supported; an
+    /// unsupported one keeps its derived value.
+    #[allow(clippy::type_complexity)]
+    fn apply_block<'a>(
+        &mut self,
+        block: &'a ChromeBlock,
+    ) -> (
+        Option<f32>,
+        Option<&'a str>,
+        (Option<u32>, Option<u32>),
+        bool,
+    ) {
         let mut valid = true;
         let mut color = |target: &mut u32, value: &Option<String>, under: u32| {
             if let Some(value) = value {
@@ -415,6 +557,16 @@ impl NativeAppearance {
         length(&mut self.tab_height, block.tab_height, 16., 64.);
         length(&mut self.tab_font_size, block.tab_font_size, 8., 24.);
         length(&mut self.radius, block.radius, 0., 24.);
+        self.control_radius = self.radius;
+        length(&mut self.control_radius, block.control_radius, 0., 24.);
+        let mut title_height = 0.;
+        let title_block = block.title_bar.as_ref();
+        length(
+            &mut title_height,
+            title_block.and_then(|bar| bar.height),
+            20.,
+            64.,
+        );
         let mut font_size = DEFAULT_FONT_SIZE;
         length(&mut font_size, block.font_size, 8., 24.);
         let font_size = block.font_size.map(|_| font_size);
@@ -457,7 +609,123 @@ impl NativeAppearance {
             }
             Some(_) => valid = false,
         }
-        (font_size, block.font_family.as_deref(), valid)
+        let active_text = block.active_text.as_ref().and_then(|value| {
+            let color = parse_color(value).map(|color| color.over(self.active));
+            valid &= color.is_some();
+            color
+        });
+        let menu_hover = block.menu_hover.as_ref().and_then(|value| {
+            let color = parse_color(value).map(|color| color.over(self.overlay));
+            valid &= color.is_some();
+            color
+        });
+        if let Some(value) = &block.field {
+            let color = parse_color(value).map(|color| color.over(self.surface));
+            valid &= color.is_some();
+            self.field = color.or(self.field);
+        }
+        match &block.bevel {
+            None => {}
+            Some(Maybe::Keyword(keyword)) if keyword == "none" => self.bevel = None,
+            Some(Maybe::Value(bevel)) => {
+                let color = |value: &str| parse_color(value).map(|color| color.over(self.surface));
+                match (
+                    color(&bevel.highlight),
+                    color(&bevel.light),
+                    color(&bevel.shadow),
+                    color(&bevel.dark_shadow),
+                ) {
+                    (Some(highlight), Some(light), Some(shadow), Some(dark_shadow)) => {
+                        self.bevel = Some(Bevel {
+                            highlight,
+                            light,
+                            shadow,
+                            dark_shadow,
+                        })
+                    }
+                    _ => valid = false,
+                }
+            }
+            Some(_) => valid = false,
+        }
+        if let Some(bar) = title_block {
+            let raised = self.raised;
+            let color = |value: &str| parse_color(value).map(|color| color.over(raised));
+            let fill = |value: &FillBlock| match value {
+                FillBlock::Color(value) => color(value).map(BarFill::Solid),
+                FillBlock::Gradient { from, to } => color(from)
+                    .zip(color(to))
+                    .map(|(from, to)| BarFill::Gradient { from, to }),
+            };
+            // Each present value is taken alone, so one unsupported value
+            // does not cost the theme the rest of its title bar.
+            let mut take = |target: &mut dyn FnMut(), ok: bool| {
+                if ok {
+                    target()
+                } else {
+                    valid = false
+                }
+            };
+            let theme = &mut self.title_bar;
+            if let Some(value) = &bar.background {
+                let fill = fill(value);
+                take(&mut || theme.background = fill, fill.is_some());
+            }
+            if let Some(value) = &bar.inactive_background {
+                let fill = fill(value);
+                take(&mut || theme.inactive_background = fill, fill.is_some());
+            }
+            if let Some(value) = &bar.foreground {
+                let color = color(value);
+                take(&mut || theme.foreground = color, color.is_some());
+            }
+            if let Some(value) = &bar.inactive_foreground {
+                let color = color(value);
+                take(&mut || theme.inactive_foreground = color, color.is_some());
+            }
+            if bar.height.is_some() && title_height > 0. {
+                theme.height = Some(title_height);
+            }
+            if let Some(value) = &bar.align {
+                let align = match value.as_str() {
+                    "center" => Some(TitleAlign::Center),
+                    "start" => Some(TitleAlign::Start),
+                    _ => None,
+                };
+                take(
+                    &mut || theme.align = align.unwrap_or_default(),
+                    align.is_some(),
+                );
+            }
+            if let Some(value) = &bar.weight {
+                let weight = match value.as_str() {
+                    "normal" => Some(FontWeight::NORMAL),
+                    "medium" => Some(FontWeight::MEDIUM),
+                    "semibold" => Some(FontWeight::SEMIBOLD),
+                    "bold" => Some(FontWeight::BOLD),
+                    _ => None,
+                };
+                take(&mut || theme.weight = weight, weight.is_some());
+            }
+            if let Some(value) = &bar.buttons {
+                let buttons = match value.as_str() {
+                    "plain" => Some(CaptionButtons::Plain),
+                    "boxed" => Some(CaptionButtons::Boxed),
+                    "wide" => Some(CaptionButtons::Wide),
+                    _ => None,
+                };
+                take(
+                    &mut || theme.buttons = buttons.unwrap_or_default(),
+                    buttons.is_some(),
+                );
+            }
+        }
+        (
+            font_size,
+            block.font_family.as_deref(),
+            (active_text, menu_hover),
+            valid,
+        )
     }
 
     /// Give the components the toolkit theme, with the chrome's font.
@@ -485,6 +753,16 @@ impl NativeAppearance {
             }
             theme.font_family = self.font_family.clone().into();
             theme.font_size = px(16. * self.zoom.window_scale());
+            theme.bevel = self.bevel.map(|bevel| gpui_kit::component::bevel::Bevel {
+                highlight: rgb(bevel.highlight).into(),
+                light: rgb(bevel.light).into(),
+                shadow: rgb(bevel.shadow).into(),
+                dark_shadow: rgb(bevel.dark_shadow).into(),
+            });
+            theme.field = self.field.map(|field| rgb(field).into());
+            // The chrome's corners bound the components' too.
+            theme.radius = theme.radius.min(px(self.control_radius));
+            theme.radius_lg = theme.radius_lg.min(px(self.radius));
         });
     }
 }
@@ -593,6 +871,21 @@ fn readable_text(requested: Hsla, background: Hsla) -> Hsla {
         }
     }
     blend(requested, target, high)
+}
+
+/// The text of a highlighted entry: `text` where it can be read on
+/// `background`, else black or white, whichever reads better. A highlight is
+/// a statement, so its text does not stop at the first readable grey; a
+/// theme whose text is merely soft on its highlight keeps it.
+fn text_on(text: u32, background: u32) -> u32 {
+    let on = |color: u32| contrast(rgb(color).into(), rgb(background).into());
+    if on(text) >= 3. {
+        text
+    } else if on(0) >= on(0xffffff) {
+        0
+    } else {
+        0xffffff
+    }
 }
 
 fn readable_rgb(requested: u32, background: u32) -> u32 {
@@ -927,9 +1220,11 @@ mod tests {
             );
             let terminal_dark = luminance(rgb(shown.terminal.background).into())
                 < luminance(rgb(shown.terminal.foreground).into());
+            // The classic theme keeps the black console of its era under a
+            // light interface; every other theme's palette has its mode.
             assert_eq!(
                 terminal_dark,
-                theme.scheme == ColorScheme::Dark,
+                theme.scheme == ColorScheme::Dark || theme.id == "windows-classic",
                 "{}",
                 theme.id
             );
@@ -1018,8 +1313,10 @@ mod tests {
         let mut shown = NativeAppearance::fallback("UI");
         assert_eq!(
             shown.apply_block(&block),
-            (Some(14.), Some("monospace"), true)
+            (Some(14.), Some("monospace"), (None, None), true)
         );
+        // Controls follow the panel radius until the theme sets their own.
+        assert_eq!((shown.control_radius, shown.corner(6.)), (0., 0.));
         assert_eq!((shown.surface, shown.raised), (0x101010, 0x888888));
         assert_eq!(shown.hover_overlay, 0x00000020);
         assert_eq!(
@@ -1052,7 +1349,7 @@ mod tests {
         let mut shown = derived.clone();
         assert_eq!(
             shown.apply_block(&unsupported),
-            (Some(DEFAULT_FONT_SIZE), None, false)
+            (Some(DEFAULT_FONT_SIZE), None, (None, None), false)
         );
         assert_eq!(
             (
@@ -1064,6 +1361,238 @@ mod tests {
             (derived.surface, derived.tab_height, None, None)
         );
         assert_eq!(shown.accent, 0x123456);
+    }
+
+    /// settings, Native Theme Catalog: the shape tokens.
+    #[test]
+    fn the_splitty_block_gives_a_theme_its_edges_corners_and_title_bar() {
+        let block: ChromeBlock = serde_json::from_value(serde_json::json!({
+            "surface": "#c0c0c0", "raised": "#c0c0c0", "active": "#000080",
+            "active-text": "#ffffff", "menu-hover": "#000080", "field": "#ffffff", "radius": 8,
+            "control-radius": 4,
+            "bevel": {"highlight": "#ffffff", "light": "#dfdfdf",
+                      "shadow": "#808080", "dark-shadow": "#000000"},
+            "title-bar": {
+                "background": {"from": "#000080", "to": "#1084d0"},
+                "foreground": "#ffffff",
+                "inactive-background": "#808080",
+                "inactive-foreground": "#c0c0c0",
+                "height": 22, "align": "start", "weight": "bold", "buttons": "boxed",
+            },
+        }))
+        .unwrap();
+        let mut shown = NativeAppearance::fallback("UI");
+        assert_eq!(
+            shown.apply_block(&block),
+            (None, None, (Some(0xffffff), Some(0x000080)), true)
+        );
+        assert_eq!(
+            shown.bevel,
+            Some(Bevel {
+                highlight: 0xffffff,
+                light: 0xdfdfdf,
+                shadow: 0x808080,
+                dark_shadow: 0x000000
+            })
+        );
+        assert_eq!((shown.radius, shown.control_radius), (8., 4.));
+        assert_eq!(shown.field, Some(0xffffff));
+        assert_eq!((shown.corner(6.), shown.corner(3.)), (4., 3.));
+        assert_eq!(
+            shown.title_bar,
+            TitleBarTheme {
+                background: Some(BarFill::Gradient {
+                    from: 0x000080,
+                    to: 0x1084d0
+                }),
+                foreground: Some(0xffffff),
+                inactive_background: Some(BarFill::Solid(0x808080)),
+                inactive_foreground: Some(0xc0c0c0),
+                height: Some(22.),
+                align: TitleAlign::Start,
+                weight: Some(FontWeight::BOLD),
+                buttons: CaptionButtons::Boxed,
+            }
+        );
+
+        // An unsupported value costs only itself.
+        let partly: ChromeBlock = serde_json::from_value(serde_json::json!({
+            "control-radius": 99, "active-text": "navy", "bevel": {
+                "highlight": "#fff", "light": "#ddd", "shadow": "gray", "dark-shadow": "#000"},
+            "title-bar": {"background": {"from": "#000080", "to": "blue"}, "foreground": "#fff",
+                          "height": 4, "align": "right", "weight": "black", "buttons": "wide"},
+        }))
+        .unwrap();
+        let mut shown = NativeAppearance::fallback("UI");
+        assert_eq!(
+            shown.apply_block(&partly),
+            (None, None, (None, None), false)
+        );
+        assert_eq!((shown.bevel, shown.control_radius), (None, 8.));
+        assert_eq!(
+            shown.title_bar,
+            TitleBarTheme {
+                foreground: Some(0xffffff),
+                buttons: CaptionButtons::Wide,
+                ..TitleBarTheme::default()
+            }
+        );
+        let none: ChromeBlock =
+            serde_json::from_value(serde_json::json!({"bevel": "none"})).unwrap();
+        assert!(shown.apply_block(&none).3);
+    }
+
+    /// The bundled themes that take their shape from the tokens: one with
+    /// 3D edges and square corners, one with two corner sizes.
+    #[test]
+    fn the_windows_themes_resolve_with_their_shapes_and_palettes() {
+        let catalog = ThemeCatalog::load(None);
+        let classic = resolve(&selection("windows-classic"), &catalog);
+        assert_eq!(classic.notice, None);
+        assert_eq!(classic.scheme, ColorScheme::Light);
+        assert_eq!(
+            classic.bevel,
+            Some(Bevel {
+                highlight: 0xffffff,
+                light: 0xdfdfdf,
+                shadow: 0x808080,
+                dark_shadow: 0x000000
+            })
+        );
+        assert_eq!(
+            (classic.radius, classic.control_radius, classic.corner(6.)),
+            (0., 0., 0.)
+        );
+        assert_eq!(
+            (classic.active, classic.active_text, classic.field),
+            (0x000080, 0xffffff, Some(0xffffff))
+        );
+        assert_eq!(
+            (classic.menu_hover, classic.menu_hover_text),
+            (0x000080, 0xffffff)
+        );
+        assert_eq!(classic.title_bar.buttons, CaptionButtons::Boxed);
+        assert_eq!(
+            classic.title_bar.background,
+            Some(BarFill::Gradient {
+                from: 0x000080,
+                to: 0x1084d0
+            })
+        );
+        // The classic console under a light interface.
+        assert_eq!(
+            (classic.terminal.background, classic.terminal.foreground),
+            (0x000000, 0xaaaaaa)
+        );
+        for (id, scheme) in [
+            ("windows-11-dark", ColorScheme::Dark),
+            ("windows-11-light", ColorScheme::Light),
+        ] {
+            let shown = resolve(&selection(id), &catalog);
+            assert_eq!(
+                (shown.notice.as_deref(), shown.scheme),
+                (None, scheme),
+                "{id}"
+            );
+            assert_eq!(
+                (shown.bevel, shown.radius, shown.control_radius),
+                (None, 8., 4.)
+            );
+            assert_eq!(
+                (shown.title_bar.buttons, shown.title_bar.align),
+                (CaptionButtons::Wide, TitleAlign::Start)
+            );
+            let text: Hsla = rgb(shown.text).into();
+            assert!(contrast(text, rgb(shown.surface).into()) >= 7., "{id}");
+            assert!(contrast(text, rgb(shown.active).into()) >= 7., "{id}");
+        }
+        assert_eq!(
+            resolve(&selection("windows-11-dark"), &catalog)
+                .terminal
+                .background,
+            0x0c0c0c
+        );
+    }
+
+    // In-process: the toolkit's components draw from its own theme, so the
+    // shape tokens have to arrive there and leave with the theme.
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn the_component_theme_takes_the_bevel_and_field_and_drops_them_again() {
+        use gpui_kit::component::ActiveTheme as _;
+        let app = gpui_kit::TestAppContext::single();
+        app.update(gpui_kit::init);
+        let catalog = ThemeCatalog::load(None);
+        app.update(|cx| {
+            resolve(&selection("windows-classic"), &catalog).apply_component_theme(cx);
+            let theme = cx.theme();
+            let bevel = theme.bevel.expect("the classic theme's bevel");
+            assert_eq!(bevel.highlight, rgb(0xffffff).into());
+            assert_eq!(bevel.dark_shadow, rgb(0x000000).into());
+            assert_eq!(theme.field, Some(rgb(0xffffff).into()));
+            assert_eq!(theme.input_background(), rgb(0xffffff).into());
+            assert_eq!(f32::from(theme.radius), 0.);
+            assert_eq!(f32::from(theme.radius_lg), 0.);
+
+            // A square theme that names its radius only in the `splitty`
+            // block squares the components too.
+            resolve(&selection("splitty-classic"), &catalog).apply_component_theme(cx);
+            assert_eq!(f32::from(cx.theme().radius), 0.);
+            resolve(&selection("windows-11-dark"), &catalog).apply_component_theme(cx);
+            let theme = cx.theme();
+            assert_eq!(
+                (f32::from(theme.radius), f32::from(theme.radius_lg)),
+                (4., 8.)
+            );
+
+            resolve(&selection("splitty-dark"), &catalog).apply_component_theme(cx);
+            let theme = cx.theme();
+            assert!(theme.bevel.is_none());
+            assert_eq!(theme.field, None);
+        });
+    }
+
+    #[test]
+    fn text_on_a_selected_entry_is_readable_without_a_token() {
+        let catalog = ThemeCatalog::load(None);
+        let dark = resolve(&selection("splitty-dark"), &catalog);
+        // A theme whose text already reads on `active` keeps it.
+        assert_eq!(dark.active_text, dark.text);
+        assert_eq!(
+            (dark.menu_hover, dark.menu_hover_text),
+            (dark.hover, dark.text)
+        );
+        // A theme whose own text is the selection's text keeps its subdued
+        // colors on selected entries and highlighted menu rows.
+        assert_eq!(dark.on_active(dark.muted), dark.muted);
+        assert_eq!(dark.on_menu_hover(dark.muted), dark.muted);
+        // Where selection has its own text color, subdued text stays where
+        // it reads and is lifted where it does not.
+        let mut navy = dark.clone();
+        (navy.active, navy.active_text) = (0x000080, 0xffffff);
+        (navy.menu_hover, navy.menu_hover_text) = (0x000080, 0xffffff);
+        assert_eq!(navy.on_active(0xc0c0c0), 0xc0c0c0);
+        let lifted: Hsla = rgb(navy.on_active(0x404040)).into();
+        assert!(contrast(lifted, rgb(0x000080).into()) >= 3.);
+        assert_eq!(navy.on_menu_hover(0x404040), navy.on_active(0x404040));
+        // Every theme that shipped before the shape tokens keeps its text on
+        // selected entries and highlighted rows.
+        for theme in catalog.ui_themes() {
+            if theme.id.starts_with("windows-") {
+                continue;
+            }
+            let shown = resolve(&selection(&theme.id), &catalog);
+            if theme.id.starts_with("splitty-") || theme.id.starts_with("adwaita-") {
+                assert_eq!(shown.active_text, shown.text, "{}", theme.id);
+                assert_eq!(shown.menu_hover_text, shown.text, "{}", theme.id);
+            }
+        }
+        // Text that does not read on the highlight turns black or white.
+        assert_eq!(text_on(0x000000, 0x000080), 0xffffff);
+        assert_eq!(text_on(0xf0f0f0, 0xffe000), 0x000000);
+        assert_eq!(text_on(0x101010, 0xd0d0d0), 0x101010);
+        // Soft but readable text is kept.
+        assert_eq!(text_on(0x82a070, 0x113a11), 0x82a070);
     }
 
     #[test]

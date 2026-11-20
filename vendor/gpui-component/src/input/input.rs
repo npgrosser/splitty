@@ -7,6 +7,7 @@ use gpui::{
     SharedString, StyleRefinement, Styled, TextAlign, TouchPhase, Window, div, px, relative,
 };
 
+use crate::bevel::{Relief, bevel_border};
 use crate::button::{Button, ButtonRounded, ButtonVariants as _};
 use crate::input::clear_button;
 use crate::native_menu::NativeMenu;
@@ -774,7 +775,10 @@ impl RenderOnce for Input {
             .styles(|styles| {
                 styles.focused(|style| {
                     style.when(
-                        self.appearance && self.bordered && self.focus_bordered,
+                        self.appearance
+                            && self.bordered
+                            && self.focus_bordered
+                            && cx.theme().bevel.is_none(),
                         |style| style.border_1().border_color(cx.theme().ring),
                     )
                 })
@@ -810,6 +814,7 @@ impl RenderOnce for Input {
                 focused && self.appearance && self.bordered && self.focus_bordered,
                 |this| this.focus_ring_style(window, cx),
             )
+            .map(|this| bevel_border(this, Relief::Sunken, cx))
             .children(prefix.map(|p| {
                 div()
                     .when(presentation.is_disabled(), |this| this.opacity(0.5))

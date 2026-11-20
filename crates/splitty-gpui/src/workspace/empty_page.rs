@@ -123,7 +123,7 @@ impl Workspace {
                                 run(this, window, cx);
                             })),
                     )
-                    .child(menu_style::shortcut(appearance, shortcut)),
+                    .child(menu_style::shortcut(appearance, shortcut, false)),
             ),
         )
     }

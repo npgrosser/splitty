@@ -1073,6 +1073,10 @@ impl ThemeColor {
 impl Theme {
     /// Apply the given theme configuration to the current theme.
     pub fn apply_config(&mut self, config: &Rc<ThemeConfig>) {
+        // A config has no bevel or field color; whoever sets them sets them
+        // again after it.
+        self.bevel = None;
+        self.field = None;
         if config.mode.is_dark() {
             self.dark_theme = config.clone();
         } else {

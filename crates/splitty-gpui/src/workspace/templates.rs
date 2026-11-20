@@ -1168,8 +1168,7 @@ impl Workspace {
                     .gap_2()
                     .px_4()
                     .py_3()
-                    .border_b_1()
-                    .border_color(rgb(colors.subtle_border))
+                    .edged_sides(colors, Relief::Etched, Sides::BOTTOM, colors.subtle_border)
                     .child(
                         div()
                             .text_size(chrome_rems(12.5))
@@ -1242,6 +1241,9 @@ impl Workspace {
                             .flex_none()
                             .px_2()
                             .py_1()
+                            .when(selected == Some(id.as_str()), |tab| {
+                                tab.text_color(rgb(self.appearance.active_text))
+                            })
                             .bg(rgb(if selected == Some(id.as_str()) {
                                 self.appearance.active
                             } else {
@@ -1256,8 +1258,7 @@ impl Workspace {
                     .size_full()
                     .min_w_0()
                     .min_h_0()
-                    .border_1()
-                    .border_color(rgb(self.appearance.border))
+                    .edged(&self.appearance, Relief::Etched)
                     .child(header)
                     .child(
                         div()
@@ -1394,7 +1395,7 @@ impl Workspace {
 }
 
 /// A button of the template panel; the primary one carries the accent.
-fn action_style<E: Styled + StatefulInteractiveElement>(
+fn action_style<E: Styled + ParentElement + StatefulInteractiveElement>(
     button: E,
     colors: &NativeAppearance,
     primary: bool,
@@ -1407,13 +1408,17 @@ fn action_style<E: Styled + StatefulInteractiveElement>(
         .flex()
         .items_center()
         .justify_center()
-        .rounded(chrome_rems(5.))
-        .border_1()
-        .border_color(rgb(if primary {
-            colors.accent
-        } else {
-            colors.subtle_border
-        }))
+        .rounded(chrome_rems(colors.corner(5.)))
+        .edged_sides(
+            colors,
+            Relief::Raised,
+            Sides::ALL,
+            if primary {
+                colors.accent
+            } else {
+                colors.subtle_border
+            },
+        )
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(if primary {
             colors.accent
@@ -1430,22 +1435,26 @@ fn row_style<E: Styled + StatefulInteractiveElement>(
     colors: &NativeAppearance,
     chosen: bool,
 ) -> E {
-    let hover: Hsla = rgb(colors.hover).into();
+    let text = if chosen {
+        colors.active_text
+    } else {
+        colors.secondary
+    };
+    let (hover, hover_text): (Hsla, Hsla) = (
+        rgb(colors.menu_hover).into(),
+        rgb(super::menu_style::on_highlight(colors, text)).into(),
+    );
     row.px(chrome_rems(10.))
         .py(chrome_rems(7.))
-        .rounded(chrome_rems(4.))
+        .rounded(chrome_rems(colors.corner(4.)))
         .cursor_pointer()
         .bg(if chosen {
             rgb(colors.active).into()
         } else {
             gpui::transparent_black()
         })
-        .text_color(rgb(if chosen {
-            colors.text
-        } else {
-            colors.secondary
-        }))
-        .hover(move |row| row.bg(hover))
+        .text_color(rgb(text))
+        .hover(move |row| row.bg(hover).text_color(hover_text))
 }
 
 /// A quiet action beside a row.
@@ -1454,7 +1463,7 @@ fn quiet_style<E: Styled + StatefulInteractiveElement>(button: E, colors: &Nativ
     button
         .px(chrome_rems(8.))
         .py(chrome_rems(5.))
-        .rounded(chrome_rems(4.))
+        .rounded(chrome_rems(colors.corner(4.)))
         .text_size(chrome_rems(11.))
         .text_color(rgb(colors.muted))
         .cursor_pointer()
@@ -1462,16 +1471,15 @@ fn quiet_style<E: Styled + StatefulInteractiveElement>(button: E, colors: &Nativ
 }
 
 /// The frame of a text field.
-fn field_box<E: Styled>(field: E, colors: &NativeAppearance) -> E {
+fn field_box<E: Styled + ParentElement>(field: E, colors: &NativeAppearance) -> E {
     field
         .h(chrome_rems(30.))
         .px(chrome_rems(4.))
         .flex()
         .items_center()
-        .rounded(chrome_rems(5.))
-        .border_1()
-        .border_color(rgb(colors.subtle_border))
-        .bg(rgb(colors.surface))
+        .rounded(chrome_rems(colors.corner(5.)))
+        .edged_sides(colors, Relief::Sunken, Sides::ALL, colors.subtle_border)
+        .bg(rgb(colors.field.unwrap_or(colors.surface)))
 }
 
 fn field_label(colors: &NativeAppearance, text: &'static str) -> Div {

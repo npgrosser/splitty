@@ -240,6 +240,9 @@ impl RenderOnce for Radio {
                     .border_1()
                     .border_color(border_color)
                     .map(|this| match self.checked {
+                        // A theme with a bevel keeps the field color, and the
+                        // mark takes the text color.
+                        _ if cx.theme().bevel.is_some() => this.bg(cx.theme().input_background()),
                         false => this.bg(cx.theme().input_background()),
                         true if disabled => this.bg(bg),
                         true => this.bg(cx.theme().tokens.primary),

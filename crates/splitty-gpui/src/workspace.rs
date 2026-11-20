@@ -33,6 +33,7 @@ mod transfer;
 mod unread;
 mod viewer;
 
+use crate::appearance::edges::{Edged as _, Relief, Sides};
 use crate::appearance::{NativeAppearance, ThemeCatalog};
 use crate::terminal::{self, Terminal};
 use gpui_kit::assets::IconName;
@@ -583,8 +584,10 @@ impl Render for DragPreview {
                 .ml(self.grab.x - px(DRAG_PREVIEW_LEFT_OF_POINTER * scale))
                 .mt(self.grab.y + px(DRAG_PREVIEW_BELOW_POINTER * scale))
                 .font(font(self.appearance.font_family.clone()))
-                .border_1()
-                .border_color(rgb(self.appearance.border))
+                // A bevel theme's tab has its own edge.
+                .when(self.appearance.bevel.is_none(), |tab| {
+                    tab.border_1().border_color(rgb(self.appearance.border))
+                })
                 .child(screen_motion::passive_tab_label(&self.title, cx))
                 .child(
                     div()
@@ -6363,12 +6366,22 @@ impl Workspace {
                     );
                     before += ratio;
                     if index + 1 < children.len() {
+                        // A groove between the groups in a bevel theme.
                         split = split.child(
                             div()
                                 .flex_none()
-                                .bg(rgb(self.appearance.subtle_border))
-                                .when(horizontal, |view| view.w(px(1.)).h_full())
-                                .when(!horizontal, |view| view.h(px(1.)).w_full()),
+                                .edged_or(
+                                    &self.appearance,
+                                    Relief::Etched,
+                                    if horizontal { Sides::LEFT } else { Sides::TOP },
+                                    |line| {
+                                        line.bg(rgb(self.appearance.subtle_border))
+                                            .when(horizontal, |view| view.w(px(1.)).h_full())
+                                            .when(!horizontal, |view| view.h(px(1.)).w_full())
+                                    },
+                                )
+                                .when(horizontal, |view| view.h_full())
+                                .when(!horizontal, |view| view.w_full()),
                         );
                         let node = split_key.clone();
                         let source = self.selected_model().map(SourceWorkspace::source_token);
@@ -6483,8 +6496,7 @@ impl Workspace {
             .overflow_hidden()
             .occlude()
             // The web client's floating group frame.
-            .border_1()
-            .border_color(rgb(self.appearance.border))
+            .edged(&self.appearance, Relief::Frame)
             .shadow_lg()
             .bg(rgb(self.appearance.surface))
             .on_mouse_down(
@@ -6723,8 +6735,12 @@ impl Render for Workspace {
                 .flex_none()
                 .overflow_hidden()
                 .bg(rgb(self.appearance.raised))
-                .border_r_1()
-                .border_color(rgb(self.appearance.subtle_border))
+                .edged_sides(
+                    &self.appearance,
+                    Relief::Etched,
+                    Sides::RIGHT,
+                    self.appearance.subtle_border,
+                )
                 .occlude()
                 .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
                 .child(panel_content)
@@ -6756,10 +6772,11 @@ impl Render for Workspace {
                             .id("hosts-browser")
                             .w(chrome_rems(width))
                             .h(chrome_rems(height))
-                            .rounded(cx.theme().radius_lg)
+                            .rounded(chrome_rems(self.appearance.radius))
                             .overflow_hidden()
-                            .border_1()
-                            .border_color(cx.theme().border)
+                            .edged_or(&self.appearance, Relief::Frame, Sides::ALL, |browser| {
+                                browser.border_1().border_color(cx.theme().border)
+                            })
                             .bg(cx.theme().popover)
                             .occlude()
                             .on_click(|_, _, cx| cx.stop_propagation())

@@ -1111,3 +1111,86 @@ fn a_refused_group_transfer_is_a_status_and_the_menu_stays_usable() {
         },
     );
 }
+
+fn use_appearance(
+    window: &mut VisualTestContext,
+    view: &Entity<Workspace>,
+    appearance: &crate::appearance::NativeAppearance,
+) {
+    window.update(|window, cx| {
+        view.update(cx, |workspace, cx| {
+            workspace.appearance = appearance.clone();
+            cx.notify();
+        });
+        window.draw(cx).clear(cx);
+    });
+}
+
+#[test]
+fn a_bevel_theme_draws_tabs_as_buttons_with_a_gap() {
+    with_model(
+        local_model(Uuid::new_v4(), &[("p0", false), ("p1", false)], None),
+        |window, view, _| {
+            let flat = (
+                bounds(window, "tab-title-p0-tab p0"),
+                bounds(window, "tab-title-p1-tab p1"),
+            );
+            use_appearance(
+                window,
+                &view,
+                &crate::appearance::edges::bevel_test_appearance(),
+            );
+            let beveled = (
+                bounds(window, "tab-title-p0-tab p0"),
+                bounds(window, "tab-title-p1-tab p1"),
+            );
+            assert_eq!(
+                beveled.0.left() - flat.0.left(),
+                px(2.),
+                "the first title sits inside its tab's 2 px edge"
+            );
+            assert_eq!(
+                beveled.1.left() - flat.1.left(),
+                px(2. + 2. + 2. + 2.),
+                "the second follows the first tab's edges, the gap and its own edge"
+            );
+        },
+    );
+}
+
+#[test]
+fn a_bevel_theme_frames_a_scrolling_menu_outside_its_rows() {
+    with_model(
+        local_model(Uuid::new_v4(), &[("p0", false), ("p1", false)], Some(CWD)),
+        |window, view, _| {
+            let at = point(px(120.), px(80.));
+            open(window, &view, "p0", at);
+            let flat = bounds(window, "tab-context-menu");
+            let flat_row = bounds(window, "tab-context-copy-cwd");
+            assert_eq!(flat.origin, at);
+            press(window, point(px(800.), px(500.)), MouseButton::Left);
+            use_appearance(
+                window,
+                &view,
+                &crate::appearance::edges::bevel_test_appearance(),
+            );
+            open(window, &view, "p0", at);
+            let panel = bounds(window, "tab-context-menu");
+            assert_eq!(
+                panel.origin,
+                at + point(px(2.), px(2.)),
+                "the frame around the scrolling rows is 2 px wide"
+            );
+            let row = bounds(window, "tab-context-copy-cwd");
+            assert_eq!(
+                row.left() - panel.left(),
+                flat_row.left() - flat.left() - px(1.)
+            );
+            hover(window, "tab-context-move");
+            assert!(
+                window.debug_bounds("tab-context-move-menu").is_some(),
+                "the framed submenu opens beside its row"
+            );
+        },
+    );
+}

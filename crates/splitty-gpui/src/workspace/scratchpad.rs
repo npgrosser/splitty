@@ -596,9 +596,10 @@ impl Workspace {
                 .min_h(chrome_rems(56.))
                 .flex()
                 .flex_col()
-                .border_t_1()
-                .border_color(rgb(self.appearance.border))
-                .bg(rgb(self.appearance.raised))
+                .edged_or(&self.appearance, Relief::Sunken, Sides::ALL, |pad| {
+                    pad.border_t_1().border_color(rgb(self.appearance.border))
+                })
+                .bg(rgb(self.appearance.field.unwrap_or(self.appearance.raised)))
                 .font(font(self.mono_family.clone()))
                 .drag_over::<ExternalPaths>(|pad, _, _, _| pad.opacity(0.7))
                 .on_drop({

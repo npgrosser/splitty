@@ -221,7 +221,9 @@ The native workspace SHALL resolve UI themes and terminal palettes in a catalog 
 
 Settings SHALL store a theme by its identifier: the display name in lowercase with every run of characters other than ASCII letters and digits replaced by `-`, or the `id` of the theme's `splitty` object. A bundled theme SHALL keep its identifier against a file with the same one. The identifiers of the themes shipped before this catalog (`splitty-dark`, `splitty-light` and the others) SHALL keep selecting the same looks, as a UI theme and as a terminal palette of the same identifier.
 
-A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `font-size` and `font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme.
+A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `active-text`, `hover`, `menu-hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `control-radius`, `field`, `bevel`, `title-bar`, `font-size` and `font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme or the other values of the same object.
+
+The shape tokens SHALL apply to the whole interface, the component toolkit's controls included. `radius` SHALL be the corner of floating surfaces and SHALL bound the corner of every control, unless `control-radius` names that bound; marks that are round by meaning stay round. A theme with a `bevel` (`highlight`, `light`, `shadow`, `dark-shadow`) SHALL have its controls, fields, floating surfaces and separators drawn with 3D edges in place of one-color borders; a theme without one SHALL keep its one-color borders. `field` SHALL be the background of fields that hold text. Text on a selected entry and on a highlighted menu row SHALL be readable whether or not the theme names `active-text`. `title-bar` SHALL name the colors (`background` and `inactive-background`, each a color or a `from`/`to` gradient, `foreground`, `inactive-foreground`) and the shape (`height`, `align`, `weight`, `buttons`: `plain`, `boxed` or `wide`) of an application-drawn title bar (see Native Decoration Ownership).
 
 Third-party themes bundled with the application SHALL be limited to those whose license permits redistribution without further conditions, and their license notices SHALL ship in the repository next to them.
 
@@ -241,6 +243,18 @@ Third-party themes bundled with the application SHALL be limited to those whose 
 #### Scenario: Unsupported chrome token
 - **WHEN** a theme's `splitty` object holds a value outside the supported form or range
 - **THEN** that token keeps its derived value, the theme is shown, and the problem is reported
+
+#### Scenario: Theme with 3D edges and square corners
+- **WHEN** the selected UI theme names a `bevel` and a `radius` of 0
+- **THEN** controls, fields and floating surfaces of the workspace and of the toolkit's components show 3D edges and no rounded corner
+
+#### Scenario: Selection color the theme's text does not read on
+- **WHEN** a theme's `active` color has too little contrast to its text and the theme names no `active-text`
+- **THEN** text on selected entries is shown in black or white, whichever reads better there
+
+#### Scenario: Partly unsupported title bar
+- **WHEN** a theme's `title-bar` holds a supported `foreground` and an unsupported `align`
+- **THEN** the title bar takes the foreground, keeps its derived alignment, and the problem is reported
 
 ### Requirement: Program Status Notification Switch
 A server's settings SHALL hold `notifications.programStatus`, a boolean that defaults to true and is listed in the settings metadata; settings stored without it SHALL read it as true, and a window SHALL read it as true from an older server that does not send it. A window SHALL add program status notifications (see `program-status`) only while both `notifications.enabled` and `notifications.programStatus` are on. The switch SHALL NOT change which status a window shows on tabs, screens and host groups.
@@ -300,7 +314,7 @@ The native desktop app SHALL support `appearance.titleBarStyle` with values `sys
 - **THEN** the server rejects the unsupported update atomically, or the native editor leaves the unadvertised setting uneditable
 
 ### Requirement: Native Decoration Ownership
-`appearance.windowDecoration` SHALL select `system` (default) or `splitty`, independently of title-bar colors. System decoration with system colors SHALL use native decoration where available and desktop-style client decoration otherwise. Splitty SHALL use application-owned geometry. Compositor-owned frames MAY retain their colors. All close controls SHALL follow the existing close policy.
+`appearance.windowDecoration` SHALL select `system` (default) or `splitty`, independently of title-bar colors. System decoration with system colors SHALL use native decoration where available and desktop-style client decoration otherwise. Splitty SHALL use application-owned geometry, which SHALL take the title bar's height, alignment, weight and window buttons and the frame's corner from the shown UI theme where the theme names them. While title-bar colors follow the theme, an application-drawn title bar SHALL take the theme's title-bar colors under either decoration, including those of an inactive window. Compositor-owned frames MAY retain their colors. All close controls SHALL follow the existing close policy.
 
 #### Scenario: Client and server decoration
 - **WHEN** the desktop supplies a title bar or requires the application to draw one
@@ -309,6 +323,11 @@ The native desktop app SHALL support `appearance.titleBarStyle` with values `sys
 #### Scenario: Close control
 - **WHEN** the user activates a client title bar's close control
 - **THEN** the window follows its existing workspace close policy
+
+#### Scenario: Theme title bar under each decoration
+- **WHEN** the shown UI theme names title-bar colors and a title-bar shape, and title-bar colors follow the theme
+- **THEN** under system decoration the title bar shows the theme's colors in the desktop's geometry
+- **AND** under Splitty decoration it shows the theme's colors, height, alignment and window buttons
 
 ### Requirement: Native Decoration Startup Selection
 The native app SHALL remember its last confirmed interface, decoration, color and button selections with the startup appearance and restore them for window creation. Absent selections SHALL use their declared defaults. A change requiring restart SHALL disclose that requirement and take effect at the next normal start. Reading settings SHALL NOT write them or recreate terminal sessions.

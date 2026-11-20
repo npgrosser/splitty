@@ -1019,13 +1019,17 @@ impl Workspace {
             .px(chrome_rems(10.))
             .flex()
             .items_center()
-            .rounded(chrome_rems(5.))
-            .border_1()
-            .border_color(rgb(if primary {
-                colors.accent
-            } else {
-                colors.subtle_border
-            }))
+            .rounded(chrome_rems(colors.corner(5.)))
+            .edged_sides(
+                colors,
+                Relief::Raised,
+                Sides::ALL,
+                if primary {
+                    colors.accent
+                } else {
+                    colors.subtle_border
+                },
+            )
             .text_size(chrome_rems(11.5))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(if primary {

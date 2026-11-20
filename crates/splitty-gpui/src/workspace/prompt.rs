@@ -91,13 +91,17 @@ impl Render for ThemedPrompt {
                 .px(chrome_rems(12.))
                 .flex()
                 .items_center()
-                .rounded(chrome_rems(5.))
-                .border_1()
-                .border_color(rgb(if primary {
-                    confirm
-                } else {
-                    colors.subtle_border
-                }))
+                .rounded(chrome_rems(colors.corner(5.)))
+                .edged_sides(
+                    colors,
+                    Relief::Raised,
+                    Sides::ALL,
+                    if primary {
+                        confirm
+                    } else {
+                        colors.subtle_border
+                    },
+                )
                 .text_size(chrome_rems(BUTTON_TEXT))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(if primary { confirm } else { colors.secondary }))
@@ -117,9 +121,8 @@ impl Render for ThemedPrompt {
             .gap(chrome_rems(6.))
             .p(chrome_rems(PADDING))
             .bg(rgb(colors.overlay))
-            .border_1()
-            .border_color(rgb(colors.border))
-            .rounded(chrome_rems(colors.radius.max(6.)))
+            .edged(colors, Relief::Frame)
+            .rounded(chrome_rems(colors.radius))
             .shadow(vec![BoxShadow {
                 color: rgba(colors.shadow).into(),
                 offset: point(px(0.), px(12.)),

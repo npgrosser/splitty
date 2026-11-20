@@ -44,6 +44,7 @@ pub struct TitleBar {
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 1]>,
     on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+    window_controls: Option<AnyElement>,
 }
 
 impl TitleBar {
@@ -53,6 +54,7 @@ impl TitleBar {
             style: StyleRefinement::default(),
             children: SmallVec::new(),
             on_close_window: None,
+            window_controls: None,
         }
     }
 
@@ -100,6 +102,15 @@ impl TitleBar {
         if cfg!(target_os = "linux") {
             self.on_close_window = Some(Rc::new(Box::new(f)));
         }
+        self
+    }
+
+    /// Replace the built-in window controls with the given element, which
+    /// routes its own buttons: on Windows through `window_control_area`, so
+    /// the native window procedure handles them. It sits beside the drag
+    /// area, not over it.
+    pub fn window_controls(mut self, controls: impl IntoElement) -> Self {
+        self.window_controls = Some(controls.into_any_element());
         self
     }
 }
@@ -216,7 +227,6 @@ impl RenderOnce for ControlIcon {
             .justify_center()
             .content_center()
             .items_center()
-            .text_color(cx.theme().foreground)
             .hover(|style| style.bg(hover_bg).text_color(hover_fg))
             .active(|style| style.bg(active_bg).text_color(hover_fg))
             .when(is_windows, |this| {
@@ -339,6 +349,8 @@ impl RenderOnce for TitleBar {
                 .pl(TITLE_BAR_LEFT_PADDING)
                 .border_b_1()
                 .border_color(cx.theme().title_bar_border)
+                // The built-in window controls take the bar's text color.
+                .text_color(cx.theme().foreground)
                 .bg(default_title_bar_background(
                     cx.theme().title_bar,
                     cx.theme().background,
@@ -402,8 +414,12 @@ impl RenderOnce for TitleBar {
                         })
                         .children(self.children),
                 )
-                .child(WindowControls {
-                    on_close_window: self.on_close_window,
+                .child(match self.window_controls {
+                    Some(controls) => controls,
+                    None => WindowControls {
+                        on_close_window: self.on_close_window,
+                    }
+                    .into_any_element(),
                 }),
         )
     }
