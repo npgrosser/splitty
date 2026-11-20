@@ -14,4 +14,4 @@
 ## 3. Checks
 
 - [x] 3.1 Targeted: `cargo test -p splitty-core`, `-p splitty-client-core`, `-p splitty-server --lib`, `cargo test -p splitty-gpui --features ui-test-support`
-- [ ] 3.2 Full check before the merge: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `openspec validate --specs`
+- [x] 3.2 Full check before the merge: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `openspec validate --specs`

@@ -108,6 +108,7 @@ model {
     config -> shell_profiles 'ShellSettings, detection and reconciliation'
     shell_profiles -> config 'Load saved profiles in configuration compatibility tests'
     template -> config 'config_dir, ensure_private_dir'
+    theme -> config 'The default theme, which an unknown or unreadable theme falls back to'
     mux -> template 'Template model and validation for pure apply and extraction'
     mux -> ids 'PaneId, ScreenId, SessionId, …'
     effect_runner -> ids 'PaneId, ScreenId, SessionId'
