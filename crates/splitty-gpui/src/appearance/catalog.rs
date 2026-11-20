@@ -40,6 +40,41 @@ pub struct TabAccentBlock {
     pub position: String,
 }
 
+/// The four colors of a 3D edge, lightest to darkest.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct BevelBlock {
+    pub highlight: String,
+    pub light: String,
+    pub shadow: String,
+    pub dark_shadow: String,
+}
+
+/// A color, or a gradient from the start to the end of a line of text.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum FillBlock {
+    Color(String),
+    Gradient { from: String, to: String },
+}
+
+/// The title bar an application-drawn window header takes from the theme.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct TitleBarBlock {
+    pub background: Option<FillBlock>,
+    pub foreground: Option<String>,
+    pub inactive_background: Option<FillBlock>,
+    pub inactive_foreground: Option<String>,
+    pub height: Option<f32>,
+    /// `center` or `start`.
+    pub align: Option<String>,
+    /// `normal`, `medium`, `semibold` or `bold`.
+    pub weight: Option<String>,
+    /// `plain`, `boxed` or `wide`.
+    pub buttons: Option<String>,
+}
+
 /// The optional `splitty` object of a theme: the workspace chrome's own
 /// tokens, which the toolkit's format does not define. Every absent key is
 /// derived from the theme's toolkit colors.
@@ -57,7 +92,11 @@ pub struct ChromeBlock {
     pub border: Option<String>,
     pub border_subtle: Option<String>,
     pub active: Option<String>,
+    /// Text on `active`.
+    pub active_text: Option<String>,
     pub hover: Option<String>,
+    /// The highlighted row of a menu, where it differs from `hover`.
+    pub menu_hover: Option<String>,
     pub accent: Option<String>,
     pub danger: Option<String>,
     pub danger_hover: Option<String>,
@@ -72,6 +111,11 @@ pub struct ChromeBlock {
     pub tab_font_size: Option<f32>,
     pub tab_accent: Option<Maybe<TabAccentBlock>>,
     pub radius: Option<f32>,
+    /// The corners of controls, where they differ from `radius`.
+    pub control_radius: Option<f32>,
+    /// 3D edges in place of flat borders.
+    pub bevel: Option<Maybe<BevelBlock>>,
+    pub title_bar: Option<TitleBarBlock>,
     pub font_size: Option<f32>,
     /// A comma-separated family list; `system-ui` and `monospace` name the
     /// platform's fonts.
