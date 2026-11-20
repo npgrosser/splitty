@@ -1317,11 +1317,11 @@ impl Workspace {
                 super::drawer::NavItem {
                     icon: IconName::Server,
                     label: "Hosts",
-                    shortcut: Some(if connecting {
-                        "Connecting…".into()
+                    shortcut: if connecting {
+                        Some("Connecting…".into())
                     } else {
-                        super::drawer::nav_shortcut(Shortcut::Hosts, cx)
-                    }),
+                        super::drawer::nav_shortcut(KeyCommand::Hosts, cx)
+                    },
                     active,
                 },
                 window,

@@ -132,6 +132,11 @@ model {
       metadata { module 'splitty_client_core::external_links' }
     }
 
+    keymap = component 'keymap' {
+      description 'UI-free keyboard command registry with stable ids, titles, categories and default keys per platform; key combinations in file and label form with reserved typing and program keys; the user\'s overrides kept in a private bounded file of the application beside the remembered appearance, and the effective keymap they make with replaced, unbound and taken keys and reported problems.'
+      metadata { module 'splitty_client_core::keymap' }
+    }
+
     client_zoom = component 'client_zoom' {
       description 'Display zoom levels from the service settings metadata (the server core levels for an older service), scope projection with whole-pixel terminal font sizes in the terminals scope, and keyboard intent steps.'
       metadata { module 'splitty_client_core::zoom' }
@@ -300,5 +305,6 @@ model {
     embedded -> splitty.remote.install 'Type the offline test connector'
     embedded -> splitty.remote.tunnel 'Type the offline test connector'
     embedded -> splitty.transport.admission 'Type the offline test connector'
+    keymap -> splitty.core.config 'Locate the configuration directory and write the keybindings file privately'
   }
 }

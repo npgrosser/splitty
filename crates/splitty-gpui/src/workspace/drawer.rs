@@ -107,10 +107,10 @@ const NAV_ICON_OPACITY: f32 = 0.8;
 /// `.drawer-nav-shortcut`: 10px in the system face.
 const NAV_SHORTCUT_TEXT: f32 = 10.;
 
-/// The key of a destination as its Drawer entry shows it, from the one
-/// table the command palette and the shortcut list read.
-pub(super) fn nav_shortcut(shortcut: Shortcut, cx: &App) -> SharedString {
-    super::palette::shortcut_label(shortcut, cx.platform_info().is_mac()).into()
+/// The key of a destination as its Drawer entry shows it, from the keymap
+/// the command palette and the shortcut list read; none when it is unbound.
+pub(super) fn nav_shortcut(command: KeyCommand, cx: &App) -> Option<SharedString> {
+    crate::keys::label(command, cx)
 }
 
 /// One destination of the Drawer's bottom navigation.
@@ -3953,7 +3953,7 @@ impl Workspace {
                 NavItem {
                     icon: IconName::LayoutGrid,
                     label: "Templates",
-                    shortcut: Some(nav_shortcut(Shortcut::Templates, cx)),
+                    shortcut: nav_shortcut(KeyCommand::Templates, cx),
                     active: templates_active,
                 },
                 window,
@@ -4103,7 +4103,7 @@ impl Workspace {
                             NavItem {
                                 icon: IconName::SlidersHorizontal,
                                 label: "Settings",
-                                shortcut: Some(nav_shortcut(Shortcut::Settings, cx)),
+                                shortcut: nav_shortcut(KeyCommand::Settings, cx),
                                 active: self.destination == Destination::Settings,
                             },
                             window,

@@ -10,6 +10,7 @@ pub mod document;
 pub mod embedded;
 pub mod external_links;
 pub mod hub;
+pub mod keymap;
 pub mod local_service;
 pub mod native_workspace;
 pub mod notifications;
