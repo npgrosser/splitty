@@ -121,11 +121,43 @@ def screens(stage):
     stage.wait(1.4)
 
 
+SETTINGS = (70, 768)
+
+
+def customize_setup(stage):
+    stage.run("serve")
+    stage.key("alt+d")
+    stage.run("git log --graph --oneline --all")
+    stage.key("alt+shift+d")
+    stage.run("tests")
+
+
+THEME_SELECT = (437, 379)
+
+
+def customize(stage):
+    """Themes change the whole window at once; every key can be rebound."""
+    stage.wait(0.5)
+    stage.click(*SETTINGS, pause=0.9)
+    stage.scroll(520, 500, 6, pause=0.5)
+    stage.click(*THEME_SELECT, pause=0.5)
+    # The list filters by what is typed; it opens again from the keyboard,
+    # wherever a theme's own metrics have put it.
+    for name in ("Splitty Aurora", "Catppuccin Mocha", "Windows Classic", "Splitty Classic"):
+        stage.type(name, pause=0.4)
+        stage.key("Return", label="", pause=1.5)
+        stage.key("Return", label="", pause=0.5)
+    stage.key("Escape", label="", pause=0.4)
+    stage.key("alt+shift+k", pause=1.2)
+    stage.type("split", pause=1.6)
+
+
 SCENES = [
     Scene("terminal", terminal),
     Scene("splits", splits),
     Scene("pointer", pointer, setup=pointer_setup),
     Scene("screens", screens, setup=screens_setup, drawer=True),
+    Scene("customize", customize, setup=customize_setup, drawer=True),
 ]
 
 from scenes_remote import SCENES as _REMOTE  # noqa: E402

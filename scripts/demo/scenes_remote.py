@@ -39,20 +39,42 @@ def local_setup(stage):
 
 
 def remote(stage):
-    """A remote screen next to the local ones, and back after closing the host."""
+    """A remote screen next to the local ones."""
     stage.wait(0.8)
     stage.click(*HOSTS, pause=0.8)
     stage.click(*DEVBOX, pause=1.6)
     stage.click(*NEW_SCREEN, pause=1.2)
-    stage.run("monitor", pause=1.4)
+    stage.run("monitor", pause=1.2)
     stage.key("alt+d")
     stage.run("serve", pause=1.6)
-    stage.key("alt+1", pause=1.3)
-    stage.click(*REMOTE_SCREEN, pause=1.4)
+    stage.key("alt+1", pause=1.4)
+    stage.click(*REMOTE_SCREEN, pause=1.8)
+
+
+def reconnect_setup(stage):
+    """The local screens, and a remote one with two programs at work."""
+    local_setup(stage)
+    stage.click(*HOSTS)
+    stage.click(*DEVBOX)
+    # Connecting takes the host's time, not the stage's.
+    time.sleep(3)
+    stage.click(*NEW_SCREEN)
+    time.sleep(2)
+    stage.run("monitor")
+    stage.key("alt+d")
+    stage.run("serve")
+    time.sleep(2)
+    stage.move(900, 560)
+
+
+def reconnect(stage):
+    """The host is closed here and keeps working: its screen is back as it
+    was, with what ran meanwhile."""
+    stage.wait(1.6)
     stage.move(100, UNPLUG[1])
-    stage.click(*UNPLUG, pause=1.4)
-    stage.click(*HOSTS, pause=0.8)
-    stage.click(*DEVBOX, pause=3.0)
+    stage.click(*UNPLUG, pause=2.2)
+    stage.click(*HOSTS, pause=0.9)
+    stage.click(*DEVBOX, pause=3.2)
 
 
 def ports_setup(stage):
@@ -90,5 +112,6 @@ def ports(stage):
 
 SCENES = [
     Scene("remote", remote, setup=local_setup, drawer=True, host=True),
+    Scene("reconnect", reconnect, setup=reconnect_setup, drawer=True, host=True),
     Scene("ports", ports, setup=ports_setup, drawer=True, host=True),
 ]

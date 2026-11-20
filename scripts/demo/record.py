@@ -252,6 +252,16 @@ class Stage:
         self.hands.button(button, False)
         self.wait(pause)
 
+    def scroll(self, x: float, y: float, steps: int, pause: float = 0.4):
+        """Turn the wheel over a place: down for positive steps."""
+        self.move(x, y)
+        for _ in range(abs(steps)):
+            button = 5 if steps > 0 else 4
+            self.hands.button(button, True)
+            self.hands.button(button, False)
+            time.sleep(0.02 if self.fast else 0.09)
+        self.wait(pause)
+
     def drag(self, start: tuple[float, float], end: tuple[float, float], pause: float = 0.6,
              pace: float = 1.15):
         """Press at `start`, carry to `end`, release. The way there passes a
@@ -530,7 +540,8 @@ def main():
     parser.add_argument("--xdotool", default="xdotool")
     parser.add_argument("--display", type=int, default=87,
                         help="the first private display number")
-    parser.add_argument("--font", default="Ubuntu Sans", help="the interface font, installed")
+    parser.add_argument("--font", default="",
+                        help="an interface font for every theme; each theme's own without it")
     parser.add_argument("--font-file", default="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
                         help="a TrueType file for the key chips, with arrows")
     parser.add_argument("--theme", help="record in this UI theme instead of the scenes' own; "
