@@ -495,6 +495,10 @@ fn reserved_chords_are_typing_or_programs_keys() {
             "shift+a",
             "shift+1",
             "shift+space",
+            "shift+tab",
+            "shift+enter",
+            "shift+backspace",
+            "shift+left",
             "enter",
             "tab",
             "escape",
@@ -532,7 +536,6 @@ fn reserved_chords_are_typing_or_programs_keys() {
             "shift+pagedown",
             "shift+home",
             "shift+end",
-            "shift+tab",
             "f11",
             "ctrl+tab",
             "ctrl+shift+space",
@@ -623,17 +626,27 @@ fn reading_skips_and_reports_what_it_cannot_use() {
             "screen.next": ["ctrl+n", "ctrl+banana", 3, "x"],
             "drawer.toggle": [],
             "screen.teleport": ["alt+z"],
+            "pane.float": ["ctlr+m"],
             "tab.new": "alt+y"
         }}"#,
     );
+    // A list of which nothing could be read leaves the defaults.
+    assert_eq!(overrides.get(Command::from_id("pane.float").unwrap()), None);
+    assert!(overrides
+        .problems()
+        .iter()
+        .any(|problem| problem.contains("default keys apply")));
     assert_eq!(
         overrides.get(Command::NextScreen),
         Some(&[chord("ctrl+n")][..])
     );
     assert_eq!(overrides.get(Command::ToggleDrawer), Some(&[][..]));
     assert_eq!(overrides.get(Command::NewTab), None);
-    assert_eq!(overrides.problems().len(), 5, "{:?}", overrides.problems());
-    assert!(overrides.problems()[0].contains("ctrl+banana"));
+    assert_eq!(overrides.problems().len(), 7, "{:?}", overrides.problems());
+    assert!(overrides
+        .problems()
+        .iter()
+        .any(|problem| problem.contains("ctrl+banana")));
     assert!(overrides
         .problems()
         .iter()

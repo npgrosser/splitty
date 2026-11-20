@@ -200,6 +200,11 @@ impl Workspace {
             cx.notify();
             return false;
         }
+        if self.scratchpad_focused(window, cx) {
+            // A text field took the keyboard: its typing is not the mode's.
+            self.end_arrange(cx);
+            return false;
+        }
         cx.stop_propagation();
         let key = &event.keystroke;
         if self.key_command(key, window, cx) == Some(KeyCommand::ArrangePanes) {

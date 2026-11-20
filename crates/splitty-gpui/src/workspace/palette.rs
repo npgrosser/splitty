@@ -16,19 +16,10 @@ pub(super) struct PaletteEntry {
     pub(super) command: PaletteCommand,
 }
 
-/// Whether the palette lists `command`: not the numbered and directional
-/// commands, which have a row each on the Keyboard page, nor itself.
+/// Whether the palette lists `command`: every command but its own, so one
+/// without a key can still be run.
 fn listed(command: KeyCommand) -> bool {
-    !matches!(
-        command,
-        KeyCommand::SelectScreen(_)
-            | KeyCommand::FocusPane(_)
-            | KeyCommand::ScrollPageUp
-            | KeyCommand::ScrollPageDown
-            | KeyCommand::ScrollTop
-            | KeyCommand::ScrollBottom
-            | KeyCommand::CommandPalette
-    )
+    command != KeyCommand::CommandPalette
 }
 
 /// Every command of the window in the registry's order, with its key in

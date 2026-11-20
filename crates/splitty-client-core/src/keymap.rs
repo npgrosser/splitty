@@ -87,6 +87,15 @@ impl Overrides {
                     )),
                 }
             }
+            // A list of which nothing could be read is a mistake, not a
+            // request to leave the command without a key.
+            if taken.is_empty() && !chords.is_empty() {
+                overrides.problems.push(format!(
+                    "None of the keys of {} could be used; its default keys apply.",
+                    command.title()
+                ));
+                continue;
+            }
             overrides.bindings.insert(command, taken);
         }
         overrides

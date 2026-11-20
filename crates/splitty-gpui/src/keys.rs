@@ -67,7 +67,8 @@ pub(crate) fn command(
 }
 
 /// The command of `chord`. A symbol typed with Shift, such as `+`, names its
-/// key already, so it also runs the command of the symbol without Shift.
+/// key already, so the zoom commands also run from their symbol with Shift
+/// held, on a layout or platform that reports it.
 fn lookup(keymap: &Keymap, chord: Chord) -> Option<Command> {
     keymap.lookup(&chord).or_else(|| {
         let symbol =
@@ -80,6 +81,12 @@ fn lookup(keymap: &Keymap, chord: Chord) -> Option<Command> {
                 })
             })
             .flatten()
+            .filter(|command| {
+                matches!(
+                    command,
+                    Command::ZoomIn | Command::ZoomOut | Command::ZoomReset
+                )
+            })
     })
 }
 

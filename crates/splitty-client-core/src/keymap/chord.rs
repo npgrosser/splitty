@@ -97,6 +97,9 @@ const EDITING_KEYS: &[&str] = &[
     "pagedown",
 ];
 
+/// The keys that scroll a terminal's history with Shift.
+const HISTORY_KEYS: &[&str] = &["home", "end", "pageup", "pagedown"];
+
 fn function_key(name: &str) -> bool {
     name.strip_prefix('f')
         .and_then(|number| number.parse::<u8>().ok())
@@ -270,11 +273,12 @@ impl Chord {
     /// from terminal programs (`Program`).
     pub fn reserved(&self, platform: Platform) -> Option<Reserved> {
         let key = self.key.as_str();
-        let only_shift = self.shift && !self.ctrl && !self.alt && !self.platform;
-        if !self.modified() && (character_key(key) || EDITING_KEYS.contains(&key)) {
-            return Some(Reserved::Typing);
-        }
-        if only_shift && character_key(key) {
+        // Shift alone does not make a key a command's: Shift with Tab, an
+        // arrow or Enter is input as much as the key itself. The history
+        // keys are the exception, which terminals take with Shift.
+        let typed = !self.ctrl && !self.alt && !self.platform;
+        let history = self.shift && HISTORY_KEYS.contains(&key);
+        if typed && (character_key(key) || EDITING_KEYS.contains(&key)) && !history {
             return Some(Reserved::Typing);
         }
         let letter = key.len() == 1 && key.chars().all(|c| c.is_ascii_alphabetic());

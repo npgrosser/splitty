@@ -3936,7 +3936,10 @@ impl Workspace {
             // The Templates panel is a destination of the Drawer as well:
             // its own key closes it and the others' keys leave it, unless a
             // request of the panel is under way.
-            match command.filter(|command| works_off_screens(*command)) {
+            match command.filter(|command| {
+                // The panel keeps the keyboard, so the Drawer cannot take it.
+                works_off_screens(*command) && *command != KeyCommand::FocusDrawer
+            }) {
                 Some(command) => {
                     cx.stop_propagation();
                     self.run_key_command(command, window, cx);

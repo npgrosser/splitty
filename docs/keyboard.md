@@ -34,10 +34,11 @@ only what differs from the defaults:
 - A key given to one command no longer starts the command that has it by
   default.
 - A key that is plain typing (a character, Enter, Tab, Escape or a navigation
-  key without Ctrl, Alt or the platform key) is refused. Keys that terminal
-  programs commonly use, such as Ctrl with a letter, are allowed; the settings
-  page marks them.
-- Entries the app cannot read are skipped and named on the settings page.
+  key without Ctrl, Alt or the platform key) is refused; Shift with PageUp,
+  PageDown, Home or End is allowed. Keys that terminal programs commonly use,
+  such as Ctrl with a letter, are allowed; the settings page marks them.
+- Entries the app cannot read are skipped and named on the settings page. A
+  command whose list holds no usable key keeps its default keys.
 
 A key bound to a command does not reach the terminal. Every other key does.
 
@@ -49,8 +50,8 @@ into the neighboring group, and Escape or Enter ends the mode.
 
 ## Default keys
 
-The defaults leave unmodified keys and Ctrl with a letter to the programs in
-the terminal. Scrolling the history with Shift and PageUp, PageDown, Home or
+The defaults leave typing keys and Ctrl with a letter to the programs in the
+terminal; F11 for full screen is the one function key they take. Scrolling the history with Shift and PageUp, PageDown, Home or
 End applies while the terminal shows its normal screen; a full-screen program
 receives those keys.
 
