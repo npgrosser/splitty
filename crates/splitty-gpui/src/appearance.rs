@@ -1499,6 +1499,32 @@ mod tests {
         );
     }
 
+    // In-process: the toolkit's components draw from its own theme, so the
+    // shape tokens have to arrive there and leave with the theme.
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn the_component_theme_takes_the_bevel_and_field_and_drops_them_again() {
+        use gpui_kit::component::ActiveTheme as _;
+        let mut app = gpui_kit::TestAppContext::single();
+        app.update(gpui_kit::init);
+        let catalog = ThemeCatalog::load(None);
+        app.update(|cx| {
+            resolve(&selection("windows-classic"), &catalog).apply_component_theme(cx);
+            let theme = cx.theme();
+            let bevel = theme.bevel.expect("the classic theme's bevel");
+            assert_eq!(bevel.highlight, rgb(0xffffff).into());
+            assert_eq!(bevel.dark_shadow, rgb(0x000000).into());
+            assert_eq!(theme.field, Some(rgb(0xffffff).into()));
+            assert_eq!(theme.input_background(), rgb(0xffffff).into());
+            assert_eq!(f32::from(theme.radius), 0.);
+
+            resolve(&selection("splitty-dark"), &catalog).apply_component_theme(cx);
+            let theme = cx.theme();
+            assert!(theme.bevel.is_none());
+            assert_eq!(theme.field, None);
+        });
+    }
+
     #[test]
     fn text_on_a_selected_entry_is_readable_without_a_token() {
         let catalog = ThemeCatalog::load(None);
