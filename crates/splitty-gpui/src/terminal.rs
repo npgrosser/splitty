@@ -1171,6 +1171,11 @@ impl Terminal {
     }
 
     #[cfg(all(test, feature = "ui-test-support"))]
+    pub(crate) fn ui_test_scrollback(&self) -> Option<crate::terminal_engine::Scrollback> {
+        self.scrollback()
+    }
+
+    #[cfg(all(test, feature = "ui-test-support"))]
     pub(crate) fn pty_size(&self) -> Option<PtyGrid> {
         self.pty
     }
