@@ -46,10 +46,16 @@ surface, a separator), not how it looks. A bevel is always square.
 
 ### Text on highlights
 
-Selected entries use `active-text`; secondary text there is lifted toward it only where it does not stand
-out. A highlighted menu row uses `menu-hover` and text that reads on it. Where the theme names no color
-and its text does not read on the highlight, the text is black or white, whichever reads better, not the
-first readable grey.
+Selected entries use `active-text`, and a highlighted menu row uses `menu-hover` with text that reads on
+it. Where the theme names no color and its text cannot be read on the highlight (a contrast below 3), the
+text is black or white, whichever reads better, not the first readable grey; text that is merely soft
+there is kept. Secondary and muted text of a highlighted entry is lifted toward the highlight's text only
+where the highlight has a text color of its own and the subdued color does not stand out; in every other
+theme subdued text keeps its value there, as on every other surface.
+
+The theme's corners also bound the toolkit's: its control radius is at most `control-radius` and its
+large radius at most `radius`, so a theme that names a radius only in the `splitty` object squares or
+rounds settings and dialogs with the chrome.
 
 ### Title bar
 
@@ -91,7 +97,8 @@ Taken 2026-11-20 without the maintainer's confirmation; each is also in `openspe
   toolkit components flat in a beveled theme.
 - **ENT-5:** Windows Classic keeps a dark terminal palette under a light interface. Alternative: a light
   palette, so every bundled theme's palette has its mode.
-- **ENT-6:** highlight text falls back to black or white when the theme's text does not read there.
+- **ENT-6:** highlight text falls back to black or white when the theme's text cannot be read there
+  (contrast below 3); subdued text is lifted only on a highlight with a text color of its own.
   Alternative: require `active-text` and keep the theme's text otherwise.
 - **ENT-7:** no backdrop material; themes stay opaque. Alternative: a platform backdrop token.
 - **ENT-8:** themes name installed fonts; none is bundled. Alternative: bundle a face per theme.

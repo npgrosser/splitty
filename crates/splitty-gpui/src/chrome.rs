@@ -392,6 +392,8 @@ impl RenderOnce for WindowChrome {
                     TitleBar::new()
                         .h(px(a.height))
                         .bg(a.fill(active).background())
+                        // The toolkit's own controls draw in the bar's color.
+                        .text_color(rgb(a.control_color(active).0))
                         .border_b_0()
                         .when(custom, |bar| {
                             bar.window_controls(

@@ -120,11 +120,7 @@ pub(super) fn item(appearance: &NativeAppearance, highlighted: bool, danger: boo
 /// `color` as it reads on a highlighted row: itself where it stands out on
 /// `menu_hover`, else moved toward the row's text.
 pub(super) fn on_highlight(appearance: &NativeAppearance, color: u32) -> u32 {
-    if contrast(color, appearance.menu_hover) >= 3. {
-        color
-    } else {
-        mix(color, appearance.menu_hover_text, 0.65)
-    }
+    appearance.on_menu_hover(color)
 }
 
 /// Secondary text or icons of a row in `color`, kept readable while the
@@ -139,34 +135,6 @@ pub(super) fn secondary<E: InteractiveElement + Styled>(
     element
         .text_color(rgb(if highlighted { lit } else { color }))
         .group_hover(ROW_GROUP, move |style| style.text_color(rgb(lit)))
-}
-
-/// The WCAG contrast ratio of two `0xRRGGBB` colors.
-fn contrast(a: u32, b: u32) -> f32 {
-    fn luminance(color: u32) -> f32 {
-        let channel = |shift: u32| {
-            let value = ((color >> shift) & 0xff) as f32 / 255.;
-            if value <= 0.03928 {
-                value / 12.92
-            } else {
-                ((value + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
-    }
-    let (a, b) = (luminance(a), luminance(b));
-    (a.max(b) + 0.05) / (a.min(b) + 0.05)
-}
-
-/// `from` moved by `amount` (0 to 1) toward `to`, per channel.
-fn mix(from: u32, to: u32, amount: f32) -> u32 {
-    [16, 8, 0].into_iter().fold(0, |result, shift| {
-        let (from, to) = (
-            ((from >> shift) & 0xff) as f32,
-            ((to >> shift) & 0xff) as f32,
-        );
-        result | (((from + (to - from) * amount).round() as u32) << shift)
-    })
 }
 
 /// A row that cannot be chosen.
@@ -471,21 +439,19 @@ impl Element for Placed {
 
 #[cfg(test)]
 mod tests {
-    use super::{beside_origin, contrast, mix, on_highlight, shift_into};
+    use super::{beside_origin, on_highlight, shift_into};
     use crate::appearance::NativeAppearance;
     use gpui_kit::{point, px, size, Bounds};
 
     #[test]
     fn secondary_text_keeps_its_color_where_it_reads_on_the_highlight() {
-        assert!((contrast(0xffffff, 0x000000) - 21.).abs() < 0.01);
-        assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
         let mut appearance = NativeAppearance::fallback("UI");
         let muted = appearance.muted;
         assert_eq!(on_highlight(&appearance, muted), muted);
+        // A highlight with a text color of its own lifts what does not read.
         (appearance.menu_hover, appearance.menu_hover_text) = (0x000080, 0xffffff);
-        let lit = on_highlight(&appearance, 0x000000);
-        assert_eq!(lit, mix(0x000000, 0xffffff, 0.65));
-        assert!(contrast(lit, appearance.menu_hover) >= 3.);
+        assert_eq!(on_highlight(&appearance, 0xc0c0c0), 0xc0c0c0);
+        assert_eq!(on_highlight(&appearance, 0x000000), 0xa6a6a6);
     }
 
     fn area() -> Bounds<gpui_kit::Pixels> {

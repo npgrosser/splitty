@@ -227,7 +227,6 @@ impl RenderOnce for ControlIcon {
             .justify_center()
             .content_center()
             .items_center()
-            .text_color(cx.theme().foreground)
             .hover(|style| style.bg(hover_bg).text_color(hover_fg))
             .active(|style| style.bg(active_bg).text_color(hover_fg))
             .when(is_windows, |this| {
@@ -350,6 +349,8 @@ impl RenderOnce for TitleBar {
                 .pl(TITLE_BAR_LEFT_PADDING)
                 .border_b_1()
                 .border_color(cx.theme().title_bar_border)
+                // The built-in window controls take the bar's text color.
+                .text_color(cx.theme().foreground)
                 .bg(default_title_bar_background(
                     cx.theme().title_bar,
                     cx.theme().background,

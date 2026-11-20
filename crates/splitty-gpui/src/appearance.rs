@@ -199,14 +199,25 @@ impl NativeAppearance {
         natural.min(self.control_radius)
     }
 
-    /// `color` as it reads on `active`: itself where it stands out there,
-    /// else moved toward the text of selected entries. For secondary and
-    /// muted text of a selected entry.
+    /// `color` as it reads on `active`, for secondary and muted text of a
+    /// selected entry. Where the theme's own text is the text of selected
+    /// entries, its subdued colors stay as they are, as on every other
+    /// surface; where selection has a text color of its own, a color that
+    /// does not stand out there moves toward it.
     pub fn on_active(&self, color: u32) -> u32 {
-        if contrast(rgb(color).into(), rgb(self.active).into()) >= 3. {
+        Self::on_highlight(color, self.active, self.active_text, self.text)
+    }
+
+    /// `color` as it reads on the highlighted row of a menu; see `on_active`.
+    pub fn on_menu_hover(&self, color: u32) -> u32 {
+        Self::on_highlight(color, self.menu_hover, self.menu_hover_text, self.text)
+    }
+
+    fn on_highlight(color: u32, highlight: u32, highlight_text: u32, text: u32) -> u32 {
+        if highlight_text == text || contrast(rgb(color).into(), rgb(highlight).into()) >= 3. {
             color
         } else {
-            mix(color, self.active_text, 0.65)
+            mix(color, highlight_text, 0.65)
         }
     }
 
@@ -749,6 +760,9 @@ impl NativeAppearance {
                 dark_shadow: rgb(bevel.dark_shadow).into(),
             });
             theme.field = self.field.map(|field| rgb(field).into());
+            // The chrome's corners bound the components' too.
+            theme.radius = theme.radius.min(px(self.control_radius));
+            theme.radius_lg = theme.radius_lg.min(px(self.radius));
         });
     }
 }
@@ -859,12 +873,13 @@ fn readable_text(requested: Hsla, background: Hsla) -> Hsla {
     blend(requested, target, high)
 }
 
-/// The text of a highlighted entry: `text` where it reads on `background`,
-/// else black or white, whichever reads better. A highlight is a statement,
-/// so its text does not stop at the first readable grey.
+/// The text of a highlighted entry: `text` where it can be read on
+/// `background`, else black or white, whichever reads better. A highlight is
+/// a statement, so its text does not stop at the first readable grey; a
+/// theme whose text is merely soft on its highlight keeps it.
 fn text_on(text: u32, background: u32) -> u32 {
     let on = |color: u32| contrast(rgb(color).into(), rgb(background).into());
-    if on(text) >= 4.5 {
+    if on(text) >= 3. {
         text
     } else if on(0) >= on(0xffffff) {
         0
@@ -1505,7 +1520,7 @@ mod tests {
     #[test]
     fn the_component_theme_takes_the_bevel_and_field_and_drops_them_again() {
         use gpui_kit::component::ActiveTheme as _;
-        let mut app = gpui_kit::TestAppContext::single();
+        let app = gpui_kit::TestAppContext::single();
         app.update(gpui_kit::init);
         let catalog = ThemeCatalog::load(None);
         app.update(|cx| {
@@ -1517,6 +1532,18 @@ mod tests {
             assert_eq!(theme.field, Some(rgb(0xffffff).into()));
             assert_eq!(theme.input_background(), rgb(0xffffff).into());
             assert_eq!(f32::from(theme.radius), 0.);
+            assert_eq!(f32::from(theme.radius_lg), 0.);
+
+            // A square theme that names its radius only in the `splitty`
+            // block squares the components too.
+            resolve(&selection("splitty-classic"), &catalog).apply_component_theme(cx);
+            assert_eq!(f32::from(cx.theme().radius), 0.);
+            resolve(&selection("windows-11-dark"), &catalog).apply_component_theme(cx);
+            let theme = cx.theme();
+            assert_eq!(
+                (f32::from(theme.radius), f32::from(theme.radius_lg)),
+                (4., 8.)
+            );
 
             resolve(&selection("splitty-dark"), &catalog).apply_component_theme(cx);
             let theme = cx.theme();
@@ -1535,16 +1562,37 @@ mod tests {
             (dark.menu_hover, dark.menu_hover_text),
             (dark.hover, dark.text)
         );
-        // Subdued text stays where it reads and is lifted where it does not.
+        // A theme whose own text is the selection's text keeps its subdued
+        // colors on selected entries and highlighted menu rows.
+        assert_eq!(dark.on_active(dark.muted), dark.muted);
+        assert_eq!(dark.on_menu_hover(dark.muted), dark.muted);
+        // Where selection has its own text color, subdued text stays where
+        // it reads and is lifted where it does not.
         let mut navy = dark.clone();
         (navy.active, navy.active_text) = (0x000080, 0xffffff);
+        (navy.menu_hover, navy.menu_hover_text) = (0x000080, 0xffffff);
         assert_eq!(navy.on_active(0xc0c0c0), 0xc0c0c0);
         let lifted: Hsla = rgb(navy.on_active(0x404040)).into();
         assert!(contrast(lifted, rgb(0x000080).into()) >= 3.);
+        assert_eq!(navy.on_menu_hover(0x404040), navy.on_active(0x404040));
+        // Every theme that shipped before the shape tokens keeps its text on
+        // selected entries and highlighted rows.
+        for theme in catalog.ui_themes() {
+            if theme.id.starts_with("windows-") {
+                continue;
+            }
+            let shown = resolve(&selection(&theme.id), &catalog);
+            if theme.id.starts_with("splitty-") || theme.id.starts_with("adwaita-") {
+                assert_eq!(shown.active_text, shown.text, "{}", theme.id);
+                assert_eq!(shown.menu_hover_text, shown.text, "{}", theme.id);
+            }
+        }
         // Text that does not read on the highlight turns black or white.
         assert_eq!(text_on(0x000000, 0x000080), 0xffffff);
         assert_eq!(text_on(0xf0f0f0, 0xffe000), 0x000000);
         assert_eq!(text_on(0x101010, 0xd0d0d0), 0x101010);
+        // Soft but readable text is kept.
+        assert_eq!(text_on(0x82a070, 0x113a11), 0x82a070);
     }
 
     #[test]
