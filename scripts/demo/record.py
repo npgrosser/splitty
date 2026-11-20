@@ -88,6 +88,43 @@ class Screen:
         self.test.XTestFakeButtonEvent.argtypes = [
             ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
 
+    def atom(self, name: str) -> int:
+        self.lib.XInternAtom.restype = ctypes.c_ulong
+        self.lib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+        return self.lib.XInternAtom(self.display, name.encode(), 0)
+
+    def set_atoms(self, window: int, name: str, values: list[str]):
+        """Set a property that lists atoms, as a window manager's hints do."""
+        self.lib.XChangeProperty.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_int,
+            ctypes.c_int, ctypes.POINTER(ctypes.c_ulong), ctypes.c_int]
+        atoms = (ctypes.c_ulong * len(values))(*(self.atom(value) for value in values))
+        self.lib.XChangeProperty(self.display, window, self.atom(name), 4, 32, 0, atoms,
+                                 len(values))
+        self.lib.XFlush(self.display)
+
+    def pretend_desktop(self):
+        """Stand in for a compositing window manager, as far as the app asks:
+        with one, it draws its own title bar. This connection has to stay
+        open, since it owns the compositor's selection."""
+        self.lib.XCreateSimpleWindow.restype = ctypes.c_ulong
+        self.lib.XCreateSimpleWindow.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_ulong, ctypes.c_ulong]
+        self.lib.XSetSelectionOwner.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        owner = self.lib.XCreateSimpleWindow(self.display, self.root, -10, -10, 1, 1, 0, 0, 0)
+        for name in (f"_NET_WM_CM_S{self.root}", "_NET_WM_CM_S0"):
+            self.lib.XSetSelectionOwner(self.display, self.atom(name), owner, 0)
+        self.set_atoms(self.root, "_NET_SUPPORTED", [
+            "_GTK_FRAME_EXTENTS", "_NET_WM_STATE", "_NET_WM_STATE_MAXIMIZED_VERT",
+            "_NET_WM_STATE_MAXIMIZED_HORZ"])
+
+    def maximized(self, window: int):
+        """Tell a window it fills the screen, so its frame has no shadow."""
+        self.set_atoms(window, "_NET_WM_STATE", [
+            "_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ"])
+
     def point(self, x: float, y: float):
         """Put the pointer somewhere."""
         self.test.XTestFakeMotionEvent(self.display, -1, round(x), round(y), 0)
@@ -361,7 +398,9 @@ def app_config(directory: Path, scene, font: str):
         "[appearance]\n"
         f'font_family = "{font}"\n'
         f'theme = "{scene.theme}"\ntheme_mode = "fixed"\n'
-        f'zoom = {scene.zoom}\nzoom_scope = "window"\n\n'
+        f'zoom = {scene.zoom}\nzoom_scope = "window"\n'
+        # The app's own title bar, in the shape the theme gives it.
+        + ('window_decoration = "splitty"\n' if scene.decorated else "") + "\n"
         "[drawer]\n"
         f"pinned = {'true' if scene.drawer else 'false'}\n"
         "edge_reveal = false\nshow_tips = false\nsidebar_width = 200\n"
@@ -487,6 +526,9 @@ def record(scene, args, out: Path, display: str):
             # A machine to reach over SSH, for the scenes of remote screens.
             import remote
             host = remote.start(root, home, environment, args)
+        hands = Screen(display, size)
+        if scene.decorated:
+            hands.pretend_desktop()
         log = open(root / "app.log", "wb")
         app = subprocess.Popen([str(args.app)], env=environment, stdout=log, stderr=log)
 
@@ -499,7 +541,8 @@ def record(scene, args, out: Path, display: str):
                         ["windowsize", handle, str(size[0]), str(size[1])],
                         ["windowfocus", handle]):
             subprocess.run([args.xdotool, *command], env=tools, check=True)
-        hands = Screen(display, size)
+        if scene.decorated:
+            hands.maximized(int(handle))
         hands.point(size[0] - 4, size[1] - 4)
         time.sleep(scene.settle)
         stage = Stage(hands, None, args.xdotool, tools, scene.name)

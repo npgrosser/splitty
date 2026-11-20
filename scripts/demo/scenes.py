@@ -23,6 +23,8 @@ class Scene:
     size: tuple[int, int] | None = None
     # Whether the scene needs a machine to reach over SSH.
     host: bool = False
+    # Whether the window shows the app's own title bar.
+    decorated: bool = False
     # More of the app's `config.toml`, such as a `[notifications]` table.
     config: str = ""
     # Seconds the window gets before the setup and after the last step.
@@ -169,7 +171,9 @@ def customize_setup(stage):
     stage.run("tests")
 
 
-THEME_SELECT = (430, 537)
+# The Theme list of the settings after the page is scrolled, below the
+# window's title bar, which this scene shows.
+THEME_SELECT = (430, 572)
 
 
 def customize(stage):
@@ -179,12 +183,12 @@ def customize(stage):
     stage.scroll(520, 500, 6, pause=0.5)
     stage.click(*THEME_SELECT, pause=0.5)
     # The list filters by what is typed; it opens again from the keyboard,
-    # wherever a theme's own metrics have put it.
-    for name in ("Splitty Aurora", "Catppuccin Mocha", "Windows Classic", "Splitty Classic"):
+    # wherever a theme's own metrics have put it. The last theme stays.
+    for name, hold in (("Splitty Aurora", 1.4), ("Catppuccin Mocha", 1.4), ("Windows Classic", 2.8)):
         stage.type(name, pause=0.4)
-        stage.key("Return", label="", pause=1.5)
-        stage.key("Return", label="", pause=0.5)
-    stage.key("Escape", label="", pause=0.4)
+        stage.key("Return", label="", pause=hold)
+        if name != "Windows Classic":
+            stage.key("Return", label="", pause=0.5)
     stage.key("alt+shift+k", pause=1.2)
     stage.type("split", pause=1.6)
 
@@ -195,7 +199,7 @@ SCENES = [
     Scene("splits", splits),
     Scene("pointer", pointer, setup=pointer_setup),
     Scene("screens", screens, setup=screens_setup, drawer=True),
-    Scene("customize", customize, setup=customize_setup, drawer=True),
+    Scene("customize", customize, setup=customize_setup, drawer=True, decorated=True),
 ]
 
 from scenes_remote import SCENES as _REMOTE  # noqa: E402
