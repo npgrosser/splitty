@@ -44,7 +44,7 @@ After a successful settings change, the server SHALL send `settings.changed` wit
 - **THEN** it receives status 400 with the field `terminal.linkTarget` and no setting changes
 
 ### Requirement: Experimental Native Local Appearance
-The experimental native workspace SHALL read local appearance settings through `home.get` and resolve the UI theme they name in its own theme catalog, applying appearance font overrides and the theme's colors to workspace chrome without writing settings during reads. It SHALL NOT request `theme.get` or `theme.list`. Terminal colors SHALL follow the selected native terminal palette. Unset chrome font overrides SHALL use the UI theme's defaults. Automatic mode SHALL select the saved light or dark UI theme using the local OS preference. A UI theme name the catalog does not have SHALL show the default theme of the OS preference and a notice, and SHALL NOT change the stored setting. Remote settings SHALL NOT select application appearance.
+The experimental native workspace SHALL read local appearance settings through `home.get` and resolve the UI theme they name in its own theme catalog, applying appearance font overrides and the theme's colors to workspace chrome without writing settings during reads. It SHALL NOT request `theme.get` or `theme.list`. Terminal colors SHALL follow the selected native terminal palette, and terminal text the terminal font settings (see Native Terminal Font Choice). Unset chrome font overrides SHALL use the UI theme's defaults. Automatic mode SHALL select the saved light or dark UI theme using the local OS preference. A UI theme name the catalog does not have SHALL show the default theme of the OS preference and a notice, and SHALL NOT change the stored setting. Remote settings SHALL NOT select application appearance.
 
 #### Scenario: Startup appearance
 - **WHEN** the local appearance read succeeds
@@ -54,7 +54,7 @@ The experimental native workspace SHALL read local appearance settings through `
 
 #### Scenario: Chrome font changes preserve terminal typography
 - **WHEN** appearance font size or family changes, including selection of a proportional UI font
-- **THEN** workspace chrome uses the supported font choice while terminal typography retains its native defaults
+- **THEN** workspace chrome uses the supported font choice while terminal text keeps the face and size the terminal font settings choose
 - **AND** the change does not reinterpret appearance font fields as terminal font settings or replace the saved terminal palette choice
 
 #### Scenario: Automatic local theme
@@ -157,7 +157,7 @@ The experimental native workspace SHALL offer an editor for the local service's 
 - **THEN** it shows the assigned local service's effective values and changes only that service's settings
 
 #### Scenario: Supported controls and reset
-- **WHEN** a user changes or resets UI theme mode or choice, UI font size or family, display zoom or scope, terminal palette or close-on-exit policy, or Drawer visibility or width
+- **WHEN** a user changes or resets UI theme mode or choice, UI font size or family, display zoom or scope, terminal palette, terminal font or font size, or close-on-exit policy, or Drawer visibility or width
 - **THEN** the native client submits a bounded patch for that setting and displays the confirmed effective value
 - **AND** reset uses the local service's published default when available
 
@@ -223,7 +223,7 @@ Settings SHALL store a theme by its identifier: the display name in lowercase wi
 
 The default UI themes SHALL be `splitty-classic` for a dark and for a fixed theme and `splitty-classic-light` for a light one: settings created without a choice name them, and they are shown in place of a stored theme the catalog does not have. Settings that already name a theme SHALL keep it.
 
-A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `active-text`, `hover`, `menu-hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `control-radius`, `field`, `bevel`, `title-bar`, `font-size` and `font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme or the other values of the same object.
+A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `active-text`, `hover`, `menu-hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `control-radius`, `field`, `bevel`, `title-bar`, `font-size`, `font-family` and `terminal-font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme or the other values of the same object. `terminal-font-family` SHALL be a family list the theme proposes for terminal text (see Native Terminal Font Choice), in which `monospace` and `ui-monospace` name the bundled terminal font.
 
 The shape tokens SHALL apply to the whole interface, the component toolkit's controls included. `radius` SHALL be the corner of floating surfaces and SHALL bound the corner of every control, unless `control-radius` names that bound; marks that are round by meaning stay round. A theme with a `bevel` (`highlight`, `light`, `shadow`, `dark-shadow`) SHALL have its controls, fields, floating surfaces and separators drawn with 3D edges in place of one-color borders; a theme without one SHALL keep its one-color borders. `field` SHALL be the background of fields that hold text. Text on a selected entry and on a highlighted menu row SHALL be readable whether or not the theme names `active-text`. `title-bar` SHALL name the colors (`background` and `inactive-background`, each a color or a `from`/`to` gradient, `foreground`, `inactive-foreground`) and the shape (`height`, `align`, `weight`, `buttons`: `plain`, `boxed` or `wide`) of an application-drawn title bar (see Native Decoration Ownership).
 
@@ -270,6 +270,10 @@ Third-party themes bundled with the application SHALL be limited to those whose 
 - **WHEN** a palette file named `Night` holds the line `# name: Night Owl`
 - **THEN** the palette is offered as Night Owl and stored as `night`
 
+#### Scenario: Windows 11 themes propose Cascadia
+- **WHEN** Windows 11 Dark or Windows 11 Light is shown, `terminal.fontFamily` is empty and Cascadia Mono is not installed but Cascadia Code is
+- **THEN** terminals use Cascadia Code, and the bundled font where neither is installed
+
 ### Requirement: Program Status Notification Switch
 A server's settings SHALL hold `notifications.programStatus`, a boolean that defaults to true and is listed in the settings metadata; settings stored without it SHALL read it as true, and a window SHALL read it as true from an older server that does not send it. A window SHALL add program status notifications (see `program-status`) only while both `notifications.enabled` and `notifications.programStatus` are on. The switch SHALL NOT change which status a window shows on tabs, screens and host groups.
 
@@ -282,7 +286,7 @@ A server's settings SHALL hold `notifications.programStatus`, a boolean that def
 - **THEN** the window adds no notification and the pane's tab shows that it is blocked
 
 ### Requirement: Native Appearance Before The Local Service Answers
-The native app SHALL keep the appearance selection it last applied from its local service (UI theme mode and names, interface font, zoom, terminal palettes) in `last-appearance.json` in the configuration directory of the computer it runs on. A new window SHALL show that selection, resolved in its catalog for the current OS preference, until the local service's appearance replaces it. The file SHALL NOT be a source of settings; a missing or unreadable file SHALL leave the built-in appearance.
+The native app SHALL keep the appearance selection it last applied from its local service (UI theme mode and names, interface font, zoom, terminal palettes, terminal font and size) in `last-appearance.json` in the configuration directory of the computer it runs on. A new window SHALL show that selection, resolved in its catalog for the current OS preference, until the local service's appearance replaces it. The file SHALL NOT be a source of settings; a missing or unreadable file SHALL leave the built-in appearance.
 
 #### Scenario: Start while the local service is not ready
 - **WHEN** the app starts on Windows, its WSL backend is still being started, and the last window had applied a light UI theme with a larger zoom
@@ -304,6 +308,10 @@ The native app SHALL keep the appearance selection it last applied from its loca
 #### Scenario: Isolated starts
 - **WHEN** the app runs its workspace smoke check or is started with an explicit WSL target
 - **THEN** it neither reads nor writes the file
+
+#### Scenario: File from before the terminal font was remembered
+- **WHEN** the file holds a selection without the terminal font and size
+- **THEN** the window starts with that selection and the default terminal font and size
 
 ### Requirement: Terminal Palette Rule
 Every window SHALL choose the name of its terminal palette by one rule, the server's: the palette `terminal.theme` names; while that is `default`, the palette `terminal.themeDark` or `terminal.themeLight` names for the mode of the shown UI theme; while that is `default` too, the UI theme's own palette. An empty name SHALL count as `default`. `theme.get` and `GET /api/home/theme` SHALL apply this rule to the server's stored terminal settings for the UI theme they answer with, by that theme's mode: the answer's `terminal` colors SHALL be those of the server's theme with the chosen name, and its `terminalPalette` SHALL name the theme they come from; where the rule chooses the UI theme's own palette, or the server has no theme of the chosen name, they SHALL be the answered theme's own colors and `terminalPalette` its identifier. The native workspace SHALL look the chosen name up in its own catalog (see Native Theme Catalog), so a name only the server has SHALL show the UI theme's palette there; stored settings SHALL NOT change for it.
@@ -389,3 +397,52 @@ The settings SHALL NOT contain, validate, describe in their metadata or return `
 #### Scenario: Update naming a removed setting
 - **WHEN** a client sends `PATCH /api/home/settings` with `{"terminal":{"xterm":{"cursorBlink":true}}}`
 - **THEN** it receives status 400 with the field `terminal.xterm` and no setting changes
+
+### Requirement: Terminal Font Settings
+A server's settings SHALL hold `terminal.fontFamily`, a font family name that defaults to empty (the default face), and `terminal.fontSize`, the terminal text size in pixels before zoom, default 14. The metadata SHALL name both defaults and list the sizes 8 to 32 as the `values` of `terminal.fontSize`. Settings stored without them SHALL read the defaults. An update with an unlisted size, or a family with control characters or longer than 4096 bytes, SHALL be refused with status 400 and that field.
+
+#### Scenario: Settings stored before the font settings existed
+- **WHEN** a server starts with stored settings whose `terminal` lacks `font_family` and `font_size`
+- **THEN** `GET /api/home/settings` returns `terminal.fontFamily` as empty and `terminal.fontSize` as 14, and a window draws its terminals as before
+
+#### Scenario: Font settings persist
+- **WHEN** a client sends `PATCH /api/home/settings` with `{"terminal":{"fontFamily":"Fira Code","fontSize":16}}`
+- **THEN** the response and `settings.changed` carry both values, and `config.toml` holds `font_family` and `font_size` in `[terminal]`
+
+#### Scenario: Size outside the listed values
+- **WHEN** a client sends `terminal.fontSize` 7, 33 or 14.5
+- **THEN** it receives status 400 with the field `terminal.fontSize` and the stored size stays
+
+### Requirement: Native Terminal Font Choice
+The native workspace SHALL draw terminals in the first installed family of, in this order, `terminal.fontFamily`, the shown UI theme's `terminal-font-family` (see Native Theme Catalog), and else the bundled terminal font. A `terminal.fontFamily` the computer does not have SHALL show the bundled font with a notice and SHALL NOT change the setting; a theme's proposal that is not installed SHALL be skipped silently. The editor SHALL offer the default and the installed families.
+
+#### Scenario: Setting before the theme's proposal
+- **WHEN** the shown UI theme proposes Cascadia Mono, which is installed, and `terminal.fontFamily` names another installed family
+- **THEN** terminals use the family of the setting, and with an empty setting Cascadia Mono
+
+#### Scenario: Family not installed
+- **WHEN** `terminal.fontFamily` names a family the computer does not have
+- **THEN** terminals use the bundled font, the window reports that the terminal font is not installed, and the stored setting is unchanged
+
+#### Scenario: Theme's proposal not installed
+- **WHEN** the setting is empty and none of the families the theme proposes is installed
+- **THEN** terminals use the bundled font without a notice
+
+#### Scenario: Older local service
+- **WHEN** the local service's metadata names no default for `terminal.fontFamily` or `terminal.fontSize`, or it publishes no metadata
+- **THEN** both count as their defaults and the editor does not offer to change them
+
+### Requirement: Native Terminal Font Application
+Every existing and new terminal of a native window SHALL take a changed terminal font or size without recreating its session or losing history. The size SHALL compose with display zoom as the configured size of Zoom Settings (`display-zoom`). Cell metrics SHALL be measured again with the new face, and the PTY SHALL learn a changed grid size. A character the chosen family has no glyph for SHALL be drawn with the bundled terminal font where that font has it.
+
+#### Scenario: Live change
+- **WHEN** a user sets the terminal font size to 18 while terminals are open and zoom is 100 %
+- **THEN** every terminal draws 18 px text, keeps its process and output, and reports the grid size that fits its pane
+
+#### Scenario: Size with terminal zoom
+- **WHEN** `terminal.fontSize` is 18, `appearance.zoom_scope` is `terminals` and the level is 110 %
+- **THEN** the terminals use font size 20
+
+#### Scenario: Glyph the chosen family lacks
+- **WHEN** the terminal font is a family without the Nerd Font symbols and a program prints one of them
+- **THEN** the symbol is drawn with the bundled terminal font, not as an empty box
