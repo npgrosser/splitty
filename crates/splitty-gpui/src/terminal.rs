@@ -1051,6 +1051,11 @@ impl Terminal {
         (&self.face, self.metrics.font_size)
     }
 
+    #[cfg(all(test, feature = "ui-test-support"))]
+    pub(crate) fn ui_test_colors(&self) -> TerminalColors {
+        self.colors
+    }
+
     fn restage(&mut self, metrics: TerminalMetrics, cx: &mut Context<Self>) {
         self.cancel_pointer();
         self.metrics = metrics;

@@ -56,6 +56,24 @@ pub fn settings_snapshot_with_terminal(
     terminal: serde_json::Value,
     appearance: serde_json::Value,
 ) -> Arc<AppearanceSnapshot> {
+    settings_snapshot_for_scheme(
+        connection_id,
+        generation,
+        ColorScheme::Dark,
+        terminal,
+        appearance,
+    )
+}
+
+/// [`settings_snapshot_with_terminal`], read for the operating system's
+/// preference `scheme`.
+pub fn settings_snapshot_for_scheme(
+    connection_id: Uuid,
+    generation: u64,
+    scheme: ColorScheme,
+    terminal: serde_json::Value,
+    appearance: serde_json::Value,
+) -> Arc<AppearanceSnapshot> {
     let mut stored = serde_json::json!({"theme": "default", "closeOnExit": "graceful"});
     splitty_core::config::deep_merge(&mut stored, terminal);
     let mut settings =
@@ -68,6 +86,7 @@ pub fn settings_snapshot_with_terminal(
         true,
         stored,
         serde_json::from_value(settings).expect("test appearance settings"),
+        scheme,
     )
 }
 
@@ -84,6 +103,7 @@ fn snapshot(
         pinned,
         serde_json::json!({"theme": "default", "closeOnExit": "graceful"}),
         AppearanceSettings::default(),
+        ColorScheme::Dark,
     )
 }
 
@@ -94,6 +114,7 @@ fn build(
     pinned: bool,
     terminal: serde_json::Value,
     appearance: AppearanceSettings,
+    scheme: ColorScheme,
 ) -> Arc<AppearanceSnapshot> {
     let budget = ConnectionBudget::default();
     let drawer = DrawerSettings {
@@ -120,7 +141,7 @@ fn build(
         connection_id,
         generation,
         settings: budget.charge(0, false, || settings).expect("test charge"),
-        scheme: ColorScheme::Dark,
+        scheme,
         terminal_generation: generation,
         metadata,
         metadata_error,

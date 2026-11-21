@@ -258,7 +258,7 @@ impl AppearanceSnapshot {
 }
 
 fn theme_name(settings: &AppearanceSettings, scheme: ColorScheme) -> &str {
-    theme_for(
+    ui_theme_name(
         &settings.theme_mode,
         &settings.theme,
         &settings.theme_dark,
@@ -269,8 +269,9 @@ fn theme_name(settings: &AppearanceSettings, scheme: ColorScheme) -> &str {
 
 /// The UI theme of the settings `mode`, `theme`, `dark` and `light`
 /// (`appearance.themeMode`, `theme`, `themeDark`, `themeLight`) for the
-/// operating system's preference.
-fn theme_for<'a>(
+/// operating system's preference. The app resolves the name in its local
+/// catalog.
+pub fn ui_theme_name<'a>(
     mode: &str,
     theme: &'a str,
     dark: &'a str,

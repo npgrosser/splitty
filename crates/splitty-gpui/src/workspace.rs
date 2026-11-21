@@ -1,5 +1,6 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
 use gpui_kit::base::FocusTrapElement as _;
+mod appearance_choices;
 mod arrange;
 mod chrome;
 #[cfg(all(test, feature = "ui-test-support"))]
@@ -1219,6 +1220,10 @@ pub struct Workspace {
     keybindings: Option<keymap::KeybindingsFile>,
     appearance_error: Option<String>,
     appearance_generation: u64,
+    /// The local service's settings this window applied last, which choices
+    /// that wait for a write are drawn over.
+    confirmed_appearance: Option<Arc<AppearanceSnapshot>>,
+    appearance_choices: appearance_choices::AppearanceChoices,
     drawer_visible: bool,
     drawer_authoritative_pinned: bool,
     drawer_width: i32,
@@ -1651,9 +1656,17 @@ impl Workspace {
                                 ))
                                 .map_err(|_| "Could not send settings change".to_owned())
                         });
-                    if let Err(reason) = result {
-                        this.settings
-                            .update(cx, |view, cx| view.reject_update(*request_id, reason, cx));
+                    match result {
+                        // A sent choice of the window's look shows at once;
+                        // its write result or readback settles it.
+                        Ok(()) => {
+                            if this.appearance_choices.submit(*request_id, edit) {
+                                this.redraw_appearance(window, cx);
+                            }
+                        }
+                        Err(reason) => this
+                            .settings
+                            .update(cx, |view, cx| view.reject_update(*request_id, reason, cx)),
                     }
                 }
             },
@@ -1718,6 +1731,8 @@ impl Workspace {
                 editor_prefs: Default::default(),
                 appearance_error: None,
                 appearance_generation: 0,
+                confirmed_appearance: None,
+                appearance_choices: Default::default(),
                 drawer_visible: true,
                 drawer_authoritative_pinned: true,
                 drawer_width: 200,
@@ -1854,27 +1869,10 @@ impl Workspace {
         if snapshot.generation() <= self.appearance_generation {
             return;
         }
-        let available_fonts = window.text_system().all_font_names();
-        let mut next = NativeAppearance::from_snapshot(
-            snapshot,
-            &self.themes,
-            &available_fonts,
-            &self.ui_family,
-            &self.mono_family,
-        );
-        // A read that arrives while zoom steps are outstanding does not move
-        // the display back: what is shown stands until they have settled.
-        next.zoom = self.zoom.observe(next.zoom);
-        // Another terminal font restages every terminal at once; a zoom
-        // change alone steps them as zoom does.
-        if self.appearance.terminal_font != next.terminal_font
-            || self.appearance.terminal_font_size != next.terminal_font_size
-        {
-            self.appearance.terminal_font = next.terminal_font.clone();
-            self.appearance.terminal_font_size = next.terminal_font_size;
-            self.apply_terminal_font(next.zoom, cx);
-        }
-        self.apply_zoom(next.zoom, window, cx);
+        // Choices whose saved value this read shows give way to it; the
+        // others stay drawn over it.
+        self.appearance_choices.read(snapshot.generation());
+        self.present_appearance(snapshot, true, window, cx);
         self.drawer_authoritative_pinned = snapshot.drawer().pinned;
         // A read already in flight can arrive after the click but before its
         // identified write result. Keep the submitted presentation until that
@@ -1893,17 +1891,85 @@ impl Workspace {
         if self.drawer_visible {
             self.drawer_overlay_open = false;
         }
-        next.apply_desktop(cx);
-        next.apply_component_theme(cx);
-        let mut failure = None;
         self.scroll_to_bottom = snapshot.terminal().scroll_to_bottom();
         let scroll_to_bottom = self.scroll_to_bottom;
         self.clipboard_writes = snapshot.terminal().allow_osc52_write();
         let clipboard_writes = self.clipboard_writes;
         for view in self.panes.values() {
-            let applied = view.terminal.update(cx, |terminal, cx| {
+            view.terminal.update(cx, |terminal, cx| {
                 terminal.set_scroll_to_bottom(scroll_to_bottom, cx);
                 terminal.set_clipboard_writes(clipboard_writes);
+            });
+        }
+        self.tab_prefs = TabPrefs::read(snapshot);
+        self.editor_prefs = snapshot.editors().clone();
+        self.confirmed_appearance = Some(snapshot.clone());
+        self.appearance_generation = snapshot.generation();
+        if let Some(memory) = &mut self.appearance_memory {
+            // Only the service's settings are remembered, never a choice
+            // drawn over them. The next start falls back to the built-in
+            // look if this fails.
+            let _ = memory.remember(RememberedAppearance::from_snapshot(snapshot));
+        }
+        self.settings.update(cx, |view, cx| {
+            view.set_snapshot(snapshot.clone(), window, cx)
+        });
+        self.sync_reconnect_hosts(cx);
+        cx.emit(AppearanceSettled);
+        cx.notify();
+    }
+
+    /// Draw the last confirmed settings again with the choices that still
+    /// wait, after a choice was sent or dropped. Zoom stays as shown.
+    fn redraw_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(snapshot) = self.confirmed_appearance.clone() {
+            self.present_appearance(&snapshot, false, window, cx);
+        }
+    }
+
+    /// Show `snapshot` with the outstanding appearance choices in place of
+    /// its values: chrome, terminal colors and, for another terminal font or
+    /// size, terminal metrics. The zoom of a snapshot that was just `read`
+    /// goes to the presented zoom; otherwise the shown zoom stays. Neither
+    /// the appearance generation nor the remembered appearance changes here.
+    fn present_appearance(
+        &mut self,
+        snapshot: &AppearanceSnapshot,
+        read: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let available_fonts = window.text_system().all_font_names();
+        let mut next = NativeAppearance::from_snapshot(
+            snapshot,
+            &self.appearance_choices.values(),
+            &self.themes,
+            &available_fonts,
+            &self.ui_family,
+            &self.mono_family,
+        );
+        next.zoom = if read {
+            // A read that arrives while zoom steps are outstanding does not
+            // move the display back: what is shown stands until they settle.
+            self.zoom.observe(next.zoom)
+        } else {
+            self.appearance.zoom
+        };
+        // Another terminal font restages every terminal at once; a zoom
+        // change alone steps them as zoom does.
+        if self.appearance.terminal_font != next.terminal_font
+            || self.appearance.terminal_font_size != next.terminal_font_size
+        {
+            self.appearance.terminal_font = next.terminal_font.clone();
+            self.appearance.terminal_font_size = next.terminal_font_size;
+            self.apply_terminal_font(next.zoom, cx);
+        }
+        self.apply_zoom(next.zoom, window, cx);
+        next.apply_desktop(cx);
+        next.apply_component_theme(cx);
+        let mut failure = None;
+        for view in self.panes.values() {
+            let applied = view.terminal.update(cx, |terminal, cx| {
                 terminal.apply_colors(
                     next.terminal,
                     next.selection_foreground,
@@ -1916,20 +1982,8 @@ impl Workspace {
             }
         }
         self.screen_motion.clear();
-        self.tab_prefs = TabPrefs::read(snapshot);
-        self.editor_prefs = snapshot.editors().clone();
         self.appearance = next;
-        self.appearance_generation = snapshot.generation();
         self.appearance_error = failure;
-        if let Some(memory) = &mut self.appearance_memory {
-            // The next start falls back to the built-in look if this fails.
-            let _ = memory.remember(RememberedAppearance::from_snapshot(snapshot));
-        }
-        self.settings.update(cx, |view, cx| {
-            view.set_snapshot(snapshot.clone(), window, cx)
-        });
-        self.sync_reconnect_hosts(cx);
-        cx.emit(AppearanceSettled);
         cx.notify();
     }
 
@@ -3299,6 +3353,8 @@ impl Workspace {
             self.zoom = PresentedZoom::new(Zoom::default());
             self.apply_zoom(self.zoom.presented(), window, cx);
             self.appearance_generation = 0;
+            self.confirmed_appearance = None;
+            self.appearance_choices.clear();
             self.notification_settings_generation = 0;
             self.notification_settings_error = None;
             self.drawer_visible = true;
@@ -4432,6 +4488,12 @@ impl Workspace {
                     {
                         self.settings
                             .update(cx, |view, cx| view.apply_write_result(&result, window, cx));
+                        if self
+                            .appearance_choices
+                            .settle(&result, self.appearance_generation)
+                        {
+                            self.redraw_appearance(window, cx);
+                        }
                         self.sync_reconnect_hosts(cx);
                     }
                 }

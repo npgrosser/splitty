@@ -1383,7 +1383,20 @@ submits typed single-field intents through the workspace's fixed local owner,
 including while a remote Screen is shown. The existing auxiliary API stream
 owns a bounded FIFO, one active transaction and per-field exclusion shared with
 Drawer and zoom commands. Confirmed values come from authoritative reads;
-rejected or uncertain mutations are never replayed. Each field identifies its
+rejected or uncertain mutations are never replayed. The editor's controls show
+only confirmed values, but the window's look does not wait for a sent change of
+the UI theme mode or themes, a terminal palette, the interface font or size, or
+the terminal font or size (`NativeAppearance::shows_choice`). The workspace
+keeps such choices (`workspace/appearance_choices.rs`) beside the last
+confirmed snapshot and draws that snapshot with the choices in place of its
+values (`NativeAppearance::from_snapshot`), measuring terminals again for
+another terminal font or size. A choice stays drawn over every read until its
+write is rejected or uncertain, or the read at its write's required generation
+arrives, by the same rule that settles the editor's row; dropping it draws the
+last confirmed snapshot again. Choices resolve for the OS preference of that
+snapshot, so a preference change reaches them with the read it starts. A choice
+never advances the appearance generation and never reaches
+`last-appearance.json`. Each field identifies its
 appearance or notification observation domain. Admission, acknowledgement
 validation, required readback generations and deferred delivery use that domain;
 an OS appearance refresh cannot settle or supersede a notification edit. A fresh

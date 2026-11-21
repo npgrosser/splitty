@@ -3,7 +3,7 @@
 //! before that service answers. A presentation aid, not settings: only the
 //! application's own start reads it, nothing sends it to a service, and the
 //! service's answer replaces what it shows.
-use super::{theme_for, AppearanceSnapshot, ColorScheme};
+use super::{ui_theme_name, AppearanceSnapshot, ColorScheme};
 use serde::{Deserialize, Serialize};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -89,7 +89,7 @@ impl RememberedAppearance {
     /// The name of the UI theme for the operating system's preference, by
     /// the rule of a snapshot ([`AppearanceSnapshot::ui_theme`]).
     pub fn ui_theme(&self, scheme: ColorScheme) -> &str {
-        theme_for(
+        ui_theme_name(
             &self.theme_mode,
             &self.theme,
             &self.theme_dark,

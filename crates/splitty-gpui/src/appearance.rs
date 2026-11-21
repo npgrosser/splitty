@@ -13,11 +13,12 @@ use gpui_kit::{
     linear_color_stop, linear_gradient, px, rgb, App, Background, FontWeight, Hsla, Rgba,
 };
 use splitty_client_core::appearance::{
-    terminal_palette_name, AppearanceSnapshot, ColorScheme, RememberedAppearance,
+    terminal_palette_name, ui_theme_name, AppearanceSnapshot, ColorScheme, RememberedAppearance,
     DEFAULT_TERMINAL_FONT_SIZE, TERMINAL_FONT_FAMILY,
 };
-use splitty_client_core::settings::SettingsField;
+use splitty_client_core::settings::{SettingsField, SettingsValue};
 use splitty_client_core::zoom::{Zoom, ZoomSteps};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 mod catalog;
@@ -206,6 +207,33 @@ const DEFAULT_FONT_SIZE: f32 = 12.;
 /// narrower and decide what an update may set.
 const TERMINAL_FONT_SIZES: std::ops::RangeInclusive<u32> = 4..=128;
 
+/// Values of the settings editor a window shows before the local service
+/// confirms them, by field ([`NativeAppearance::from_snapshot`]).
+pub type Choices = BTreeMap<SettingsField, SettingsValue>;
+
+/// The text `choices` hold for `field`, else `confirmed`.
+fn chosen_text<'a>(choices: &'a Choices, field: SettingsField, confirmed: &'a str) -> &'a str {
+    match choices.get(&field) {
+        Some(SettingsValue::Text(text)) if NativeAppearance::shows_choice(field) => text,
+        _ => confirmed,
+    }
+}
+
+/// The whole size `choices` hold for `field`.
+fn chosen_size(choices: &Choices, field: SettingsField) -> Option<u32> {
+    match choices.get(&field) {
+        Some(SettingsValue::Number(size))
+            if NativeAppearance::shows_choice(field)
+                && size.fract() == 0.
+                && (0. ..=f64::from(u32::MAX)).contains(size) =>
+        {
+            // Whole and within the range of `u32`, so exact.
+            Some(*size as u32)
+        }
+        _ => None,
+    }
+}
+
 impl NativeAppearance {
     /// The corner radius of a control whose own radius is `natural`: the
     /// theme's control radius bounds it, so a square theme is square
@@ -308,30 +336,67 @@ impl NativeAppearance {
         }
     }
 
+    /// Whether a window shows a choice of `field` before the local service
+    /// confirms it: the settings its look resolves from, apart from zoom,
+    /// which shows its steps itself, the interface style and the window
+    /// frame, which take effect at the next start.
+    pub fn shows_choice(field: SettingsField) -> bool {
+        use SettingsField as F;
+        matches!(
+            field,
+            F::ThemeMode
+                | F::Theme
+                | F::ThemeDark
+                | F::ThemeLight
+                | F::TerminalTheme
+                | F::TerminalThemeDark
+                | F::TerminalThemeLight
+                | F::FontSize
+                | F::FontFamily
+                | F::TerminalFontFamily
+                | F::TerminalFontSize
+        )
+    }
+
+    /// The presentation of `snapshot`, with the values of `choices` in place
+    /// of its own for the fields [`Self::shows_choice`] names; choices of
+    /// other fields are not shown.
     pub fn from_snapshot(
         snapshot: &AppearanceSnapshot,
+        choices: &Choices,
         catalog: &ThemeCatalog,
         available_fonts: &[String],
         ui_family: &str,
         mono_family: &str,
     ) -> Self {
+        use SettingsField as F;
         let settings = snapshot.settings();
         let terminal = snapshot.terminal();
+        let text = |field, confirmed| chosen_text(choices, field, confirmed);
         let mut result = Self::resolve(
             &ThemeSelection {
                 ui_theme: if settings.interface_style == "system" {
                     Self::system_theme(snapshot.os_scheme())
                 } else {
-                    snapshot.ui_theme()
+                    ui_theme_name(
+                        text(F::ThemeMode, &settings.theme_mode),
+                        text(F::Theme, &settings.theme),
+                        text(F::ThemeDark, &settings.theme_dark),
+                        text(F::ThemeLight, &settings.theme_light),
+                        snapshot.os_scheme(),
+                    )
                 },
                 os_scheme: snapshot.os_scheme(),
-                terminal_theme: terminal.theme(),
-                terminal_theme_dark: terminal.theme_dark(),
-                terminal_theme_light: terminal.theme_light(),
-                font_size: settings.font_size,
-                font_family: &settings.font_family,
-                terminal_font_family: terminal.font_family(),
-                terminal_font_size: terminal.font_size(),
+                terminal_theme: text(F::TerminalTheme, terminal.theme()),
+                terminal_theme_dark: text(F::TerminalThemeDark, terminal.theme_dark()),
+                terminal_theme_light: text(F::TerminalThemeLight, terminal.theme_light()),
+                font_size: chosen_size(choices, F::FontSize)
+                    .and_then(|size| i32::try_from(size).ok())
+                    .unwrap_or(settings.font_size),
+                font_family: text(F::FontFamily, &settings.font_family),
+                terminal_font_family: text(F::TerminalFontFamily, terminal.font_family()),
+                terminal_font_size: chosen_size(choices, F::TerminalFontSize)
+                    .unwrap_or(terminal.font_size()),
             },
             catalog,
             available_fonts,
@@ -1100,6 +1165,74 @@ mod tests {
     }
     fn resolve(selection: &ThemeSelection, catalog: &ThemeCatalog) -> NativeAppearance {
         NativeAppearance::resolve(selection, catalog, &[], "UI", "Mono")
+    }
+
+    /// settings, Native Appearance Choices Before Confirmation: choices
+    /// resolve in place of the snapshot's values as confirmed ones do, for
+    /// the snapshot's OS preference; a choice of another field changes
+    /// nothing.
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn choices_resolve_in_place_of_the_snapshots_values() {
+        use splitty_client_core::appearance::test_support::settings_snapshot_for_scheme;
+        let catalog = ThemeCatalog::load(None);
+        let snapshot = settings_snapshot_for_scheme(
+            uuid::Uuid::nil(),
+            1,
+            ColorScheme::Light,
+            serde_json::json!({"fontSize": 14}),
+            serde_json::json!({}),
+        );
+        let shown = |choices: &Choices| {
+            NativeAppearance::from_snapshot(&snapshot, choices, &catalog, &[], "UI", "Mono")
+        };
+        let confirmed = shown(&Choices::new());
+        assert_eq!(confirmed.scheme, ColorScheme::Dark, "a fixed dark theme");
+        let palette = catalog
+            .palettes()
+            .iter()
+            .find(|palette| palette.name == "Campbell")
+            .expect("a bundled palette");
+        let text = |value: &str| SettingsValue::Text(value.into());
+        let chosen = shown(&Choices::from([
+            (SettingsField::ThemeMode, text("auto")),
+            (SettingsField::ThemeLight, text("splitty-light-gray")),
+            (SettingsField::TerminalTheme, text(&palette.id)),
+            (SettingsField::FontSize, SettingsValue::Number(16.)),
+            (SettingsField::TerminalFontSize, SettingsValue::Number(18.)),
+            (SettingsField::Zoom, SettingsValue::Number(2.)),
+            (SettingsField::TitleBarStyle, text("system")),
+        ]));
+        let expected = resolve(
+            &ThemeSelection {
+                os_scheme: ColorScheme::Light,
+                terminal_theme: &palette.id,
+                font_size: 16,
+                terminal_font_size: 18,
+                ..selection("splitty-light-gray")
+            },
+            &catalog,
+        );
+        assert_eq!(
+            (
+                chosen.scheme,
+                chosen.surface,
+                chosen.terminal,
+                chosen.font_size,
+                chosen.terminal_font_size
+            ),
+            (
+                ColorScheme::Light,
+                expected.surface,
+                palette.colors,
+                16.,
+                18.
+            )
+        );
+        assert_eq!(
+            (chosen.zoom, chosen.title_bar_style),
+            (confirmed.zoom, confirmed.title_bar_style)
+        );
     }
 
     #[test]

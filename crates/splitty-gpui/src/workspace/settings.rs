@@ -2151,6 +2151,8 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "ui-test-support"))]
+mod appearance_choice_tests;
+#[cfg(all(test, feature = "ui-test-support"))]
 mod keyboard_tests;
 #[cfg(all(test, feature = "ui-test-support"))]
 mod notification_tests;
