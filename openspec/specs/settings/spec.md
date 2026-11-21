@@ -221,7 +221,7 @@ The native workspace SHALL resolve UI themes and terminal palettes in a catalog 
 
 Settings SHALL store a theme by its identifier: the display name in lowercase with every run of characters other than ASCII letters and digits replaced by `-`, or the `id` of the theme's `splitty` object. A bundled theme SHALL keep its identifier against a file with the same one. The identifiers of the themes shipped before this catalog (`splitty-dark`, `splitty-light` and the others) SHALL keep selecting the same looks, as a UI theme and as a terminal palette of the same identifier. A bundled theme whose display name changes SHALL keep its identifier: `splitty-dark`, `splitty-light` and `splitty-light-gray` are shown as Splitty Modern, Splitty Modern Light and Splitty Modern Light Gray.
 
-The default UI themes SHALL be `splitty-classic` for a dark and for a fixed theme and `splitty-classic-light` for a light one: settings created without a choice name them, and they are shown in place of a stored theme the catalog does not have. Settings that already name a theme SHALL keep it.
+The default UI themes SHALL be `splitty-dark` (Splitty Modern) for a dark and for a fixed theme and `splitty-light` (Splitty Modern Light) for a light one: settings created without a choice name them, and they are shown in place of a stored theme the catalog does not have. Settings created without a choice SHALL select the fixed theme mode with `splitty-dark`, so that a first start shows Splitty Modern whatever the system's preference; `splitty-dark` and `splitty-light` SHALL be the pair they follow the system with once the mode is switched. Settings that already name a theme SHALL keep it.
 
 A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `active-text`, `hover`, `menu-hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `control-radius`, `field`, `bevel`, `title-bar`, `font-size`, `font-family` and `terminal-font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme or the other values of the same object. `terminal-font-family` SHALL be a family list the theme proposes for terminal text (see Native Terminal Font Choice), in which `monospace` and `ui-monospace` name the bundled terminal font.
 
@@ -259,12 +259,16 @@ Third-party themes bundled with the application SHALL be limited to those whose 
 - **THEN** the title bar takes the foreground, keeps its derived alignment, and the problem is reported
 
 #### Scenario: First start
-- **WHEN** the app starts with no stored settings
-- **THEN** the UI theme is `splitty-classic`, and `splitty-classic-light` where the theme follows a light system preference
+- **WHEN** the app starts with no stored settings, on a dark or on a light system preference
+- **THEN** the theme mode is fixed and the UI theme is `splitty-dark`, listed as Splitty Modern, with the terminal palette of the same identifier
+
+#### Scenario: Following the system without a chosen pair
+- **WHEN** settings created without a choice switch the theme mode to follow the system
+- **THEN** the UI theme is `splitty-dark` on a dark system preference and `splitty-light` on a light one
 
 #### Scenario: Settings from before the default changed
-- **WHEN** the stored settings name `splitty-dark`
-- **THEN** that theme is shown, listed as Splitty Modern, with the terminal palette of the same identifier
+- **WHEN** the stored settings name `splitty-classic`, the default of an earlier release
+- **THEN** that theme is shown, with the terminal palette of the same identifier, and the current default does not replace it
 
 #### Scenario: Palette with a display name
 - **WHEN** a palette file named `Night` holds the line `# name: Night Owl`
