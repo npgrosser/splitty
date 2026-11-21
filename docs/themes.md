@@ -96,7 +96,10 @@ the caption button style. Plain buttons are symbols on rectangular hover
 backgrounds; boxed buttons are small raised buttons with the theme's edge,
 sunken while pressed; wide buttons are cells as tall as the bar, with a red
 close cell under the pointer. Windows uses the same styles for its caption
-buttons; macOS keeps its native traffic lights, centered in the bar. A theme
+buttons; macOS keeps its native traffic lights, centered in the bar. On
+Windows 11, which rounds a window's corners by itself, a theme with a square
+frame (`radius` 0, as in Windows Classic) asks the system for square corners.
+A theme
 without these values gets a compact header with plain buttons. The client
 frame's corner radius is the theme's radius, so a square theme has a square
 window. System decoration keeps the desktop's geometry and a rounded frame. The

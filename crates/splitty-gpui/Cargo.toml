@@ -40,6 +40,8 @@ splitty-client-core = { path = "../splitty-client-core", features = ["ui-test-su
 [target.'cfg(target_os = "windows")'.dependencies]
 # Verifies the WSL backend archive that ships beside the executable.
 sha2 = "0.10"
+# The window's own handle, to ask the system for square corners.
+raw-window-handle = "0.6"
 
 # The build host compiles the Windows icon and version resource.
 [target.'cfg(windows)'.build-dependencies]

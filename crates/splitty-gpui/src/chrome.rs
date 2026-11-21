@@ -357,11 +357,76 @@ fn pixel_glyph(button: WindowButton, maximized: bool, color: u32, unit: f32) -> 
     .size(px(9. * unit))
 }
 
+/// Windows 11 rounds the corners of every window that does not ask it not
+/// to. A theme whose frame is square asks; any other leaves the system's
+/// choice. Windows 10 knows no such attribute and refuses it, which changes
+/// nothing there.
+#[cfg(target_os = "windows")]
+mod corners {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use std::{ffi::c_void, sync::Mutex};
+
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_DEFAULT: u32 = 0;
+    const DWMWCP_DONOTROUND: u32 = 1;
+
+    #[link(name = "dwmapi")]
+    extern "system" {
+        fn DwmSetWindowAttribute(
+            window: *mut c_void,
+            attribute: u32,
+            value: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    /// What each window was last asked for, so that drawing the title bar
+    /// again asks the system nothing.
+    static ASKED: Mutex<Vec<(isize, bool)>> = Mutex::new(Vec::new());
+
+    pub(super) fn apply(window: &gpui_kit::Window, square: bool) {
+        let Ok(handle) = HasWindowHandle::window_handle(window) else {
+            return;
+        };
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return;
+        };
+        let id = handle.hwnd.get();
+        let mut asked = ASKED
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match asked.iter_mut().find(|(window, _)| *window == id) {
+            Some((_, last)) if *last == square => return,
+            Some((_, last)) => *last = square,
+            None => asked.push((id, square)),
+        }
+        let preference = if square {
+            DWMWCP_DONOTROUND
+        } else {
+            DWMWCP_DEFAULT
+        };
+        // SAFETY: the handle is this live window's, the value is a `u32` that
+        // outlives the call, and its size is passed with it.
+        unsafe {
+            DwmSetWindowAttribute(
+                id as *mut c_void,
+                DWMWA_WINDOW_CORNER_PREFERENCE,
+                std::ptr::from_ref(&preference).cast(),
+                std::mem::size_of::<u32>() as u32,
+            );
+        }
+    }
+}
+
 impl RenderOnce for WindowChrome {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let a = &self.appearance;
         let active = window.is_window_active();
         let title = self.title(window);
+        // The frame is the system's on Windows; only its corners are ours to
+        // ask for.
+        #[cfg(target_os = "windows")]
+        corners::apply(window, a.radius == 0.);
         if !cfg!(target_os = "linux") {
             // AppKit keeps the actual traffic lights; Windows routes the
             // caption hit regions through the native window procedure.
