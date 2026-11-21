@@ -539,6 +539,12 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-21 in CI on `main`, once, in `splitty-client-core`:
+  `native_workspace::source::tests::an_untouched_window_that_attaches_again_leaves_the_size_to_the_client_in_use`
+  read a PTY size of 50x20 where it expects 50x30. The commit it ran for changed a test of another crate only, and
+  25 repeats of the test alone passed locally. In six local runs of the crate's suite one failed in another test,
+  `native_workspace::hub_tests::pending_failed_hub_read_does_not_block_settings_or_terminal_output`. Not
+  investigated.
 - **Fixed (2026-11-21): the bridge's real SSH test expected a clean end of a bridge it cut off.** Seen in CI on
   `main`, twice in a row, and in 5 of 25 repeats in the SSH lab (9 of 30 at an earlier commit):
   `the_bridge_carries_native_frames_through_real_ssh` (`crates/splitty-server/tests/remote_connect.rs`) found the
