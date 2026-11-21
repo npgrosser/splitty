@@ -539,6 +539,11 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-21 in CI on `main`, in the macOS job, for a commit that changed a test of another crate only:
+  `pty::session::tests::managed_input_backpressure_does_not_block_revocation_or_stop` (`splitty-core`) failed at
+  its `stop` with "killpg owned leader group … with SIGTERM: EPERM". This is the answer Darwin gives for a group
+  whose leader is a zombie, as in the entry of 2026-11-14 on `managed_stop_escalates_and_retains_final_output`
+  below, here for the first signal instead of SIGKILL. Not investigated.
 - Seen on 2026-11-21 in CI on `main`, once, in `splitty-client-core`:
   `native_workspace::source::tests::an_untouched_window_that_attaches_again_leaves_the_size_to_the_client_in_use`
   read a PTY size of 50x20 from the shell where it expects 50x30, right after the command that takes the size
