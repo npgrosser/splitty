@@ -1385,7 +1385,7 @@ mod tests {
         assert_eq!(shown.scheme, ColorScheme::Light);
         assert_eq!(
             shown.surface,
-            resolve(&selection("splitty-classic-light"), &catalog).surface
+            resolve(&selection("splitty-light"), &catalog).surface
         );
         assert!(shown.notice.unwrap().contains("no-such-theme"));
     }
@@ -1599,10 +1599,10 @@ mod tests {
             assert!(contrast(text, rgb(shown.surface).into()) >= 7., "{id}");
             assert!(contrast(text, rgb(shown.active).into()) >= 7., "{id}");
         }
-        // Windows 11 Dark keeps the default palette's colors on a background
+        // Windows 11 Dark keeps Splitty Classic's colors on a background
         // nearer to its panels; the light theme takes the default palette.
         let dark = resolve(&selection("windows-11-dark"), &catalog).terminal;
-        let classic = catalog.default_palette(ColorScheme::Dark).unwrap();
+        let classic = catalog.palette("splitty-classic").unwrap();
         assert_eq!(dark.background, 0x141414);
         assert_eq!(dark.ansi[1..], classic.colors.ansi[1..]);
         assert_eq!(

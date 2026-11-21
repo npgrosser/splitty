@@ -285,7 +285,7 @@ async fn real_service() {
                     && snapshot.terminal().theme() == "splitty-light" =>
             {
                 assert_eq!(snapshot.connection_id(), owner);
-                assert_eq!(snapshot.ui_theme(), "splitty-classic");
+                assert_eq!(snapshot.ui_theme(), "splitty-dark");
                 effective = true;
             }
             Update::Event { event, .. } => {

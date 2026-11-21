@@ -359,8 +359,8 @@ fn default_title_bar_style() -> String {
 
 /// The UI themes of settings that name none: the dark one also for a fixed
 /// theme, the light one for a light system preference.
-pub const DEFAULT_THEME_DARK: &str = "splitty-classic";
-pub const DEFAULT_THEME_LIGHT: &str = "splitty-classic-light";
+pub const DEFAULT_THEME_DARK: &str = "splitty-dark";
+pub const DEFAULT_THEME_LIGHT: &str = "splitty-light";
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
@@ -985,7 +985,7 @@ mod tests {
         assert_eq!(cfg.terminal.theme, "default");
         assert_eq!(cfg.terminal.close_on_exit, "always");
         assert_eq!(cfg.terminal.scroll_to_bottom, Some(true));
-        assert_eq!(cfg.appearance.theme, "splitty-classic");
+        assert_eq!(cfg.appearance.theme, "splitty-dark");
         assert_eq!(cfg.appearance.border_radius, 1);
         assert!(cfg.drawer.pinned);
         assert!(cfg.drawer.edge_reveal);
@@ -998,6 +998,31 @@ mod tests {
         assert!(cfg.notifications.process_crashed);
         assert!(cfg.notifications.program_status);
         assert!(!cfg.remote.auto_forward_ports);
+    }
+
+    /// settings, Native Theme Catalog, First start and Settings from before
+    /// the default changed: new settings hold Splitty Modern in a fixed theme
+    /// mode; a stored theme stays.
+    #[test]
+    fn a_first_start_has_a_fixed_modern_theme_and_a_stored_theme_stays() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let first = load_from(&path).appearance;
+        assert_eq!(
+            (
+                first.theme_mode.as_str(),
+                first.theme.as_str(),
+                first.theme_dark.as_str(),
+                first.theme_light.as_str()
+            ),
+            ("fixed", "splitty-dark", "splitty-dark", "splitty-light")
+        );
+        assert_eq!(first, AppearanceSettings::default());
+
+        fs::write(&path, "[appearance]\ntheme = \"splitty-classic\"\n").unwrap();
+        let stored = load_from(&path).appearance;
+        assert_eq!(stored.theme, "splitty-classic");
+        assert_eq!(stored.theme_mode, "fixed");
     }
 
     #[test]
@@ -1265,7 +1290,7 @@ mod tests {
 
         assert_eq!(updated.terminal.theme, "monokai");
         // Everything else stays at defaults.
-        assert_eq!(updated.appearance.theme, "splitty-classic");
+        assert_eq!(updated.appearance.theme, "splitty-dark");
     }
 
     #[test]
@@ -1465,7 +1490,7 @@ mod tests {
         // Other terminal fields should be defaults.
         assert_eq!(cfg.terminal.close_on_exit, "always");
         // Other sections should be defaults.
-        assert_eq!(cfg.appearance.theme, "splitty-classic");
+        assert_eq!(cfg.appearance.theme, "splitty-dark");
     }
 
     #[test]

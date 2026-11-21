@@ -1045,7 +1045,7 @@ async fn queries_errors_and_service_identity_match_control_and_native() {
     for (requested, resolved, label) in [
         ("splitty-dark", "splitty-dark", "Splitty Modern"),
         ("alias-palette", "alias-palette", "Splitty Modern"),
-        ("missing-palette", "splitty-classic", "Splitty Classic"),
+        ("missing-palette", "splitty-dark", "Splitty Modern"),
     ] {
         let native_theme = native(&state, Operation::ThemeGet, json!({"name": requested})).await;
         let service_theme = exchange(

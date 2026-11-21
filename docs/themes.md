@@ -10,16 +10,19 @@ Both come with the app and can be added as files.
 
 ## What ships
 
-- The Splitty themes (Classic, Modern, Retro, Aurora, Neon, Cozy, their light
+- The Splitty themes (Modern, Classic, Retro, Aurora, Neon, Cozy, their light
   and gray variants, Adwaita), each as a UI theme and as a terminal palette.
-  Splitty Classic is the default, with Splitty Classic Light where the theme
-  follows a light system. Splitty Modern is the rounded sans-serif look that
-  was called Splitty Dark; settings that name it keep it.
+  Splitty Modern, the rounded sans-serif look, is the default: new settings
+  show it as their one theme, whatever the system's preference, and pair it
+  with Splitty Modern Light once they follow the system. The two were called
+  Splitty Dark and Splitty Light and keep those identifiers (`splitty-dark`,
+  `splitty-light`); settings that name another theme keep it.
 - The Windows themes, which also change the shape of the interface: Windows 11
   Dark and Light (soft panels, small control corners, a centered title and wide
   window buttons; the dark one's terminal palette is Splitty Classic on a
-  background nearer to its panels, the light one takes Splitty Classic Light) and Windows Classic (3D edges, square corners, a
-  navy selection, a gradient title bar with boxed window buttons, and a black
+  background nearer to its panels, the light one takes the default light
+  palette, Splitty Modern Light) and Windows Classic (3D edges, square corners,
+  a navy selection, a gradient title bar with boxed window buttons, and a black
   console as its terminal palette). Their title-bar shape shows with Splitty
   window decoration; see below. The colors of the Windows console are the
   terminal palettes Campbell and Campbell Light.
@@ -36,8 +39,9 @@ The files and their license notices are in `crates/splitty-gpui/themes/`;
 
 ## Choosing
 
-Settings, Appearance: one theme, or a dark and a light one that follow the
-system. Settings, Terminal:
+Settings, Appearance: one theme (the default, Splitty Modern), or a dark and a
+light one that follow the system (by default Splitty Modern and Splitty Modern
+Light). Settings, Terminal:
 
 - **Terminal colors**: one palette for every mode, or "By interface mode".
 - **Terminal colors, dark / light**: the palette used with a dark or a light UI

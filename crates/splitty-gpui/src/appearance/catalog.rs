@@ -9,8 +9,8 @@ use std::{collections::HashSet, path::Path, rc::Rc};
 
 include!(concat!(env!("OUT_DIR"), "/bundled_themes.rs"));
 
-pub const DEFAULT_DARK: &str = "splitty-classic";
-pub const DEFAULT_LIGHT: &str = "splitty-classic-light";
+pub const DEFAULT_DARK: &str = "splitty-dark";
+pub const DEFAULT_LIGHT: &str = "splitty-light";
 
 const MAX_THEME_SET_BYTES: u64 = 1024 * 1024;
 const MAX_THEMES_PER_SET: usize = 64;
