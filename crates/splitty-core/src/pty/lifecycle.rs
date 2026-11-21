@@ -242,7 +242,16 @@ impl UnixChild {
         // direct signal already ended the leader. WNOWAIT keeps that exact PID
         // owned. Exit alone is insufficient: another group member might still
         // be alive but inaccessible. Accept only a complete, sole-leader list.
-        if !matches!(self.observe(), Ok(Some(_))) {
+        // A leader that the direct signal ends can still be on its way out
+        // when the group signal finds nobody to deliver to: its exit gets a
+        // moment to show. One that outlives the signal keeps the error.
+        let exited = (0..50).any(|attempt| {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            matches!(self.observe(), Ok(Some(_)))
+        });
+        if !exited {
             return false;
         }
         let mut members: [nix::libc::pid_t; 2] = [0; 2];

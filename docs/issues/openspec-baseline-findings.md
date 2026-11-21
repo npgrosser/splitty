@@ -539,11 +539,16 @@ that area touches them.
 
 ## Flaky tests
 
-- Seen on 2026-11-21 in CI on `main`, in the macOS job, for a commit that changed a test of another crate only:
-  `pty::session::tests::managed_input_backpressure_does_not_block_revocation_or_stop` (`splitty-core`) failed at
-  its `stop` with "killpg owned leader group … with SIGTERM: EPERM". This is the answer Darwin gives for a group
-  whose leader is a zombie, as in the entry of 2026-11-14 on `managed_stop_escalates_and_retains_final_output`
-  below, here for the first signal instead of SIGKILL. Not investigated.
+- Seen on 2026-11-21 in CI on `main`, in the macOS job, in two attempts of one run, for a commit that changed a
+  test of another crate only: `pty::session::tests::managed_input_backpressure_does_not_block_revocation_or_stop`
+  (`splitty-core`) failed at its `stop` with "killpg owned leader group … with SIGTERM: EPERM". A stop signals
+  the leader first and its group after it. Darwin leaves a process that is exiting out of `killpg` and answers
+  EPERM when nobody is left to signal; `group_has_only_exited_leader` (`pty/lifecycle.rs`) accepted that only when
+  the leader's exit was already to be seen, which it need not be right after the signal that ends it. It now
+  gives that exit up to 100 ms to show and still refuses a leader that outlives the signal and a group with
+  another member. The cause is read from the code and the error, not reproduced: no macOS machine was at hand,
+  so only the macOS job checks it. The entry of 2026-11-14 on `managed_stop_escalates_and_retains_final_output`
+  below is the same answer for SIGKILL.
 - Seen on 2026-11-21 in CI on `main`, once, in `splitty-client-core`:
   `native_workspace::source::tests::an_untouched_window_that_attaches_again_leaves_the_size_to_the_client_in_use`
   read a PTY size of 50x20 from the shell where it expects 50x30, right after the command that takes the size
