@@ -29,7 +29,7 @@ class Scene:
     setup: Callable | None = None
     drawer: bool = False
     zoom: float = 1.25
-    theme: str = "windows-11-dark"
+    theme: str = "splitty-dark"
     size: tuple[int, int] | None = None
     # The machines the scene reaches over SSH, by name.
     hosts: tuple[str, ...] = ()
@@ -121,7 +121,7 @@ def customize_setup(stage):
 
 
 # The Theme list of the settings after the page is scrolled.
-THEME_SELECT = (430, 336)
+THEME_SELECT = (430, 376)
 
 
 def customize(stage):

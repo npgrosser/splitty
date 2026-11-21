@@ -77,8 +77,13 @@ class Screen:
             ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int),
             ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),
             ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint)]
-        self.display = self.lib.XOpenDisplay(display.encode())
-        if not self.display:
+        # A display that only just started may refuse its first clients.
+        for _ in range(20):
+            self.display = self.lib.XOpenDisplay(display.encode())
+            if self.display:
+                break
+            time.sleep(0.5)
+        else:
             raise RuntimeError(f"cannot open display {display}")
         self.root = self.lib.XDefaultRootWindow(self.display)
         self.size = size
