@@ -30,7 +30,7 @@ sha2 = "0.10"
 semver = "1"
 http-body-util = "0.1"
 # The chunks of offered files (`client_session::files`).
-base64 = "0.22"
+base64 = "0.23"
 # The CLI uses HTTP framing over private Unix sockets.
 reqwest = { version = "0.12", features = ["json"], default-features = false }
 thiserror = "2"
