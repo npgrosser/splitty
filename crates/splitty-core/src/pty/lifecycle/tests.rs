@@ -217,3 +217,43 @@ fn darwin_group_permission_error_requires_an_exited_sole_owned_leader() {
     assert_eq!(owned.observe().unwrap().unwrap().exit_code, Some(0));
     owned.reap().unwrap();
 }
+
+#[test]
+#[cfg(target_os = "macos")]
+fn darwin_refuses_no_stop_while_the_signalled_leader_is_still_on_its_way_out() {
+    use nix::{
+        errno::Errno,
+        sys::signal::{kill, killpg, Signal},
+        unistd::Pid,
+    };
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    // A stop signals the leader and then its group. Many leaders, since the
+    // moment between the signal and the exit it causes is short.
+    for round in 0..200 {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
+        let mut owned = UnixChild {
+            child: ChildGuard(Some(Box::new(child))),
+            pid,
+            terminal: None,
+        };
+        kill(pid, Signal::SIGTERM).unwrap();
+        let result = killpg(pid, Signal::SIGTERM);
+        let on_its_way = matches!(result, Err(Errno::EPERM)) && owned.observe().unwrap().is_none();
+        if let Err(error) = owned.group_signal_result(Signal::SIGTERM, result) {
+            panic!("round {round}, the leader's exit not to be seen yet: {on_its_way}: {error}");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while owned.observe().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "leader did not exit");
+            std::thread::sleep(TICK);
+        }
+        owned.reap().unwrap();
+    }
+}

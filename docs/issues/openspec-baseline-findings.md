@@ -546,9 +546,12 @@ that area touches them.
   EPERM when nobody is left to signal; `group_has_only_exited_leader` (`pty/lifecycle.rs`) accepted that only when
   the leader's exit was already to be seen, which it need not be right after the signal that ends it. It now
   gives that exit up to 100 ms to show and still refuses a leader that outlives the signal and a group with
-  another member. The cause is read from the code and the error, not reproduced: no macOS machine was at hand,
-  so only the macOS job checks it. The entry of 2026-11-14 on `managed_stop_escalates_and_retains_final_output`
-  below is the same answer for SIGKILL.
+  another member. **Fixed (2026-11-21).** The macOS test
+  `darwin_refuses_no_stop_while_the_signalled_leader_is_still_on_its_way_out` signals 200 leaders and then their
+  groups; in CI without the change it failed in round 29 with the group signal refused and the leader's exit not
+  to be seen yet, and the session test failed in the same run, a third time in a row. With the change both pass.
+  The entry of 2026-11-14 on `managed_stop_escalates_and_retains_final_output` below is the same answer for
+  SIGKILL.
 - Seen on 2026-11-21 in CI on `main`, once, in `splitty-client-core`:
   `native_workspace::source::tests::an_untouched_window_that_attaches_again_leaves_the_size_to_the_client_in_use`
   read a PTY size of 50x20 from the shell where it expects 50x30, right after the command that takes the size
