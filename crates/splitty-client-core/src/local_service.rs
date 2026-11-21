@@ -2,10 +2,11 @@
 use crate::api_stream::ApiStream as Client;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
-    settings::{SettingsDomain, SettingsEdit, SettingsField},
+    settings::{SettingsDomain, SettingsEdit, SettingsField, SettingsMetadata},
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };
+use splitty_transport::budget::Charged;
 use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -71,8 +72,18 @@ enum Job {
     DrawerVisibility(Uuid, bool),
     Template(Uuid, crate::templates::TemplateApiRequest),
 }
-type Read =
-    Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate, Option<SettingsDomain>)> + Send>>;
+/// Settings metadata a read fetched, for [`LocalServiceClient::metadata`].
+type Fetched = Option<Arc<Charged<SettingsMetadata>>>;
+/// A finished job: the stream back, what it did, its update, the settings
+/// domain it observed and the metadata it fetched.
+type Done = (
+    Client,
+    Job,
+    LocalServiceUpdate,
+    Option<SettingsDomain>,
+    Fetched,
+);
+type Read = Pin<Box<dyn Future<Output = Done> + Send>>;
 
 /// `next_update` may be cancelled without cancelling the retained request. Each
 /// feature coalesces its own refreshes; completing even a superseded read gives
@@ -89,6 +100,11 @@ pub struct LocalServiceClient {
     uncertain_legacy: Vec<SettingsField>,
     last_appearance: Option<Arc<AppearanceSnapshot>>,
     last_notifications: Option<NotificationSettingsRead>,
+    /// The service's settings metadata, once a read fetched it. Its limits and
+    /// defaults stay fixed while the service runs (only the detected shells
+    /// in its defaults can change, and no setting here reads them), so later
+    /// appearance and notification reads reuse it instead of asking again.
+    metadata: Fetched,
     terminal_generation: u64,
     pending: Option<Read>,
     active_zoom: Vec<Uuid>,
@@ -125,6 +141,7 @@ impl LocalServiceClient {
             uncertain_legacy: Vec::new(),
             last_appearance: None,
             last_notifications: None,
+            metadata: None,
             terminal_generation: 1,
             pending: None,
             active_zoom: Vec::new(),
@@ -465,11 +482,13 @@ impl LocalServiceClient {
                 let connection = self.connection_id;
                 let scheme = self.scheme;
                 let terminal_generation = self.terminal_generation;
+                let metadata = self.metadata.clone();
                 self.pending = Some(Box::pin(async move {
                     let cancelled = || {
                         io::Error::new(io::ErrorKind::Interrupted, "local settings read cancelled")
                     };
                     let mut observed = None;
+                    let mut fetched = None;
                     let result = match job.clone() {
                         Job::BackendVersion => LocalServiceUpdate::BackendVersion {
                             connection,
@@ -500,10 +519,14 @@ impl LocalServiceClient {
                             .await,
                         ),
                         Job::Read(Feature::Appearance, generation) => {
-                            LocalServiceUpdate::Appearance(tokio::select! { biased;
+                            let result = tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
-                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, &mut observed) => result.map(Arc::new),
-                            })
+                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, metadata, &mut observed) => result.map(Arc::new),
+                            };
+                            if let Ok(snapshot) = &result {
+                                fetched = snapshot.shared_metadata();
+                            }
+                            LocalServiceUpdate::Appearance(result)
                         }
                         Job::Read(Feature::Profiles, generation) => {
                             LocalServiceUpdate::ShellProfiles(tokio::select! { biased;
@@ -514,7 +537,10 @@ impl LocalServiceClient {
                         Job::Read(Feature::Notifications, generation) => {
                             let result = tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
-                                result = notification_settings::read(&mut client) => result,
+                                (result, metadata) = notification_settings::read(&mut client, metadata) => {
+                                    fetched = metadata;
+                                    result
+                                }
                             };
                             if result.is_ok() {
                                 observed = Some(SettingsDomain::Notifications);
@@ -537,13 +563,16 @@ impl LocalServiceClient {
                             .await,
                         ),
                     };
-                    (client, job, result, observed)
+                    (client, job, result, observed, fetched)
                 }));
             }
-            let (client, job, mut result, observed) =
+            let (client, job, mut result, observed, fetched) =
                 self.pending.as_mut().expect("settings job started").await;
             self.pending = None;
             self.client = Some(client);
+            if self.metadata.is_none() {
+                self.metadata = fetched;
+            }
             self.last_template = matches!(job, Job::Template(..));
             self.zoom_follows = false;
             match job {
@@ -659,7 +688,7 @@ impl LocalServiceClient {
         let mut outcomes = Vec::new();
         if let Some(pending) = self.pending.take() {
             self.cancel.notify_one();
-            let (client, _, result, _) = pending.await;
+            let (client, _, result, _, _) = pending.await;
             if let LocalServiceUpdate::SettingsWrite(result) = result {
                 outcomes.push(result);
             }

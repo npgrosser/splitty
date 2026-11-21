@@ -114,7 +114,7 @@ fn build(
     let metadata = metadata.map(|metadata| {
         let metadata =
             serde_json::from_value::<SettingsMetadata>(metadata).expect("test settings metadata");
-        budget.charge(0, false, || metadata).expect("test charge")
+        Arc::new(budget.charge(0, false, || metadata).expect("test charge"))
     });
     Arc::new(AppearanceSnapshot {
         connection_id,

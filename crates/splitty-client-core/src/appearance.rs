@@ -6,6 +6,7 @@
 //! session stream, where unrelated frames carry terminal output and credits.
 use splitty_core::config::{AppearanceSettings, DrawerSettings, RemoteSettings};
 use splitty_transport::budget::Charged;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::settings::{
@@ -113,7 +114,8 @@ pub struct AppearanceSnapshot {
     settings: Charged<HomePresentation>,
     scheme: ColorScheme,
     terminal_generation: u64,
-    metadata: Option<Charged<SettingsMetadata>>,
+    /// Shared with the reader, which reuses a service's metadata.
+    metadata: Option<Arc<Charged<SettingsMetadata>>>,
     metadata_error: Option<String>,
 }
 
@@ -134,7 +136,10 @@ impl AppearanceSnapshot {
         &self.settings.terminal
     }
     pub fn metadata(&self) -> Option<&SettingsMetadata> {
-        self.metadata.as_deref()
+        self.metadata.as_deref().map(|metadata| &**metadata)
+    }
+    pub(crate) fn shared_metadata(&self) -> Option<Arc<Charged<SettingsMetadata>>> {
+        self.metadata.clone()
     }
     /// The limits of `field`: the server's metadata, else, for a server
     /// without metadata, the client's fallback (`settings::fallback_limits`).
@@ -303,7 +308,7 @@ mod tests {
         };
         let metadata = metadata.map(|value| {
             let metadata = serde_json::from_value::<SettingsMetadata>(value).unwrap();
-            budget.charge(0, false, || metadata).unwrap()
+            Arc::new(budget.charge(0, false, || metadata).unwrap())
         });
         AppearanceSnapshot {
             connection_id: Uuid::new_v4(),

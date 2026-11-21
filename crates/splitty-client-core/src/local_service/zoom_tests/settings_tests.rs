@@ -18,6 +18,22 @@ fn appearance_exchanges() -> Vec<Exchange> {
         ),
     ]
 }
+/// The same read once the client holds the service's metadata: it asks only
+/// for the settings.
+fn reread(exchanges: Vec<Exchange>) -> Vec<Exchange> {
+    exchanges
+        .into_iter()
+        .filter(|exchange| exchange.operation != "home.metadata")
+        .collect()
+}
+fn failed_metadata() -> Exchange {
+    Exchange {
+        operation: "home.metadata",
+        status: 500,
+        uncertain: false,
+        body: "{}".into(),
+    }
+}
 async fn loaded(api: Client, owner: Uuid) -> LocalServiceClient {
     let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     client.dirty = [true, false, false];
@@ -72,7 +88,7 @@ fn edit(field: F) -> SettingsEdit {
 #[tokio::test]
 async fn admission_is_local_bounded_field_exclusive_and_close_discards_unsent() {
     let mut exchanges = appearance_exchanges();
-    exchanges.extend(notification_exchanges());
+    exchanges.extend(reread(notification_exchanges()));
     let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();
     let mut client = loaded_domains(api, owner).await;
@@ -155,7 +171,9 @@ async fn rejection_and_uncertainty_reconcile_without_replay_even_when_metadata_f
         (200, true, "{}", true),
         (200, false, "{", true),
     ] {
+        // Metadata fails from the start, so the refresh asks for it again.
         let mut exchanges = appearance_exchanges();
+        exchanges[1] = failed_metadata();
         exchanges.push(Exchange {
             operation: "home.update",
             status,
@@ -163,12 +181,7 @@ async fn rejection_and_uncertainty_reconcile_without_replay_even_when_metadata_f
             body: body.into(),
         });
         exchanges.push(exchange("home.get", home(1.0)));
-        exchanges.push(Exchange {
-            operation: "home.metadata",
-            status: 500,
-            uncertain: false,
-            body: "{}".into(),
-        });
+        exchanges.push(failed_metadata());
         let (api, task, dir) = scripted(exchanges).await;
         let owner = Uuid::new_v4();
         let id = Uuid::new_v4();
@@ -221,7 +234,7 @@ async fn close_reports_active_uncertainty_and_discards_next_field() {
         let (api, task, dir) = scripted_tail(
             appearance_exchanges()
                 .into_iter()
-                .chain(notification_exchanges())
+                .chain(reread(notification_exchanges()))
                 .collect(),
             Tail::Hold(admitted),
         )
@@ -294,6 +307,65 @@ async fn missing_metadata_preserves_home_and_keeps_compatible_writes() {
     }
 }
 
+/// settings, Experimental Native Settings Editor: a service's metadata does
+/// not change while it runs. A read that could not fetch it leaves the next
+/// read to ask again; once fetched, later appearance and notification reads
+/// reuse it. (Metadata the fixture answers unasked is the stock one, so
+/// distinct defaults show where a value came from.)
+#[tokio::test]
+async fn later_reads_reuse_fetched_metadata_and_ask_again_after_a_failure() {
+    let mut metadata = splitty_core::config::settings_metadata();
+    metadata["defaults"]["appearance"]["fontSize"] = 13.into();
+    metadata["defaults"]["notifications"]["enabled"] = false.into();
+    let mut exchanges = appearance_exchanges();
+    exchanges[1] = failed_metadata();
+    exchanges.push(exchange("home.get", home(1.0)));
+    exchanges.push(exchange("home.metadata", metadata.to_string()));
+    exchanges.push(exchange("home.get", home(1.0)));
+    exchanges.push(exchange("home.get", home(1.0)));
+    let (api, task, dir) = scripted(exchanges).await;
+    let owner = Uuid::new_v4();
+    let mut client = loaded(api, owner).await;
+    assert!(client
+        .last_appearance
+        .as_ref()
+        .unwrap()
+        .metadata_error()
+        .is_some());
+    client.refresh_settings(owner).unwrap();
+    client.dirty = [true, false, false];
+    let LocalServiceUpdate::Appearance(Ok(fetched)) = raw_next(&mut client).await else {
+        panic!("second appearance read missing")
+    };
+    assert_eq!(
+        fetched.metadata().unwrap().default_value(F::FontSize),
+        Some(V::Number(13.0))
+    );
+    client.refresh_settings(owner).unwrap();
+    client.dirty = [true, false, true];
+    let (mut appearance, mut notifications) = (None, None);
+    while appearance.is_none() || notifications.is_none() {
+        match raw_next(&mut client).await {
+            LocalServiceUpdate::Appearance(Ok(snapshot)) => appearance = Some(snapshot),
+            LocalServiceUpdate::NotificationSettings(read) => notifications = Some(read),
+            _ => panic!("unexpected update"),
+        }
+    }
+    let (appearance, notifications) = (appearance.unwrap(), notifications.unwrap());
+    assert!(Arc::ptr_eq(
+        &appearance.shared_metadata().unwrap(),
+        &fetched.shared_metadata().unwrap()
+    ));
+    assert_eq!(
+        notifications.default_value(F::NotificationEnabled),
+        Some(V::Bool(false))
+    );
+    drop((fetched, appearance));
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn named_terminal_palettes_pass_through_without_a_theme_request() {
     // The script is the whole conversation: a theme request would not match it.
@@ -327,8 +399,8 @@ async fn uncertain_write_stays_uncertain_and_queued_old_read_cannot_publish() {
     lost_reply.uncertain = true;
     exchanges.push(lost_reply);
     exchanges.push(exchange("home.get", home(1.0)));
-    exchanges.extend(appearance_exchanges());
-    let mut latest = appearance_exchanges();
+    exchanges.extend(reread(appearance_exchanges()));
+    let mut latest = reread(appearance_exchanges());
     latest[0].body = home(1.5);
     exchanges.push(exchange("home.get", home(1.0)));
     exchanges.extend(latest);
@@ -722,15 +794,15 @@ async fn an_older_server_without_the_program_status_switch_reads_it_as_on() {
 #[tokio::test]
 async fn mixed_domain_fifo_acknowledges_against_only_its_own_projection() {
     let mut exchanges = appearance_exchanges();
-    exchanges.extend(notification_exchanges());
+    exchanges.extend(reread(notification_exchanges()));
     exchanges.push(exchange("home.update", home(1.0)));
-    exchanges.extend(appearance_exchanges());
+    exchanges.extend(reread(appearance_exchanges()));
     // A notification reply need not contain any appearance/theme fields.
     let notification_home =
         serde_json::json!({"notifications": splitty_core::config::NotificationSettings::default()})
             .to_string();
     exchanges.push(exchange("home.update", notification_home));
-    exchanges.extend(notification_exchanges());
+    exchanges.extend(reread(notification_exchanges()));
     let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();
     let mut client = loaded_domains(api, owner).await;
@@ -783,10 +855,15 @@ async fn mixed_domain_fifo_acknowledges_against_only_its_own_projection() {
 
 #[tokio::test]
 async fn notification_uncertainty_needs_its_own_valid_home_but_not_metadata() {
+    // Metadata fails throughout, so every read asks for it again.
     let mut exchanges = appearance_exchanges();
-    exchanges.extend(notification_exchanges());
+    exchanges[1] = failed_metadata();
+    let mut notifications = notification_exchanges();
+    notifications[1] = failed_metadata();
+    exchanges.extend(notifications);
     exchanges.push(exchange("home.update", "{}".into())); // malformed notification acknowledgement
     exchanges.push(exchange("home.get", home(1.0)));
+    exchanges.push(failed_metadata());
     exchanges.push(exchange("home.get", "{}".into())); // invalid notification refresh
     exchanges.push(exchange("home.get", home(1.0)));
     exchanges.push(Exchange {
@@ -859,16 +936,16 @@ async fn notification_uncertainty_needs_its_own_valid_home_but_not_metadata() {
 #[tokio::test]
 async fn superseded_notification_observation_and_queued_delivery_are_discarded() {
     let mut exchanges = notification_exchanges();
-    exchanges.extend(notification_exchanges()); // superseded in-flight read
-    exchanges.extend(notification_exchanges()); // accepted fresh read
+    exchanges.extend(reread(notification_exchanges())); // superseded in-flight read
+    exchanges.extend(reread(notification_exchanges())); // accepted fresh read
     exchanges.push(Exchange {
         operation: "home.update",
         status: 200,
         uncertain: true,
         body: "{}".into(),
     });
-    exchanges.extend(notification_exchanges()); // reconciliation and deferred result
-    let mut changed = notification_exchanges();
+    exchanges.extend(reread(notification_exchanges())); // reconciliation and deferred result
+    let mut changed = reread(notification_exchanges());
     let mut home: serde_json::Value = serde_json::from_str(&changed[0].body).unwrap();
     home["notifications"]["enabled"] = false.into();
     changed[0].body = home.to_string();

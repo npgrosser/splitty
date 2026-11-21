@@ -5,7 +5,8 @@ use crate::{
 };
 use serde::Deserialize;
 use splitty_core::{config::NotificationSettings, native_api::Operation};
-use std::{collections::BTreeMap, io};
+use splitty_transport::budget::Charged;
+use std::{collections::BTreeMap, io, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -129,33 +130,26 @@ impl NotificationSettingsRead {
     }
 }
 
-pub(super) async fn read(client: &mut ApiStream) -> io::Result<NotificationSnapshot> {
-    let values = {
-        let reply = client
-            .request(Operation::HomeGet, serde_json::Map::new())
-            .await?;
-        if reply.uncertain {
-            return Err(io::Error::other(
-                "local notification settings read outcome is unknown",
-            ));
-        }
-        let home = crate::local_service::decode::<HomeNotifications>(client, &reply)?;
-        // Six required booleans prove compatible edit choices, without
-        // metadata; `programStatus` reads as on from a server without it.
-        home.notifications.clone()
+/// Reads the switches, and the metadata unless `metadata` already holds this
+/// service's; the metadata read here comes back for reuse.
+pub(super) async fn read(
+    client: &mut ApiStream,
+    metadata: Option<Arc<Charged<SettingsMetadata>>>,
+) -> (
+    io::Result<NotificationSnapshot>,
+    Option<Arc<Charged<SettingsMetadata>>>,
+) {
+    let values = match read_values(client).await {
+        Ok(values) => values,
+        Err(error) => return (Err(error), None),
     };
-    let metadata = async {
-        let reply = client
-            .request(Operation::HomeMetadata, serde_json::Map::new())
-            .await?;
-        if reply.uncertain {
-            return Err(io::Error::other(
-                "notification reset defaults read outcome is unknown",
-            ));
-        }
-        let metadata = crate::local_service::decode::<SettingsMetadata>(client, &reply)?;
-        metadata.validate()?;
-        let defaults = SettingsField::ALL
+    let metadata = match metadata {
+        Some(metadata) => Ok(metadata),
+        None => read_metadata(client).await,
+    };
+    let fetched = metadata.as_ref().ok().cloned();
+    let metadata = metadata.map(|metadata| {
+        SettingsField::ALL
             .into_iter()
             .filter_map(|field| {
                 if field.domain() != crate::settings::SettingsDomain::Notifications {
@@ -172,10 +166,8 @@ pub(super) async fn read(client: &mut ApiStream) -> io::Result<NotificationSnaps
                     _ => None,
                 }
             })
-            .collect::<BTreeMap<_, _>>();
-        Ok(defaults)
-    }
-    .await;
+            .collect::<BTreeMap<_, _>>()
+    });
     let (defaults, metadata_error) = match metadata {
         Ok(defaults) => {
             let expected = SettingsField::ALL
@@ -191,9 +183,41 @@ pub(super) async fn read(client: &mut ApiStream) -> io::Result<NotificationSnaps
             Some(error.to_string().chars().take(256).collect()),
         ),
     };
-    Ok(NotificationSnapshot {
-        values,
-        defaults,
-        metadata_error,
-    })
+    (
+        Ok(NotificationSnapshot {
+            values,
+            defaults,
+            metadata_error,
+        }),
+        fetched,
+    )
+}
+
+async fn read_values(client: &mut ApiStream) -> io::Result<NotificationSettings> {
+    let reply = client
+        .request(Operation::HomeGet, serde_json::Map::new())
+        .await?;
+    if reply.uncertain {
+        return Err(io::Error::other(
+            "local notification settings read outcome is unknown",
+        ));
+    }
+    let home = crate::local_service::decode::<HomeNotifications>(client, &reply)?;
+    // Six required booleans prove compatible edit choices, without
+    // metadata; `programStatus` reads as on from a server without it.
+    Ok(home.notifications.clone())
+}
+
+async fn read_metadata(client: &mut ApiStream) -> io::Result<Arc<Charged<SettingsMetadata>>> {
+    let reply = client
+        .request(Operation::HomeMetadata, serde_json::Map::new())
+        .await?;
+    if reply.uncertain {
+        return Err(io::Error::other(
+            "notification reset defaults read outcome is unknown",
+        ));
+    }
+    let metadata = crate::local_service::decode::<SettingsMetadata>(client, &reply)?;
+    metadata.validate()?;
+    Ok(Arc::new(metadata))
 }

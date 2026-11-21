@@ -514,6 +514,12 @@ keeps the charged settings projection with the theme and terminal palette names,
 the OS preference it was read for and its terminal presentation preferences; it does not own the shared edit vocabulary.
 Each feature has its own generation, dirty flag and result. Same-service settings
 events refresh all three; owner-checked OS preference changes refresh appearance only.
+The settings metadata is read once per client: the first appearance or
+notification read that gets it keeps it, and later reads take it without asking
+again, since a service's limits and defaults stay fixed while it runs (only its
+detected shells can change, and no native setting reads them). A refresh after
+an edit is then one `home.get`; a read whose metadata failed leaves the next
+read to ask again. Zoom jobs still read the metadata themselves.
 Round-robin dirty reads prevent one feature from starving the others, and
 superseded results cannot replace a newer choice. The same owned client admits
 up to 32 queued zoom intents beside its active job and alternates ready reads
@@ -1364,7 +1370,11 @@ against those limits only; for a server without metadata it falls back to the
 built-in ranges and choices (`splitty_client_core::settings::fallback_limits`)
 and edits no field such a server may not know (`SettingsField::needs_metadata`). A successful settings write
 broadcasts the complete `settings.changed` object to every connected window on
-that server; a failed write leaves both persistent and running values alone. Shell
+that server; a failed write leaves both persistent and running values alone.
+Shell detection looks up each supported shell in every `PATH` directory, which
+in WSL includes the Windows directories and takes on the order of 150 ms there;
+one update therefore detects once and uses that result for loading the stored
+file, the defaults, validation and the running profiles. Shell
 profile selection and fallback run on the server, with the effective profile and
 fallback reason in `mux.pane_spawned`. Shell profiles are configured in `config.toml`.
 
@@ -1382,8 +1392,8 @@ the workspace discards
 unsent work and joins owned cancellation.
 
 Notification observation retains seven effective booleans and at most seven
-optional service-default booleans after releasing charged home and metadata
-replies. Six are required; `programStatus` reads as on from a server that does
+optional service-default booleans after releasing the charged home reply; the
+metadata it takes them from is the client's shared copy. Six are required; `programStatus` reads as on from a server that does
 not send it, and so does its default when the metadata's notification group
 lacks it. These typed values establish compatible explicit edit choices without
 appearance or metadata availability. Reset requires an exact published default;

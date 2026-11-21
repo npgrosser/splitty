@@ -199,17 +199,12 @@ async fn notification_settings_read_reports_invalid_home_without_replacing_a_lat
             uncertain: false,
             body: "{\"notifications\":{\"enabled\":true}}".into(),
         },
+        // The first read's metadata, answered by the fixture, is reused.
         Exchange {
             operation: "home.get",
             status: 200,
             uncertain: false,
             body: home(1.0),
-        },
-        Exchange {
-            operation: "home.metadata",
-            status: 200,
-            uncertain: false,
-            body: splitty_core::config::settings_metadata().to_string(),
         },
     ])
     .await;
@@ -599,17 +594,12 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
             uncertain: false,
             body: home(1.0),
         },
+        // The refresh reuses the metadata the first read fetched.
         Exchange {
             operation: "home.get",
             status: 200,
             uncertain: false,
             body: home(1.1),
-        },
-        Exchange {
-            operation: "home.metadata",
-            status: 200,
-            uncertain: false,
-            body: splitty_core::config::settings_metadata().to_string(),
         },
     ])
     .await;

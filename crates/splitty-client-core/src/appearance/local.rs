@@ -8,7 +8,7 @@ use splitty_core::config::{
 };
 use splitty_core::native_api::Operation;
 use splitty_transport::budget::Charged;
-use std::io;
+use std::{io, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Deserialize)]
@@ -66,12 +66,23 @@ async fn read_typed<T: serde::de::DeserializeOwned>(
     }
     decode(client, &reply)
 }
+/// The service's validated settings metadata.
+pub(crate) async fn read_metadata(
+    client: &mut Client,
+) -> io::Result<Arc<Charged<SettingsMetadata>>> {
+    let metadata = read_typed::<SettingsMetadata>(client, Operation::HomeMetadata).await?;
+    metadata.validate()?;
+    Ok(Arc::new(metadata))
+}
+/// Reads the settings, and the metadata unless `metadata` already holds this
+/// service's.
 pub(crate) async fn read(
     client: &mut Client,
     connection_id: Uuid,
     generation: u64,
     scheme: ColorScheme,
     terminal_generation: u64,
+    metadata: Option<Arc<Charged<SettingsMetadata>>>,
     observed: &mut Option<SettingsDomain>,
 ) -> io::Result<AppearanceSnapshot> {
     let home = read_typed::<HomeAppearance>(client, Operation::HomeGet).await?;
@@ -85,15 +96,12 @@ pub(crate) async fn read(
         native_tabs: home.native_tabs,
         editors: home.editors,
     });
-    let metadata = read_typed::<SettingsMetadata>(client, Operation::HomeMetadata)
-        .await
-        .and_then(|metadata| {
-            metadata.validate()?;
-            Ok(metadata)
-        });
     let (metadata, metadata_error) = match metadata {
-        Ok(value) => (Some(value), None),
-        Err(error) => (None, Some(error.to_string())),
+        Some(metadata) => (Some(metadata), None),
+        None => match read_metadata(client).await {
+            Ok(metadata) => (Some(metadata), None),
+            Err(error) => (None, Some(error.to_string())),
+        },
     };
     Ok(AppearanceSnapshot {
         connection_id,
