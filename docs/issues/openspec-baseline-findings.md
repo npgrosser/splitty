@@ -539,6 +539,12 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-21 in CI on `main`, twice in a row, in the real SSH suite:
+  `the_bridge_carries_native_frames_through_real_ssh` (`crates/splitty-server/tests/remote_connect.rs`) fails where
+  it expects the bridge's `ssh` to have ended with success after the test drops the welcome frame and finishes the
+  bridge; `ssh` ends with a failure status and no error output. Repeated alone in the SSH lab it failed in 5 of 25
+  runs, and in 9 of 30 at the commit before the two that CI ran, so the end of the bridge races with the close of
+  its input and no recent change caused it. Not investigated further.
 - Seen on 2026-11-20 in a local full run under load, in `splitty-server`:
   `an_exit_while_no_daemon_runs_reaches_the_next_daemon` (`tests/daemon_lifecycle.rs`) gave up waiting for "the
   final output and the exit code". The test file alone then passed all 42 tests, and three repeats of the test
