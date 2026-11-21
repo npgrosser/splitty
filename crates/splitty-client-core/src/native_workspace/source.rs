@@ -3270,6 +3270,22 @@ mod tests {
             self.stty_in(&pane, &session, marker).await
         }
 
+        /// [`Self::stty`] once the size has settled at `expected`. A size the
+        /// server decides reaches the PTY some time after the command that
+        /// led to it, so a shell asked at once may still report the size
+        /// before; the answer of the last try is returned.
+        async fn stty_settled(&mut self, marker: &str, expected: (u16, u16)) -> (u16, u16) {
+            let mut size = self.stty(marker).await;
+            for attempt in 0..40 {
+                if size == expected {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                size = self.stty(&format!("{marker}{attempt}")).await;
+            }
+            size
+        }
+
         /// [`Self::stty`] for the session of `pane`, shown or not.
         async fn stty_in(&mut self, pane: &str, session: &str, marker: &str) -> (u16, u16) {
             let command = format!("printf '{marker}_%s_\\n' \"$(stty size)\"\n");
@@ -3380,7 +3396,7 @@ mod tests {
 
         // The user acts: both clients are in use, the smaller size decides.
         window.source.acted();
-        assert_eq!(window.stty("ACTED").await, (50, 20));
+        assert_eq!(window.stty_settled("ACTED", (50, 20)).await, (50, 20));
 
         // Taking the size over makes the other client idle until it acts.
         let route = TerminalToken::new(window.token, &window.pane, &session);
@@ -3392,7 +3408,7 @@ mod tests {
                 Command::new(token, CommandKind::TakeOverSize { route }),
             )
             .unwrap();
-        assert_eq!(window.stty("TAKEN").await, (50, 30));
+        assert_eq!(window.stty_settled("TAKEN", (50, 30)).await, (50, 30));
         assert_eq!(window.sizes.last(), Some(&(session.clone(), pty(50, 30))));
 
         drop(other);
@@ -3421,7 +3437,7 @@ mod tests {
             focused: false,
         });
         window.source.hidden();
-        assert_eq!(window.stty("HIDDEN").await, (60, 20));
+        assert_eq!(window.stty_settled("HIDDEN", (60, 20)).await, (60, 20));
         assert_eq!(window.sizes.last(), Some(&(session.clone(), pty(60, 20))));
 
         drop(other);

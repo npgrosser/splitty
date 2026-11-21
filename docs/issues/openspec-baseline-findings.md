@@ -541,10 +541,14 @@ that area touches them.
 
 - Seen on 2026-11-21 in CI on `main`, once, in `splitty-client-core`:
   `native_workspace::source::tests::an_untouched_window_that_attaches_again_leaves_the_size_to_the_client_in_use`
-  read a PTY size of 50x20 where it expects 50x30. The commit it ran for changed a test of another crate only, and
-  25 repeats of the test alone passed locally. In six local runs of the crate's suite one failed in another test,
-  `native_workspace::hub_tests::pending_failed_hub_read_does_not_block_settings_or_terminal_output`. Not
-  investigated.
+  read a PTY size of 50x20 from the shell where it expects 50x30, right after the command that takes the size
+  over. The test asked the shell at once, and the size the server decides reaches the PTY some time after that
+  command. It did not fail in 25 repeats alone nor in 40 under full processor load, so the cause is read from the
+  test, not reproduced. The three size checks that follow a presence change in that test and in
+  `a_hidden_window_is_idle_and_the_other_clients_size_applies` now ask again until the size has settled
+  (`stty_settled`). In six local runs of the crate's suite one failed in another test,
+  `native_workspace::hub_tests::pending_failed_hub_read_does_not_block_settings_or_terminal_output`, which the
+  entry on the native workspace tests below already lists as still seen; not investigated.
 - **Fixed (2026-11-21): the bridge's real SSH test expected a clean end of a bridge it cut off.** Seen in CI on
   `main`, twice in a row, and in 5 of 25 repeats in the SSH lab (9 of 30 at an earlier commit):
   `the_bridge_carries_native_frames_through_real_ssh` (`crates/splitty-server/tests/remote_connect.rs`) found the
