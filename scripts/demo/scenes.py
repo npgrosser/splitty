@@ -14,7 +14,7 @@ from typing import Callable
 
 
 # The height of the app's title bar in the scenes' theme and zoom.
-TITLE_BAR = 36
+TITLE_BAR = 40
 # Seconds the stand-in test run and build take, with a margin. A program that
 # ends in a pane nobody looks at leaves an unread mark, so a setup waits for
 # it while its pane has the focus.
@@ -29,7 +29,7 @@ class Scene:
     setup: Callable | None = None
     drawer: bool = False
     zoom: float = 1.25
-    theme: str = "splitty-classic"
+    theme: str = "windows-11-dark"
     size: tuple[int, int] | None = None
     # The machines the scene reaches over SSH, by name.
     hosts: tuple[str, ...] = ()
@@ -121,7 +121,7 @@ def customize_setup(stage):
 
 
 # The Theme list of the settings after the page is scrolled.
-THEME_SELECT = (430, 536)
+THEME_SELECT = (430, 336)
 
 
 def customize(stage):

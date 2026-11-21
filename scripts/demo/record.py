@@ -513,6 +513,11 @@ def record(scene, args, out: Path, display: str):
     xvfb = app = host = home = None
     try:
         home = demo_home(root)
+        if args.fonts:
+            # Fonts a theme names that the recording machine lacks.
+            share = home / ".local" / "share"
+            share.mkdir(parents=True)
+            (share / "fonts").symlink_to(args.fonts.resolve())
         app_config(root / "config", scene, args.font)
         runtime = root / "run"
         runtime.mkdir(mode=0o700)
@@ -619,6 +624,8 @@ def main():
                         help="a TrueType file for the key chips, with arrows")
     parser.add_argument("--theme", help="record in this UI theme instead of the scenes' own; "
                         "the clips are named after it")
+    parser.add_argument("--fonts", type=Path,
+                        help="a directory of fonts for the app, such as one a theme names")
     parser.add_argument("--keep", action="store_true", help="keep the scene's directory")
     parser.add_argument("--sshd-root", default=os.environ.get("SPLITTY_DEMO_SSHD_ROOT"),
                         help="an unpacked openssh-server for the remote scenes; sshd from PATH without")

@@ -221,6 +221,8 @@ process monitor and a coding agent), sets its window up off camera and then
 plays keys, text and pointer movement. Nothing of the recording machine shows.
 The window fills the clip and shows the app's own title bar: the recorder
 stands in for a compositing window manager as far as the app asks for one.
+`--fonts` names a directory of fonts a theme asks for that the recording
+machine lacks.
 
 It needs Xvfb, xdotool, libX11, libXtst, Pillow (`python3-pil`), Git and the
 DejaVu fonts, and release builds of `splitty-gpui` and `splitty-server` side by
