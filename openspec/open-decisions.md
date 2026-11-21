@@ -8,6 +8,8 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`show-pending-appearance` SPA-1** (2026-11-21, provisional, tbd; recorded in the change's proposal): after the OS light or dark preference changes, outstanding appearance choices (a theme, palette or font sent but not yet read back) are resolved for the new preference when the settings read that the change starts arrives, together with the confirmed values, not at the moment the window learns of the change. Alternative: resolve the choices for the new preference at once and the confirmed values with the read.
+
 - **`terminal-font` TF-1 to TF-7** (2026-11-21, provisional, tbd; recorded in the change's proposal):
   - **TF-1:** `terminal.fontFamily` and `terminal.fontSize` are settings of the server (the local service), not of one computer's app. Alternative: keep them in the app beside `last-appearance.json`.
   - **TF-2:** `terminal.fontSize` stores the size itself, default 14, within 8 to 32 listed as values, without a `0` for "default". Alternative: the form of `appearance.fontSize` with `0`, or its range 8 to 24.

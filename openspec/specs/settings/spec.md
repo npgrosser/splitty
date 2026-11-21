@@ -171,7 +171,7 @@ The experimental native workspace SHALL offer an editor for the local service's 
 - **THEN** the editor offers it without a restart
 
 ### Requirement: Native Settings Mutation Reconciliation
-Native settings mutations SHALL be identified with their local connection and request, admitted within a bounded queue, submitted at most once, and reconciled with the service's complete effective settings and `settings.changed`. A rejected, uncertain, or stale result SHALL NOT be shown as saved. The editor SHALL retain a visible error or uncertain state and refresh from the local service without replaying the write.
+Native settings mutations SHALL be identified with their local connection and request, admitted within a bounded queue, submitted at most once, and reconciled with the service's complete effective settings and `settings.changed`. A rejected, uncertain, or stale result SHALL NOT be shown as saved. The editor SHALL retain a visible error or uncertain state and refresh from the local service without replaying the write. The window MAY show an outstanding appearance choice as Native Appearance Choices Before Confirmation describes; that choice is not shown as saved.
 
 #### Scenario: Confirmed edit or same-service event
 - **WHEN** this window's settings change is confirmed or `settings.changed` arrives on its assigned local service connection
@@ -181,6 +181,7 @@ Native settings mutations SHALL be identified with their local connection and re
 #### Scenario: Rejection or uncertain completion
 - **WHEN** `home.update` rejects a change or its outcome is uncertain
 - **THEN** the editor retains the last confirmed value, identifies the field and failure, and requests a fresh local settings read
+- **AND** a window that showed the choice returns to the last confirmed appearance
 - **AND** the mutation is not repeated automatically
 
 #### Scenario: Old result and close
@@ -450,3 +451,36 @@ Every existing and new terminal of a native window SHALL take a changed terminal
 #### Scenario: Glyph the chosen family lacks
 - **WHEN** the terminal font is a family without the Nerd Font symbols and a program prints one of them
 - **THEN** the symbol is drawn with the bundled terminal font, not as an empty box
+
+### Requirement: Native Appearance Choices Before Confirmation
+While a native change of the UI theme mode, a UI theme, a terminal palette, the interface font or size, or the terminal font or size is outstanding, the window SHALL draw its last confirmed settings with the chosen value in their place, resolved as a confirmed value is. The editor SHALL mark the change as not yet saved. A shown choice SHALL NOT be kept in `last-appearance.json`. Other settings SHALL take effect only once confirmed.
+
+#### Scenario: Choice shown before the write result
+- **WHEN** the user chooses another UI theme, terminal palette or font
+- **THEN** the window shows it before `home.update` answers, while the editor marks the change as being applied
+- **AND** `last-appearance.json` keeps the last confirmed selection
+
+#### Scenario: Read while the choice is outstanding
+- **WHEN** a settings read or `settings.changed` arrives before the change is confirmed and read back
+- **THEN** the window shows that read's other values with the choice still applied
+
+#### Scenario: Saved value wins
+- **WHEN** the service confirms the change and a read at least as new as the change arrives
+- **THEN** the window shows the read's value, also where the service stored the value in another form
+
+#### Scenario: Rejected or uncertain choice
+- **WHEN** the change is rejected or its outcome is uncertain
+- **THEN** the window shows the last confirmed appearance again and the editor keeps its failure or uncertainty
+
+#### Scenario: Terminal font before confirmation
+- **WHEN** the user chooses another terminal font or size while terminals are open
+- **THEN** every terminal measures its cells with the chosen font before the change is confirmed, as Native Terminal Font Application describes
+- **AND** a rejected or uncertain change measures them again with the confirmed font
+
+#### Scenario: OS preference changes while a choice is outstanding
+- **WHEN** the theme mode follows the OS preference, a chosen dark or light UI theme is outstanding and the OS preference changes
+- **THEN** the window shows the UI theme the choices select for the new preference once the settings read for it arrives
+
+#### Scenario: Settings outside the choices
+- **WHEN** the user changes zoom, Drawer visibility, window decoration, window buttons, title bar style, interface style or any other setting
+- **THEN** the window does not show the value before the change is confirmed, apart from the handling zoom and Drawer visibility have of their own
