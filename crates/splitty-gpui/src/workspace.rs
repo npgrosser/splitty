@@ -749,6 +749,17 @@ struct PaneView {
     marker: bool,
     tail: String,
 }
+/// Whether a start with this backend shows and keeps what the app's windows
+/// remember (the look before the service answers, the key bindings). An
+/// explicit WSL target is an isolated preview and leaves the user's own files
+/// alone; with a configuration directory of its own it remembers there.
+pub(crate) fn remembers_for(backend: &splitty_client_core::owned_service::LocalBackend) -> bool {
+    !matches!(
+        backend,
+        splitty_client_core::owned_service::LocalBackend::Wsl(_)
+    ) || AppearanceMemory::in_own_directory()
+}
+
 #[cfg(all(test, feature = "ui-test-support"))]
 impl Workspace {
     /// Answers `command`, a close assessment, as a service would from this
@@ -1381,11 +1392,7 @@ impl Workspace {
     ) -> (Self, Worker) {
         // A smoke run is a test and an explicit WSL target an isolated
         // preview: neither shows nor replaces what the app's windows remember.
-        let remembers = !smoke
-            && !matches!(
-                backend,
-                splitty_client_core::owned_service::LocalBackend::Wsl(_)
-            );
+        let remembers = !smoke && remembers_for(&backend);
         let (mut workspace, worker) =
             Self::new_with_worker(smoke, outcome, window, cx, |receiver, sender, scheme| {
                 Worker::start_with_backend(receiver, sender, scheme, backend)

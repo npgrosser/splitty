@@ -522,27 +522,23 @@ fn main() -> anyhow::Result<()> {
     if let splitty_client_core::owned_service::LocalBackend::Wsl(launch) = &backend {
         startup::set_wsl_distro(launch.distro());
     }
-    let (startup_title_bar_style, startup_window_decoration) = if !probe
-        && !workspace_smoke
-        && !matches!(
-            backend,
-            splitty_client_core::owned_service::LocalBackend::Wsl(_)
-        ) {
-        let memory = splitty_client_core::appearance::AppearanceMemory::open(
-            splitty_client_core::appearance::AppearanceMemory::default_path(),
-        );
-        memory
-            .stored()
-            .map(|saved| {
-                (
-                    TitleBarStyle::from_setting(&saved.title_bar_style),
-                    WindowDecoration::from_setting(&saved.window_decoration),
-                )
-            })
-            .unwrap_or_default()
-    } else {
-        (TitleBarStyle::default(), WindowDecoration::default())
-    };
+    let (startup_title_bar_style, startup_window_decoration) =
+        if !probe && !workspace_smoke && workspace::remembers_for(&backend) {
+            let memory = splitty_client_core::appearance::AppearanceMemory::open(
+                splitty_client_core::appearance::AppearanceMemory::default_path(),
+            );
+            memory
+                .stored()
+                .map(|saved| {
+                    (
+                        TitleBarStyle::from_setting(&saved.title_bar_style),
+                        WindowDecoration::from_setting(&saved.window_decoration),
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            (TitleBarStyle::default(), WindowDecoration::default())
+        };
     let custom_titlebar = !probe
         && cfg!(any(target_os = "windows", target_os = "macos"))
         && !startup_window_decoration.native(startup_title_bar_style);

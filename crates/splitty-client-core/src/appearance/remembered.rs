@@ -113,6 +113,12 @@ impl AppearanceMemory {
         splitty_core::config::config_dir().join(FILE_NAME)
     }
 
+    /// Whether that directory is one the start names itself, apart from the
+    /// user's own.
+    pub fn in_own_directory() -> bool {
+        splitty_core::config::config_dir_override().is_some()
+    }
+
     /// Reads `path`. A missing, oversized or malformed file holds nothing.
     pub fn open(path: PathBuf) -> Self {
         let stored = read(&path);
