@@ -846,7 +846,18 @@ fn the_bridge_carries_native_frames_through_real_ssh() {
         drop(frame);
         let (protocol, ended) = bridge.finish().await;
         protocol.unwrap();
-        assert!(ended.status.unwrap().success(), "{}", ended.stderr);
+        // Finishing closes both directions at once. The host's bridge ends
+        // by itself either way: cleanly when it reads the end of its input
+        // first, with a failure of its own when it first finds its output
+        // closed while the daemon still had a frame for the client. An
+        // `ssh` that failed by itself would report 255.
+        let status = ended.status.unwrap();
+        assert!(
+            !ended.forced && matches!(status.code(), Some(0 | 1)),
+            "{status}, forced: {}, stderr: {}",
+            ended.forced,
+            ended.stderr
+        );
     });
 }
 

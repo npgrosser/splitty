@@ -539,12 +539,15 @@ that area touches them.
 
 ## Flaky tests
 
-- Seen on 2026-11-21 in CI on `main`, twice in a row, in the real SSH suite:
-  `the_bridge_carries_native_frames_through_real_ssh` (`crates/splitty-server/tests/remote_connect.rs`) fails where
-  it expects the bridge's `ssh` to have ended with success after the test drops the welcome frame and finishes the
-  bridge; `ssh` ends with a failure status and no error output. Repeated alone in the SSH lab it failed in 5 of 25
-  runs, and in 9 of 30 at the commit before the two that CI ran, so the end of the bridge races with the close of
-  its input and no recent change caused it. Not investigated further.
+- **Fixed (2026-11-21): the bridge's real SSH test expected a clean end of a bridge it cut off.** Seen in CI on
+  `main`, twice in a row, and in 5 of 25 repeats in the SSH lab (9 of 30 at an earlier commit):
+  `the_bridge_carries_native_frames_through_real_ssh` (`crates/splitty-server/tests/remote_connect.rs`) found the
+  bridge's `ssh` ended with status 1. Finishing a bridge closes both directions at once; when the host's
+  `splitty remote-bridge` finds its output closed before it reads the end of its input, with a frame of the
+  daemon still to deliver, it ends with "Broken pipe" as its own failure, which is what
+  `remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions` requires of a broken output. The
+  test now accepts both ends of a bridge that ended by itself and still rejects a forced end and a failure of
+  `ssh`. A bridge the hub finishes can therefore end with status 1 on the host; nothing reads that status.
 - Seen on 2026-11-20 in a local full run under load, in `splitty-server`:
   `an_exit_while_no_daemon_runs_reaches_the_next_daemon` (`tests/daemon_lifecycle.rs`) gave up waiting for "the
   final output and the exit code". The test file alone then passed all 42 tests, and three repeats of the test
