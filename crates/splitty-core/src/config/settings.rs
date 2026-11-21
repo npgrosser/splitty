@@ -12,7 +12,8 @@ use serde_json::{Map, Value};
 
 use super::config_path;
 use crate::shell_profiles::{
-    detect_shell_profiles, reconcile_shell_settings, DetectionEnvironment, ShellSettings,
+    detect_shell_profiles, reconcile_shell_settings, DetectionEnvironment, DetectionResult,
+    ShellSettings,
 };
 
 // ---------------------------------------------------------------------------
@@ -123,9 +124,17 @@ pub struct HomeConfig {
 
 impl Default for HomeConfig {
     fn default() -> Self {
-        let detection = detect_shell_profiles(&DetectionEnvironment::current());
+        Self::with_detection(&detect_shell_profiles(&DetectionEnvironment::current()))
+    }
+}
+
+impl HomeConfig {
+    /// The defaults, with the shells `detection` found. Detection searches
+    /// `PATH` and is slow where it holds network or WSL drive directories, so
+    /// one operation detects once and passes the result on.
+    pub fn with_detection(detection: &DetectionResult) -> Self {
         let mut shells = ShellSettings::default();
-        reconcile_shell_settings(&mut shells, &detection);
+        reconcile_shell_settings(&mut shells, detection);
         Self {
             editors: EditorSettings::default(),
             terminal: TerminalSettings::default(),
@@ -413,6 +422,11 @@ impl Default for NotificationSettings {
 
 impl HomeConfig {
     pub fn validate(&mut self) {
+        self.validate_with(&detect_shell_profiles(&DetectionEnvironment::current()));
+    }
+
+    /// [`Self::validate`] with the shells `detection` found.
+    pub fn validate_with(&mut self, detection: &DetectionResult) {
         // Terminal settings
         for theme in [
             &mut self.terminal.theme,
@@ -489,8 +503,7 @@ impl HomeConfig {
         }
         self.remote.reconnect_hosts = hosts;
 
-        let detection = detect_shell_profiles(&DetectionEnvironment::current());
-        reconcile_shell_settings(&mut self.shells, &detection);
+        reconcile_shell_settings(&mut self.shells, detection);
     }
 }
 
@@ -503,7 +516,12 @@ pub const ZOOM_LEVELS: [f64; 13] = [
 
 /// Server-owned control metadata; paths use the JSON wire spelling.
 pub fn settings_metadata() -> Value {
-    let limits = serde_json::json!({
+    serde_json::json!({ "defaults": HomeConfig::default(), "limits": settings_limits() })
+}
+
+/// The `limits` of [`settings_metadata`].
+fn settings_limits() -> Value {
+    serde_json::json!({
             "terminal.closeOnExit": {"values": ["always", "never", "graceful"]},
             "terminal.sizePolicy": {"values": ["active", "latest", "smallest"]},
             "terminal.sizeIdleSeconds": {"min": 10, "max": 3600, "step": 10},
@@ -526,8 +544,7 @@ pub fn settings_metadata() -> Value {
             "drawer.sidebarWidth": {"min": 150, "max": 400, "step": 10},
             "editors.file": {"values": ["vscode", "zed"]},
             "editors.folder": {"values": ["vscode", "zed"]}
-    });
-    serde_json::json!({ "defaults": HomeConfig::default(), "limits": limits })
+    })
 }
 
 fn invalid(field: &str, message: &str) -> ConfigError {
@@ -537,10 +554,10 @@ fn invalid(field: &str, message: &str) -> ConfigError {
     }
 }
 
-fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
-    let defaults = serde_json::to_value(HomeConfig::default())?;
-    let metadata = settings_metadata();
-    let limits = &metadata["limits"];
+/// Checks `patch` against the fields of `defaults` and the metadata limits.
+fn validate_patch(patch: &Value, defaults: &HomeConfig) -> Result<(), ConfigError> {
+    let defaults = serde_json::to_value(defaults)?;
+    let limits = settings_limits();
     fn walk(
         value: &Value,
         template: &Value,
@@ -619,7 +636,7 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
         }
         Ok(())
     }
-    walk(patch, &defaults, limits, "")
+    walk(patch, &defaults, &limits, "")
 }
 
 fn valid_editor(value: &Value) -> bool {
@@ -735,11 +752,12 @@ fn validate_editor_projects(value: &Value, path: &str) -> Result<(), ConfigError
 /// Loads config from the default path. Returns defaults if file is missing.
 pub fn load() -> HomeConfig {
     let path = config_path();
+    let detection = detect_shell_profiles(&DetectionEnvironment::current());
     let should_persist = match fs::read_to_string(&path) {
-        Ok(data) => parse_toml_to_config(&data).is_ok(),
+        Ok(data) => parse_toml_to_config(&data, &detection).is_ok(),
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     };
-    let cfg = load_from(&path);
+    let cfg = load_with(&path, &detection);
     // Persist migrations (including the first detected shell-profile section)
     // without making startup depend on a writable config directory. A file
     // that failed to parse is deliberately left untouched for recovery.
@@ -751,25 +769,19 @@ pub fn load() -> HomeConfig {
 
 /// Loads config from a specific path. Returns defaults if file is missing.
 pub fn load_from(path: &Path) -> HomeConfig {
-    let data = match fs::read_to_string(path) {
-        Ok(d) => d,
-        Err(_) => {
-            let mut cfg = HomeConfig::default();
-            cfg.validate();
-            return cfg;
-        }
-    };
+    load_with(
+        path,
+        &detect_shell_profiles(&DetectionEnvironment::current()),
+    )
+}
 
-    let mut cfg = match parse_toml_to_config(&data) {
-        Ok(c) => c,
-        Err(_) => {
-            let mut cfg = HomeConfig::default();
-            cfg.validate();
-            return cfg;
-        }
-    };
-
-    cfg.validate();
+/// [`load_from`] with the shells `detection` found.
+fn load_with(path: &Path, detection: &DetectionResult) -> HomeConfig {
+    let mut cfg = fs::read_to_string(path)
+        .ok()
+        .and_then(|data| parse_toml_to_config(&data, detection).ok())
+        .unwrap_or_else(|| HomeConfig::with_detection(detection));
+    cfg.validate_with(detection);
     cfg
 }
 
@@ -778,13 +790,16 @@ pub fn load_from(path: &Path) -> HomeConfig {
 /// TOML uses snake_case keys, but our structs expect camelCase (via `rename_all`).
 /// We parse TOML into a generic `toml::Value`, convert to `serde_json::Value`,
 /// transform keys from snake_case to camelCase, then deserialize into our struct.
-fn parse_toml_to_config(toml_str: &str) -> Result<HomeConfig, ConfigError> {
+fn parse_toml_to_config(
+    toml_str: &str,
+    detection: &DetectionResult,
+) -> Result<HomeConfig, ConfigError> {
     let toml_val: toml::Value = toml::from_str(toml_str)?;
     let json_val = toml_value_to_json(toml_val);
     let camel_val = transform_keys(json_val, &snake_to_camel);
 
     // Merge with defaults so missing fields get filled in.
-    let mut base = serde_json::to_value(HomeConfig::default())?;
+    let mut base = serde_json::to_value(HomeConfig::with_detection(detection))?;
     deep_merge(&mut base, camel_val);
 
     let cfg: HomeConfig = serde_json::from_value(base)?;
@@ -846,12 +861,26 @@ pub fn update(partial: Value) -> Result<HomeConfig, ConfigError> {
 
 /// Same as `update` but uses a specific file path (for testing).
 pub fn update_at(path: &Path, partial: Value) -> Result<HomeConfig, ConfigError> {
-    let cfg = load_from(path);
-    validate_patch(&partial)?;
+    update_at_with(
+        path,
+        partial,
+        &detect_shell_profiles(&DetectionEnvironment::current()),
+    )
+}
+
+/// [`update_at`] with the shells `detection` found: the stored settings, the
+/// defaults the patch is checked against and the result all use it.
+pub fn update_at_with(
+    path: &Path,
+    partial: Value,
+    detection: &DetectionResult,
+) -> Result<HomeConfig, ConfigError> {
+    let cfg = load_with(path, detection);
+    validate_patch(&partial, &HomeConfig::with_detection(detection))?;
     let mut base = serde_json::to_value(&cfg)?;
     deep_merge(&mut base, partial);
     let mut cfg: HomeConfig = serde_json::from_value(base)?;
-    cfg.validate();
+    cfg.validate_with(detection);
     save_to(&cfg, path)?;
     Ok(cfg)
 }
@@ -888,6 +917,56 @@ mod tests {
         assert_eq!(updated.terminal.theme_light, "default");
         assert_eq!(load_from(&path).terminal.theme_dark, "catppuccin-mocha");
         assert_eq!(updated.terminal.theme, "default");
+    }
+
+    /// An update takes the stored settings, the defaults its patch is checked
+    /// against and its result from the one detection it was given: shells
+    /// of the process's own `PATH` appear nowhere.
+    #[test]
+    fn an_update_uses_the_shell_detection_it_was_given() {
+        let dir = TempDir::new().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let zsh = bin.join("zsh");
+        fs::write(&zsh, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&zsh, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let detection = detect_shell_profiles(&DetectionEnvironment {
+            path: vec![bin],
+            shell: None,
+            is_wsl: false,
+        });
+        let zsh = zsh.to_string_lossy().into_owned();
+        let profiles = |cfg: &HomeConfig| {
+            cfg.shells
+                .profiles
+                .iter()
+                .map(|profile| (profile.id.clone(), profile.command.clone()))
+                .collect::<Vec<_>>()
+        };
+        let expected = vec![("shell-zsh".to_owned(), zsh)];
+        let path = dir.path().join("config.toml");
+        // Without a stored file, then over the file the first update wrote.
+        for size in [16, 18] {
+            let updated = update_at_with(
+                &path,
+                serde_json::json!({"terminal": {"fontSize": size}}),
+                &detection,
+            )
+            .unwrap();
+            assert_eq!(updated.terminal.font_size, size);
+            assert_eq!(profiles(&updated), expected);
+        }
+        assert_eq!(profiles(&load_with(&path, &detection)), expected);
+        let refused = update_at_with(
+            &path,
+            serde_json::json!({"terminal": {"fontSize": 99}}),
+            &detection,
+        );
+        assert!(matches!(refused, Err(ConfigError::InvalidField { .. })));
     }
 
     /// settings, Terminal Font Settings.

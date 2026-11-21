@@ -377,9 +377,19 @@ pub fn reconcile_shell_settings(
 
 /// Build the runtime state for already-loaded settings using current detection.
 pub fn state_from_settings(settings: &ShellSettings) -> ShellProfilesState {
+    state_from_settings_with(
+        settings,
+        &detect_shell_profiles(&DetectionEnvironment::current()),
+    )
+}
+
+/// [`state_from_settings`] with a detection the caller already made.
+pub fn state_from_settings_with(
+    settings: &ShellSettings,
+    detection: &DetectionResult,
+) -> ShellProfilesState {
     let mut settings = settings.clone();
-    let detection = detect_shell_profiles(&DetectionEnvironment::current());
-    reconcile_shell_settings(&mut settings, &detection)
+    reconcile_shell_settings(&mut settings, detection)
 }
 
 fn runtime_profile(

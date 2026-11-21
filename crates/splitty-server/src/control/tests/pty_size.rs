@@ -259,7 +259,10 @@ async fn updated_settings_reconfigure_the_size_policy() {
     let mut updated = splitty_core::config::HomeConfig::default();
     updated.terminal.size_policy = "latest".into();
     updated.terminal.size_idle_seconds = 30;
-    crate::service::operations::apply_home_settings(&state.service, updated);
+    let detection = splitty_core::shell_profiles::detect_shell_profiles(
+        &splitty_core::shell_profiles::DetectionEnvironment::current(),
+    );
+    crate::service::operations::apply_home_settings(&state.service, updated, &detection);
     assert_eq!(
         state.client_state.dispatcher.size_config(),
         SizeConfig {

@@ -408,9 +408,14 @@ pub(crate) fn get_home_metadata() -> Payload<Value> {
 }
 
 pub(crate) async fn patch_home_settings(state: &ServiceState, partial: Value) -> Reply {
-    match splitty_core::config::update_at(&state.config_path, partial) {
+    // One detection serves the whole update: each one searches `PATH`, which
+    // in WSL holds the Windows directories and takes a noticeable time.
+    let detection = splitty_core::shell_profiles::detect_shell_profiles(
+        &splitty_core::shell_profiles::DetectionEnvironment::current(),
+    );
+    match splitty_core::config::update_at_with(&state.config_path, partial, &detection) {
         Ok(updated) => {
-            apply_home_settings(state, updated.clone());
+            apply_home_settings(state, updated.clone(), &detection);
             state.client_state.broadcast_events(
                 &[splitty_core::protocol::ServerEvent::settings_changed(
                     serde_json::to_value(&updated).unwrap_or(json!({})),
@@ -433,9 +438,15 @@ pub(crate) async fn patch_home_settings(state: &ServiceState, partial: Value) ->
 }
 
 /// Settings that were saved take effect in the running server: the shell
-/// profiles, the settings themselves and the PTY size policy.
-pub(crate) fn apply_home_settings(state: &ServiceState, updated: splitty_core::config::HomeConfig) {
-    let shell_state = splitty_core::shell_profiles::state_from_settings(&updated.shells);
+/// profiles, with the shells `detection` found, the settings themselves and
+/// the PTY size policy.
+pub(crate) fn apply_home_settings(
+    state: &ServiceState,
+    updated: splitty_core::config::HomeConfig,
+    detection: &splitty_core::shell_profiles::DetectionResult,
+) {
+    let shell_state =
+        splitty_core::shell_profiles::state_from_settings_with(&updated.shells, detection);
     *state.shell_profiles.write().unwrap() = shell_state;
     state.client_state.dispatcher.configure_sizes(
         splitty_core::protocol::sizing::SizeConfig::from_settings(
