@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft captured on 2026-11-12 from `native-default-desktop`. Not planned yet. Specs and tasks are written when this change is next. Related: `multi-attach`.
+> Draft captured on 2026-11-12 from `native-default-desktop`. Not planned yet. Specs and tasks are written when this change is next. Depends on: `native-multi-window`. Related: `multi-attach`.
 
 ## Why
 
@@ -30,3 +30,4 @@ Not determined yet; at least a relationship from the app's startup to a per-user
 ## Carried-over design notes
 
 - 2026-11-15, `remove-tauri-shell`: the Tauri shell, the web app with the single-instance handoff, is removed. `server-modes`, Desktop App Hosting On Windows, scenario "Repeated start for the same distribution" now states one backend per app instance; this change changes that scenario.
+- 2026-11-22, `native-multi-window`: the application gets several windows in one process as views of one client (one worker, one local service, one connection per server), each Screen held by exactly one window. That settles "several windows on one worker or one service" under Impact as one worker and leaves this change the handoff: a second start asks the running application to open a window (its `window.new`) and exits, instead of starting a backend. Still open here: the handoff channel per platform, and what the Windows owner helper has to do with it.
