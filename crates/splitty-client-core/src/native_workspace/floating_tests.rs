@@ -217,6 +217,7 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
         .unwrap();
     commands
         .send(Command {
+            window: crate::workspace::WindowId::FIRST,
             source: Some(scope),
             kind: CommandKind::RequestClose {
                 plan: close,
@@ -287,6 +288,7 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
     }
     commands
         .send(Command {
+            window: crate::workspace::WindowId::FIRST,
             source: Some(scope),
             kind: CommandKind::RequestClose {
                 plan: docked.assess_close(20, CloseTarget::Window).unwrap(),

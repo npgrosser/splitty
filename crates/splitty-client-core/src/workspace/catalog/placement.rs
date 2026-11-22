@@ -13,6 +13,16 @@ pub(super) struct PendingTabPlacement {
 }
 
 impl SourceWorkspace {
+    /// Drop a pending placement of a Screen a projection leaves out.
+    pub(super) fn prune_placement(&mut self, keep: &impl Fn(&str) -> bool) {
+        if self
+            .pending_placement
+            .as_ref()
+            .is_some_and(|pending| !keep(pending.drag.screen_id.as_str()))
+        {
+            self.pending_placement = None;
+        }
+    }
     pub fn set_tab_placement_supported(&mut self, supported: bool) {
         self.tab_placement_supported = supported;
     }

@@ -119,6 +119,53 @@ Enter/Escape/Blur without changing A's selection or any session/process/SSH
 inventory. The fixture uses private `.invalid` hosts and an owned SSH-shape shim.
 It is not real OpenSSH installation/update acceptance.
 
+## Windows
+
+The application has any number of windows in one process (`desktop-windows`
+spec). They are views of one client: `main.rs` starts one worker with the
+first window, and `splitty_gpui::windows` (`Windows`, an application global)
+reads the worker's one update stream and hands each update to its window,
+in order. `Workspace` is the view of one window; it stamps its commands with
+its `WindowId` (`Commands`), reads its part of the stream through
+`UpdateSource`, and is built by `Workspace::new_in_app` for every window of
+the application. A view test builds a view with a queue of its own
+(`new_with_worker`), as before.
+
+Each window reads a model of its own Screens (a projection, see
+[architecture](architecture.md#client-connections)), so the view code never
+sees another window's Screens. What crosses windows goes through `Windows`:
+
+- **Opening**: `Windows::open` issues the ID and opens the platform window
+  (`open_window` in `main.rs`, with the decoration chosen at the application's
+  start); the window that asked then sends `OpenWindow` with what the new one
+  starts with. A window that opens later gets the state every window shows
+  (appearance, profiles, hosts, forwards) from what `Windows` kept of the
+  stream (`prime`), after its first model.
+- **Moving a Screen**: the Drawer row's menu and the commands
+  `screen.move-to-new-window` and `screen.move-to-next-window` send
+  `MoveScreenToWindow` or open a window with the Screen. The window that
+  loses the Screen parks its terminal views (`Windows::park`, from
+  `reconcile`), and the window that gets it takes them in `ensure_pane`, so
+  the same `Terminal` entity is shown there. The worker sends the giving
+  window its model first. A parked view nobody takes within five seconds is
+  dropped: its Screen closed.
+- **Closing**: a window that is not the last sends `CloseWindow` and goes
+  when the worker answers `WindowClosed`; its Screens are in another window's
+  next model. A window whose last Screen left it closes the same way
+  (`close_when_emptied`). The last window and `window.quit` run the assessed
+  close of the application.
+- **Once per application**: the SSH dialogs are one global `Prompts`, and a
+  change of the key bindings in one window is the base of the next change in
+  any (`AppliedKeyOverrides`). Each window still holds its own notification
+  ledger: an event is added in the window that holds its Screen, and the
+  unread marks of a Screen that moves stay behind.
+
+`--workspace-smoke` ends by handing a Screen to a new window and taking it
+back, and passes only if the same terminal view came along both ways and the
+emptied window closed. Not seen with two windows: macOS and Windows
+(decoration, traffic lights, the hidden start on Windows), dragging, and the
+bounded command queue under input in two windows at once.
+
 ## Startup
 
 Until its workspace arrives, a window shows a startup page
@@ -429,6 +476,12 @@ connection failed as incompatible are not shown outside the update offer.
   still need their own acceptance. Local profiles/templates/transfers are not
   implicitly remote features. Native host-group reorder UI and remembered
   reference persistence remain unfinished.
+
+- Windows: dragging a Screen out of a window or onto another, remembering
+  the windows across restarts, and a second start that opens a window in the
+  running application (`native-windows-one-backend`) are not built.
+  Notifications do not follow a Screen to another window, and "Move to
+  Screen" offers the window's own Screens only.
 
 Start the next feature only with a fresh scope decision; avoid treating old
 planning ideas or every unchecked task as an instruction to implement all of

@@ -469,7 +469,7 @@ pub(super) enum HostRow {
 }
 
 fn admit_host_open(
-    commands: &mpsc::Sender<WorkerCommand>,
+    commands: &Commands,
     current: Option<SourceToken>,
     captured: SourceToken,
     key: &ScreenKey,
@@ -490,7 +490,7 @@ fn admit_host_open(
 }
 
 pub(super) fn admit_withdraw_host_connect(
-    commands: &mpsc::Sender<WorkerCommand>,
+    commands: &Commands,
     owner: SourceToken,
     request_id: Uuid,
 ) -> Result<(), String> {
@@ -2939,7 +2939,7 @@ mod tests {
                 let (commands, mut receiver) = mpsc::channel(16);
                 window.update(|window, cx| {
                     view.update(cx, |workspace, cx| {
-                        workspace.commands = commands;
+                        workspace.commands = commands.into();
                         workspace.model = Some(model.clone());
                         workspace.destination = Destination::Hosts;
                         workspace.begin_cached_host_open(
@@ -3046,7 +3046,7 @@ mod tests {
             window.simulate_resize(size(px(1200.), px(760.)));
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model.clone());
                     workspace.drawer_visible = true;
                     workspace.show_hosts(window, cx);
@@ -3156,7 +3156,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(32);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.hosts.set_owner(owner);
                     assert!(workspace.hosts.accept(HubUpdate {
@@ -3292,6 +3292,7 @@ mod tests {
         source.reset_connection(Uuid::new_v4());
         let current = source.source_token();
         let (commands, mut receiver) = mpsc::channel(1);
+        let commands = crate::workspace::Commands::from(commands);
 
         assert!(!admit_host_open(&commands, Some(current), captured, &screen, true).unwrap());
         assert!(!admit_host_open(&commands, Some(current), current, &screen, false).unwrap());
@@ -3321,6 +3322,7 @@ mod tests {
         assert!(invoked);
 
         let (commands, mut receiver) = mpsc::channel(1);
+        let commands = crate::workspace::Commands::from(commands);
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
         admit_withdraw_host_connect(&commands, captured, first).unwrap();

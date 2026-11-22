@@ -98,9 +98,141 @@ pub struct SourceWorkspace {
     catalog_dirty: bool,
     catalog_in_flight: Option<u64>,
     mutation: u64,
+    /// In a window's projection: what a close of the application covers on
+    /// the Screens other windows hold, which the projection leaves out.
+    elsewhere: Vec<CloseAffected>,
+}
+
+/// What one window chose on a source: the Screen it shows there and the
+/// created Screen it waits to show. The model holds these for the window in
+/// view; every other window keeps its own.
+#[derive(Clone, Default)]
+pub(super) struct SourceView {
+    shown: Option<String>,
+    activate_created: Option<String>,
 }
 
 impl SourceWorkspace {
+    /// Hand out the choices of the window in view, leaving none.
+    pub(super) fn take_view(&mut self) -> SourceView {
+        SourceView {
+            shown: self.shown.take(),
+            activate_created: self.activate_created.take(),
+        }
+    }
+    /// Take the choices of the window that comes into view.
+    pub(super) fn put_view(&mut self, view: SourceView) {
+        self.shown = view.shown;
+        self.activate_created = view.activate_created;
+    }
+    /// The created Screen the window in view waits to show, once the catalog
+    /// lists it.
+    pub(super) fn take_listed_creation(&mut self) -> Option<String> {
+        let listed = self.activate_created.as_ref().is_some_and(|created| {
+            self.catalog
+                .iter()
+                .any(|info| info.id.as_str() == created.as_str())
+        });
+        if listed {
+            self.activate_created.take()
+        } else {
+            None
+        }
+    }
+    /// The Screens this client is bringing into being and has not seen in
+    /// the catalog yet: creations, the target of a move, a template's Screen.
+    pub(super) fn claimed_screens(&self) -> Vec<&str> {
+        let mut claimed: Vec<&str> = self.pending_screens.keys().map(String::as_str).collect();
+        claimed.extend(
+            self.remote_creation
+                .as_ref()
+                .map(|creation| creation.screen_id()),
+        );
+        claimed.extend(
+            self.pending_transfer
+                .as_ref()
+                .map(|pending| pending.target.screen_id()),
+        );
+        claimed.extend(
+            self.pending_template
+                .as_ref()
+                .map(|pending| pending.preview.screen_id()),
+        );
+        claimed
+    }
+    /// Whether an operation waits here whose outcome changes what a window
+    /// shows (a creation, a move, a template, a floating action, a placement).
+    pub(super) fn awaits_view_outcome(&self) -> bool {
+        !self.pending_screens.is_empty()
+            || self.activate_created.is_some()
+            || self.remote_creation.is_some()
+            || self.pending_transfer.is_some()
+            || self.pending_template.is_some()
+            || self.pending_floating.is_some()
+            || self.pending_placement.is_some()
+    }
+    /// Leave only the Screens `keep` names: the projection of a window that
+    /// holds no others. What a close of the application covers on the
+    /// Screens left out stays part of its assessment.
+    pub(super) fn prune(&mut self, keep: impl Fn(&str) -> bool) {
+        let mut left_out: Vec<String> = self
+            .catalog
+            .iter()
+            .map(|info| info.id.to_string())
+            .chain(self.pending_screens.keys().cloned())
+            .filter(|id| !keep(id))
+            .collect();
+        left_out.sort();
+        left_out.dedup();
+        if self.kind() == SourceKind::Local {
+            let mut plan = ClosePlan {
+                source_id: Some(self.source_id),
+                request_id: 0,
+                connection_id: Some(self.connection_id),
+                target: CloseTarget::Window,
+                affected: Vec::new(),
+                unresolved_count: 0,
+                impact: CloseImpact::Pending,
+            };
+            for id in &left_out {
+                self.add_screen_impact(id, &mut plan);
+            }
+            self.elsewhere = plan.affected;
+        }
+        self.catalog.retain(|info| keep(info.id.as_str()));
+        self.models.retain(|id, _| keep(id));
+        self.pending_screens.retain(|id, _| keep(id));
+        if self.shown.as_deref().is_some_and(|id| !keep(id)) {
+            self.shown = None;
+        }
+        if self.activate_created.as_deref().is_some_and(|id| !keep(id)) {
+            self.activate_created = None;
+        }
+        if self
+            .remote_creation
+            .as_ref()
+            .is_some_and(|creation| !keep(creation.screen_id()))
+        {
+            self.remote_creation = None;
+        }
+        if self
+            .pending_transfer
+            .as_ref()
+            .is_some_and(|pending| !keep(pending.source.screen_id.as_str()))
+        {
+            self.pending_transfer = None;
+        }
+        if self
+            .pending_template
+            .as_ref()
+            .is_some_and(|pending| !keep(pending.preview.screen_id()))
+        {
+            self.pending_template = None;
+        }
+        self.prune_floating(&keep);
+        self.prune_placement(&keep);
+    }
+
     /// The identities a close of `target` covers and the parts of this
     /// client's own view that are still unresolved. What the close ends on
     /// the server comes separately, from the server's assessment
@@ -164,6 +296,7 @@ impl SourceWorkspace {
                 for screen in screens {
                     self.add_screen_impact(&screen, &mut plan);
                 }
+                plan.affected.extend(self.elsewhere.iter().cloned());
             }
         }
         if let Some(pending) = &self.pending_template {
@@ -316,6 +449,10 @@ impl SourceWorkspace {
     pub(crate) fn set_screen_names_supported(&mut self, value: bool) {
         self.screen_names_supported = value;
     }
+    /// Whether a Screen created here waits for its service's confirmation.
+    pub fn has_pending_creation(&self) -> bool {
+        !self.pending_screens.is_empty()
+    }
     /// Whether the local Screen `id` was created here and its service has not
     /// confirmed it yet.
     pub fn is_creating(&self, id: &str) -> bool {
@@ -379,6 +516,7 @@ impl SourceWorkspace {
             catalog_dirty: false,
             catalog_in_flight: None,
             mutation: 0,
+            elsewhere: Vec::new(),
         }
     }
 

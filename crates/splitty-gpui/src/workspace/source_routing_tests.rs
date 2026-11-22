@@ -168,6 +168,7 @@ mod callbacks {
         let (old, screen, new_session, new_source, new_screen, new_connection, replacement_screen) =
             tokens().await;
         let (sender, mut receiver) = mpsc::channel(8);
+        let sender = crate::workspace::Commands::from(sender);
         let old_capture = ResizeCapture {
             route: old.clone(),
             screen: screen.clone(),
@@ -246,6 +247,7 @@ mod callbacks {
     async fn saturated_queue_keeps_atomic_input_and_retries_only_original_resize_capture() {
         let (old, screen, _, new_source, new_screen, _, _) = tokens().await;
         let (sender, mut receiver) = mpsc::channel(2);
+        let sender = crate::workspace::Commands::from(sender);
         let old_capture = ResizeCapture {
             route: old.clone(),
             screen,

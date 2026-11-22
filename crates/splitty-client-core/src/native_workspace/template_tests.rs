@@ -254,6 +254,7 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
         .values()
         .all(|s| s.command.is_none() && s.restore_mode.is_none()));
     tx.send(Command {
+        window: crate::workspace::WindowId::FIRST,
         source: Some(scope),
         kind: CommandKind::RequestClose {
             plan: replaced.assess_close(100, CloseTarget::Window).unwrap(),
@@ -377,6 +378,7 @@ async fn a_local_screen_is_extracted_on_its_session_connection() {
     assert_eq!(draft.template().panes["extract-pane"].dir, "./src");
     drop(draft);
     tx.send(Command {
+        window: crate::workspace::WindowId::FIRST,
         source: Some(model.source_token()),
         kind: CommandKind::RequestClose {
             plan: model.assess_close(100, CloseTarget::Window).unwrap(),

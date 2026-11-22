@@ -91,6 +91,79 @@ impl WindowPresenceCell {
     }
 }
 
+/// The presence of every window of a client. The worker sums them: a
+/// connection is in use while a visible, focused window shows one of its
+/// Screens, and idle once no window is visible any more.
+#[derive(Clone, Debug, Default)]
+pub struct WindowPresences(
+    Arc<std::sync::Mutex<Vec<(crate::workspace::WindowId, WindowPresenceCell)>>>,
+);
+
+impl From<WindowPresenceCell> for WindowPresences {
+    fn from(cell: WindowPresenceCell) -> Self {
+        let presences = Self::default();
+        presences.insert(crate::workspace::WindowId::FIRST, cell);
+        presences
+    }
+}
+
+impl WindowPresences {
+    fn cells(
+        &self,
+    ) -> std::sync::MutexGuard<'_, Vec<(crate::workspace::WindowId, WindowPresenceCell)>> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+    pub fn insert(&self, window: crate::workspace::WindowId, cell: WindowPresenceCell) {
+        let mut cells = self.cells();
+        cells.retain(|(id, _)| *id != window);
+        cells.push((window, cell));
+    }
+    pub fn remove(&self, window: crate::workspace::WindowId) {
+        self.cells().retain(|(id, _)| *id != window);
+    }
+    /// Whether the platform presents any window.
+    pub fn any_visible(&self) -> bool {
+        self.cells().iter().any(|(_, cell)| cell.get().visible)
+    }
+    /// Whether a user is looking at one of `windows` and can act in it.
+    pub fn in_use(&self, windows: &[crate::workspace::WindowId]) -> bool {
+        self.cells()
+            .iter()
+            .any(|(id, cell)| windows.contains(id) && cell.get().in_use())
+    }
+    /// The windows the user acted in since the last call.
+    pub fn take_acted(&self) -> Vec<crate::workspace::WindowId> {
+        self.cells()
+            .iter()
+            .filter(|(_, cell)| cell.take_acted())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+    /// The active window, if one of these is.
+    pub fn focused(&self) -> Option<crate::workspace::WindowId> {
+        self.cells()
+            .iter()
+            .find(|(_, cell)| cell.get().focused)
+            .map(|(id, _)| *id)
+    }
+    /// The hidden windows while another window is visible. Their panes are
+    /// not shown: the connection stays in use through the visible window and
+    /// would otherwise keep holding sizes nobody looks at.
+    pub fn hidden_beside_visible(&self) -> Vec<crate::workspace::WindowId> {
+        let cells = self.cells();
+        if !cells.iter().any(|(_, cell)| cell.get().visible) {
+            return Vec::new();
+        }
+        cells
+            .iter()
+            .filter(|(_, cell)| !cell.get().visible)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+}
+
 /// A session's PTY size, as its server's size policy set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtySize {
@@ -404,6 +477,57 @@ mod tests {
         ] {
             assert_eq!(size(cols, rows, policy), None);
         }
+    }
+
+    #[test]
+    fn the_windows_of_a_client_are_in_use_and_hidden_each_for_itself() {
+        use crate::workspace::WindowId;
+        const SECOND: WindowId = WindowId::new(1);
+        let (first, second) = (WindowPresenceCell::default(), WindowPresenceCell::default());
+        let presences = WindowPresences::from(first.clone());
+        presences.insert(SECOND, second.clone());
+        // Until a window writes its presence, none is visible or in use.
+        assert!(!presences.any_visible());
+        assert_eq!(presences.focused(), None);
+        assert!(presences.hidden_beside_visible().is_empty());
+
+        let shown = WindowPresence {
+            visible: true,
+            focused: false,
+        };
+        let active = WindowPresence {
+            visible: true,
+            focused: true,
+        };
+        first.set(shown);
+        second.set(active);
+        assert!(presences.any_visible());
+        assert_eq!(presences.focused(), Some(SECOND));
+        // A connection is in use through the window that shows its Screen.
+        assert!(presences.in_use(&[SECOND]));
+        assert!(!presences.in_use(&[WindowId::FIRST]));
+        assert!(presences.in_use(&[WindowId::FIRST, SECOND]));
+
+        // The user's action counts for the window it happened in, once.
+        second.acted();
+        assert_eq!(presences.take_acted(), [SECOND]);
+        assert!(presences.take_acted().is_empty());
+
+        // One of two windows hidden: the client is still visible, and that
+        // window's panes are not shown. Both hidden: the client is not
+        // visible, and its reports stay as they are.
+        first.set(WindowPresence::default());
+        assert!(presences.any_visible());
+        assert_eq!(presences.hidden_beside_visible(), [WindowId::FIRST]);
+        second.set(WindowPresence::default());
+        assert!(!presences.any_visible());
+        assert!(presences.hidden_beside_visible().is_empty());
+
+        // A closed window counts for nothing.
+        second.set(active);
+        presences.remove(SECOND);
+        assert!(!presences.any_visible());
+        assert!(!presences.in_use(&[SECOND]));
     }
 
     #[test]

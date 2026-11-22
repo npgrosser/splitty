@@ -181,6 +181,27 @@ mod tests {
     }
 
     #[test]
+    fn the_windows_of_a_client_are_remembered_together() {
+        use crate::workspace::WindowId;
+        const SECOND: WindowId = WindowId::new(1);
+        let mut window = WindowWorkspace::new(Uuid::new_v4());
+        let (key, _) = window.ui_test_remote_terminal_fixture("one.test").unwrap();
+        let mut memory = OpenScreenMemory::default();
+        assert_eq!(
+            memory.observe(&window),
+            [Change::Set("one.test".into(), work())]
+        );
+        // The Screen goes to another window: the client still has it open.
+        window.open_window(SECOND).unwrap();
+        window.move_screen_to_window(&key, SECOND).unwrap();
+        assert_eq!(window.holder(&key), Some(SECOND));
+        assert!(memory.observe(&window).is_empty(), "a move writes nothing");
+        // The window that held it closes; its heir holds it now.
+        window.close_window(SECOND, WindowId::FIRST).unwrap();
+        assert!(memory.observe(&window).is_empty());
+    }
+
+    #[test]
     fn a_closed_host_stays_remembered_and_a_detached_screen_does_not() {
         let mut window = WindowWorkspace::new(Uuid::new_v4());
         let owner = window.lifecycle_token();

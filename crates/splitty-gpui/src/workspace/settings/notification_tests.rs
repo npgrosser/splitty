@@ -66,7 +66,7 @@ fn setup(
     let (commands, mut receiver) = mpsc::channel(32);
     window.update(|window, cx| {
         view.update(cx, |workspace, cx| {
-            workspace.commands = commands;
+            workspace.commands = commands.into();
             workspace.reconcile(model, window, cx);
         });
         window.draw(cx).clear(cx);

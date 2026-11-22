@@ -889,7 +889,7 @@ mod tests {
         let (commands, mut receiver) = mpsc::channel(1);
         window.update(|window, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.commands = commands;
+                workspace.commands = commands.into();
                 workspace.model = Some(WindowWorkspace::new(owner));
                 workspace.hosts.set_owner(owner);
                 assert!(workspace.hosts.accept(HubUpdate {
@@ -1032,7 +1032,7 @@ mod tests {
         let (commands, mut receiver) = mpsc::channel(2);
         window.update(|window, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.commands = commands;
+                workspace.commands = commands.into();
                 workspace.model = Some(WindowWorkspace::new(owner));
                 workspace.hosts.set_owner(owner);
                 workspace.destination = Destination::Hosts;

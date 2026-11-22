@@ -4,6 +4,7 @@ mod editor_uri;
 mod editors;
 mod files;
 mod host_catalog;
+mod outbox;
 mod presence;
 mod remembered;
 mod remote;
@@ -28,7 +29,7 @@ use crate::{
         HostUpdatePlan, MovePlacement, PaneActionTarget, PaneDrag, PlacementOutcome, ScreenKey,
         ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget, SourceToken,
         SourceWorkspace, TabStep, TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan,
-        TemplateApplyResult, TerminalToken, WindowWorkspace, WorkspaceRefresh,
+        TemplateApplyResult, TerminalToken, WindowId, WindowWorkspace, WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -39,9 +40,10 @@ pub use editors::{
     PathKind,
 };
 pub use files::{file_route, quote_path, wsl_file, FileRoute, FileUpdate, StoreItem, WslFile};
+use outbox::{publish, publish_model, publish_routed, publish_to, Outbox};
 pub use presence::{
-    PtySize, SizePolicy, WindowPresence, WindowPresenceCell, ACTIVITY_INTERVAL, MAX_PTY_COLS,
-    MAX_PTY_ROWS,
+    PtySize, SizePolicy, WindowPresence, WindowPresenceCell, WindowPresences, ACTIVITY_INTERVAL,
+    MAX_PTY_COLS, MAX_PTY_ROWS,
 };
 use splitty_core::protocol::capability;
 use splitty_core::protocol::message_type::MessageType;
@@ -64,12 +66,15 @@ pub use viewers::{
 
 /// One immutable intent captured on its assigned source connection.
 pub struct Command {
+    /// The window that sent it.
+    window: WindowId,
     source: Option<SourceToken>,
     kind: CommandKind,
 }
 impl Command {
     pub fn new(source: SourceToken, kind: CommandKind) -> Self {
         Self {
+            window: WindowId::FIRST,
             source: Some(source),
             kind,
         }
@@ -77,9 +82,18 @@ impl Command {
     /// Startup close is channel-owned until the first workspace is discovered.
     pub fn close(plan: ClosePlan, confirmed: bool) -> Self {
         Self {
+            window: WindowId::FIRST,
             source: plan.source_token(),
             kind: CommandKind::RequestClose { plan, confirmed },
         }
+    }
+    /// The same command, as window `window` sends it.
+    pub fn in_window(mut self, window: WindowId) -> Self {
+        self.window = window;
+        self
+    }
+    pub fn window(&self) -> WindowId {
+        self.window
     }
     pub fn source_token(&self) -> Option<SourceToken> {
         self.source
@@ -125,7 +139,34 @@ impl Command {
     }
 }
 
+/// What a new window holds when it opens.
+pub enum WindowStart {
+    /// Nothing; it offers to create a Screen.
+    Empty,
+    /// One new local Screen.
+    NewScreen,
+    /// A Screen another window holds, which moves to the new window.
+    Screen(ScreenKey),
+}
+
 pub enum CommandKind {
+    /// Add window `window` to the client. Nothing reaches a server but the
+    /// creation of its first Screen, where it starts with one.
+    OpenWindow {
+        window: WindowId,
+        presence: WindowPresenceCell,
+        start: WindowStart,
+    },
+    /// Remove the sending window. Its Screens go to the window that was
+    /// active last among the others, which keeps the Screen it shows; no
+    /// server hears of it. The last window closes with the application.
+    CloseWindow,
+    /// Hand an opened Screen to window `target` and show it there. No
+    /// server hears of it but through the sizes its panes have there.
+    MoveScreenToWindow {
+        screen: ScreenKey,
+        target: WindowId,
+    },
     RequestHostUpdate {
         request_id: uuid::Uuid,
         target: HostActionTarget,
@@ -455,6 +496,23 @@ pub enum CommandKind {
     },
 }
 pub enum Update {
+    /// An update for a window other than the first. The worker writes one
+    /// ordered stream for all windows; an update outside this variant is the
+    /// first window's.
+    ForWindow {
+        window: WindowId,
+        update: Box<Update>,
+    },
+    /// The worker removed the window after [`CommandKind::CloseWindow`]; what
+    /// it held is in another window's next model.
+    WindowClosed {
+        window: WindowId,
+    },
+    /// A Screen this window asked to show is held by window `window`.
+    ScreenElsewhere {
+        screen: ScreenKey,
+        window: WindowId,
+    },
     RemoteScreenCreateRejected {
         owner: SourceToken,
         source: SourceToken,
@@ -1427,22 +1485,6 @@ impl Worker {
     }
 }
 
-async fn publish(
-    updates: &mpsc::Sender<Update>,
-    update: Update,
-    stop: &AtomicBool,
-) -> anyhow::Result<()> {
-    loop {
-        if stop.load(Ordering::Acquire) {
-            anyhow::bail!("Local workspace is closing");
-        }
-        tokio::select! {
-            permit = updates.reserve() => { permit?.send(update); return Ok(()); }
-            _ = tokio::time::sleep(Duration::from_millis(16)) => {}
-        }
-    }
-}
-
 /// The service a worker owns.
 enum Origin {
     Backend(crate::owned_service::LocalBackend),
@@ -1501,7 +1543,8 @@ async fn run(
         LocalBackend::Preparing(mut preparation) => loop {
             match preparation.next(&stop).await {
                 Ok(Prepared::Phase(phase)) => {
-                    if let Err(error) = publish(&updates, Update::Startup(phase), &stop).await {
+                    if let Err(error) = outbox::send(&updates, Update::Startup(phase), &stop).await
+                    {
                         preparation.cancel().await;
                         return closing(error);
                     }
@@ -1516,7 +1559,7 @@ async fn run(
         LocalBackend::Wsl(launch) => Some(launch.distro().to_owned()),
         _ => None,
     };
-    publish(
+    outbox::send(
         &updates,
         Update::Startup(StartupPhase::StartingBackend(distro)),
         &stop,
@@ -1640,6 +1683,7 @@ async fn run_service_with_presence(
     presence: WindowPresenceCell,
 ) -> anyhow::Result<()> {
     let service = service.into();
+    let updates = Outbox::new(updates);
     let client = match service.connect().await {
         Ok(client) => client,
         Err(error) => {
@@ -1648,11 +1692,17 @@ async fn run_service_with_presence(
         }
     };
     let mut window = WindowWorkspace::new(client.connection_id());
+    // The presence of every window; the first window's cell is the worker's.
+    let presences = WindowPresences::from(presence);
     let mut local = source::SourceRuntime::new(client, window.lifecycle_token())
-        .with_window_presence(presence.clone());
-    // What the window's presence was at the last turn: a window that became
-    // hidden makes every connection idle.
-    let mut seen_presence = presence.get();
+        .with_window_presence(presences.clone());
+    // Whether a window was visible at the last turn: once none is any more,
+    // every connection is idle.
+    let mut seen_visible = presences.any_visible();
+    // The windows in the order they were active, the latest first.
+    let mut active_order = vec![WindowId::FIRST];
+    // The windows whose Hosts page keeps hosts connected to browse them.
+    let mut browsing = HashSet::<WindowId>::new();
     let mut settings = None::<RuntimeLocalService<'_>>;
     let mut ports = None::<PortsClient<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
@@ -1663,7 +1713,7 @@ async fn run_service_with_presence(
     // `remote.reconnectHosts` as first read; those hosts are reconnected once.
     let mut reconnect = None::<Vec<String>>;
     let mut reconnect_settled = false;
-    let mut remotes = remote::Remotes::new(&service).with_window_presence(presence.clone());
+    let mut remotes = remote::Remotes::new(&service).with_window_presence(presences.clone());
     let mut known = None::<Arc<HostDirectorySnapshot>>;
     let mut host_connects = HostConnects::default();
     let result = async {
@@ -1694,17 +1744,26 @@ async fn run_service_with_presence(
                 _ = tick.tick() => Next::Tick,
             };
             if stop.load(Ordering::Acquire) { break; }
-            let current_presence = presence.get();
-            if seen_presence.visible && !current_presence.visible {
+            updates.enter(None);
+            let visible = presences.any_visible();
+            if seen_visible && !visible {
                 local.hidden();
                 remotes.hidden();
             }
-            seen_presence = current_presence;
-            if presence.take_acted() {
-                match window.shown_key().map(|key| key.source_id()) {
+            seen_visible = visible;
+            for acting in presences.take_acted() {
+                match window.shown_in(acting).map(|key| key.source_id()) {
                     Some(id) if id == local.id() => local.acted(),
                     Some(id) => remotes.acted(id),
                     None => {}
+                }
+            }
+            if let Some(focused) = presences.focused().filter(|focused| window.has_window(*focused)) {
+                if active_order.first() != Some(&focused) {
+                    active_order.retain(|id| *id != focused);
+                    active_order.insert(0, focused);
+                    window.set_intake(focused);
+                    updates.set_windows(window.window_ids(), focused);
                 }
             }
             let owner = window.lifecycle_token();
@@ -1720,7 +1779,7 @@ async fn run_service_with_presence(
                 Next::Hub(HubEvent::Management(mut result)) => {
                     if result.owner()==owner {
                         if result.action()==HostManagementAction::Connect && host_connects.apply(&mut result,&mut window,&mut remotes) {
-                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                            publish_model(&updates,&mut window,&stop).await?;
                         }
                         publish(&updates,Update::HostManagement(result),&stop).await?;
                     }
@@ -1731,7 +1790,7 @@ async fn run_service_with_presence(
                         if let Some(snapshot)=snapshot.filter(|snapshot|known.as_ref().is_none_or(|old|snapshot.generation()>=old.generation())) {
                             window.set_host_order(owner,&snapshot.directory().order)?;
                             known=Some(snapshot);
-                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                            publish_model(&updates,&mut window,&stop).await?;
                         }
                         publish(&updates, Update::HostDirectory(update), &stop).await?;
                     }
@@ -1742,7 +1801,8 @@ async fn run_service_with_presence(
                     let update = match result {
                         Ok(LocalServiceUpdate::BackendVersion { connection, result }) => {
                             window.set_backend_version(connection, result);
-                            Update::Workspace(Box::new(window.clone()))
+                            publish_model(&updates,&mut window,&stop).await?;
+                            continue;
                         },
                         Ok(LocalServiceUpdate::SettingsWrite(result)) => Update::SettingsWrite(result),
                         Ok(LocalServiceUpdate::SettingsReconciled(result)) => Update::SettingsReconciled(result),
@@ -1761,7 +1821,7 @@ async fn run_service_with_presence(
                         Ok(LocalServiceUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason:error.to_string() },
                         Err(error) => {
                             window.set_backend_version(connection, Err(std::io::Error::other("Backend version unavailable")));
-                            publish(&updates, Update::Workspace(Box::new(window.clone())), &stop).await?;
+                            publish_model(&updates,&mut window,&stop).await?;
                             publish(&updates, Update::ShellProfilesError { connection,reason:error.to_string() }, &stop).await?;
                             Update::AppearanceError { connection,reason:error.to_string() }
                         }
@@ -1775,13 +1835,25 @@ async fn run_service_with_presence(
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
+                    // A window's command acts on what that window shows.
+                    let sender = command.window();
+                    // The answer to a question of the local service is the
+                    // application's, also when the window that showed the
+                    // dialog closed meanwhile.
+                    let of_the_client = matches!(command.kind, CommandKind::AnswerSshPrompt { .. });
+                    if !window.enter(sender) && !of_the_client {
+                        publish_to(&updates,sender,rejected_command(command.source,&command.kind,"Command belongs to a window that is not open".into()),&stop).await?;
+                        continue;
+                    }
+                    updates.enter(Some(sender));
+                    updates.asked_by(&command);
                     // Focus is retained presentation intent, not a transport command.
                     // Handle it before live-source admission, without routing to a mux.
                     if let CommandKind::Focus { screen, route } = &command.kind {
                         let result = command.validate_source(route.source_token())
                             .and_then(|()| window.focus_terminal(screen, route));
                         match result {
-                            Ok(_) => publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                            Ok(_) => publish_model(&updates,&mut window,&stop).await?,
                             Err(error) => publish(&updates,rejected_command(command.source,&command.kind,error.to_string()),&stop).await?,
                         }
                         continue;
@@ -1791,9 +1863,9 @@ async fn run_service_with_presence(
                         continue;
                     }
                     let lifecycle=match &command.kind {
-                        CommandKind::RetryHost {target}=>Some((target,remotes.retry(&mut window,target))),
                         CommandKind::CancelHost {target}=>Some((target,remotes.cancel(&mut window,target))),
                         CommandKind::ReleaseHostBrowse {target}=>Some((target,remotes.release_browse(&mut window,target))),
+                        CommandKind::RetryHost {target}=>{browsing.insert(sender);Some((target,remotes.retry(&mut window,target)))}
                         CommandKind::CloseHost {target}=>{
                             let result=remotes.close(&mut window,target);
                             if result.is_ok() { if let Some(memory)=&mut remembered {memory.keep(target.target());} }
@@ -1803,11 +1875,75 @@ async fn run_service_with_presence(
                     };
                     if let Some((target,result))=lifecycle {
                         let changed = match result { Ok(())=>true, Err(error)=>remotes.reject_action(&mut window,target,&error) };
-                        if changed { publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?; }
+                        if changed { publish_model(&updates,&mut window,&stop).await?; }
                         continue;
                     }
                     let captured = command.source;
                     match command.kind {
+                        CommandKind::OpenWindow {window:opened,presence:cell,start} => {
+                            match window.open_window(opened) {
+                                Ok(()) => {
+                                    presences.insert(opened,cell);
+                                    updates.set_windows(window.window_ids(),active_order[0]);
+                                    match start {
+                                        WindowStart::Empty => {}
+                                        WindowStart::Screen(key) => {
+                                            if let Err(error)=move_screen(&mut window,&mut local,&mut remotes,opened,&key) {
+                                                publish(&updates,Update::Status(error.to_string()),&stop).await?;
+                                            }
+                                        }
+                                        WindowStart::NewScreen => {
+                                            // The new window creates its Screen as any window does.
+                                            window.enter(opened);
+                                            let created=Command::new(owner,CommandKind::CreateScreen(None)).in_window(opened);
+                                            let effects=local.command(&mut window,created)?;
+                                            window.enter(sender);
+                                            publish_source_effects(&mut window,effects,&updates,&stop).await?;
+                                        }
+                                    }
+                                    publish_model(&updates,&mut window,&stop).await?;
+                                }
+                                Err(error) => publish(&updates,Update::Status(error.to_string()),&stop).await?,
+                            }
+                        }
+                        CommandKind::CloseWindow => {
+                            let heir=active_order.iter().copied().find(|id|*id!=sender&&window.has_window(*id))
+                                .or_else(||window.window_ids().into_iter().find(|id|*id!=sender));
+                            let closed=heir.ok_or_else(||crate::connection::invalid("The last window closes with the application"))
+                                .and_then(|heir|{
+                                    // What the window shows stays shown where it goes, until that window measures it.
+                                    let shown=window.shown_in(sender);
+                                    window.close_window(sender,heir)?;
+                                    if let Some(key)=shown.filter(|key|window.shown_in(heir).as_ref()==Some(key)) {
+                                        move_visibility(&mut local,&mut remotes,sender,heir,&key);
+                                    }
+                                    Ok(())
+                                });
+                            match closed {
+                                Ok(()) => {
+                                    presences.remove(sender);
+                                    active_order.retain(|id|*id!=sender);
+                                    local.withdraw_visibility(sender);
+                                    remotes.withdraw_visibility(sender);
+                                    if browsing.remove(&sender)&&browsing.is_empty() {
+                                        host_connects.clear();
+                                        remotes.release_all_browse(&mut window);
+                                    }
+                                    // The window parks what it shows before another window reads that it holds it.
+                                    publish_to(&updates,sender,Update::WindowClosed {window:sender},&stop).await?;
+                                    updates.enter(None);
+                                    updates.set_windows(window.window_ids(),active_order.first().copied().unwrap_or(WindowId::FIRST));
+                                    publish_model(&updates,&mut window,&stop).await?;
+                                }
+                                Err(error) => publish(&updates,Update::Status(error.to_string()),&stop).await?,
+                            }
+                        }
+                        CommandKind::MoveScreenToWindow {screen,target} => {
+                            match move_screen(&mut window,&mut local,&mut remotes,target,&screen) {
+                                Ok(())=>publish_model(&updates,&mut window,&stop).await?,
+                                Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
+                            }
+                        }
                         CommandKind::RequestHostUpdate {request_id,target} => {
                             let update = match remotes.request_update(&window,request_id,&target) {
                                 Ok(plan) => Update::HostUpdatePrepared(plan),
@@ -1817,7 +1953,7 @@ async fn run_service_with_presence(
                         }
                         CommandKind::ConfirmHostUpdate {plan} => {
                             match remotes.confirm_update(&mut window,&plan) {
-                                Ok(()) => publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                Ok(()) => publish_model(&updates,&mut window,&stop).await?,
                                 Err(error) => publish(&updates,Update::HostUpdateRejected {owner,request_id:plan.request_id(),reason:error.to_string()},&stop).await?,
                             }
                         }
@@ -1850,7 +1986,7 @@ async fn run_service_with_presence(
                         CommandKind::ManageHost {request_id,request} => {
                             let result=hub.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Host metadata service is not ready")).and_then(|hub|hub.enqueue(owner,request_id,request.clone()));
                             let result=match result {
-                                Ok(result)=>{if request.action()==HostManagementAction::Connect {host_connects.insert(request_id,owner);} result},
+                                Ok(result)=>{if request.action()==HostManagementAction::Connect {host_connects.insert(request_id,owner);browsing.insert(sender);} result},
                                 Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>continue,
                                 Err(error)=>HostManagementResult::new(owner,request_id,&request,HostManagementOutcome::Rejected,Some(error.to_string())),
                             };
@@ -1858,12 +1994,16 @@ async fn run_service_with_presence(
                         }
                         CommandKind::WithdrawHostConnect {request_id} => {
                             if let Some(action)=host_connects.withdraw(request_id) { let _=remotes.release_browse(&mut window,&action); }
-                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                            publish_model(&updates,&mut window,&stop).await?;
                         }
                         CommandKind::ReleaseHostBrowsing => {
-                            host_connects.clear();
-                            remotes.release_all_browse(&mut window);
-                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                            // Another window's Hosts page may still browse.
+                            browsing.remove(&sender);
+                            if browsing.is_empty() {
+                                host_connects.clear();
+                                remotes.release_all_browse(&mut window);
+                            }
+                            publish_model(&updates,&mut window,&stop).await?;
                         }
                         CommandKind::RefreshHostDirectory { connection } => {
                             if let Some(reader)=&mut hub {
@@ -1893,15 +2033,19 @@ async fn run_service_with_presence(
                         CommandKind::SetColorScheme { connection,scheme } => {
                             if let Some(reader)=&mut settings { if let Err(error)=reader.set_scheme(connection,scheme) { publish(&updates,Update::AppearanceError { connection,reason:error.to_string() },&stop).await?; } }
                         }
+                        CommandKind::SwitchScreen(key) if window.held_elsewhere(&key).is_some() => {
+                            let holder=window.held_elsewhere(&key).expect("checked holder");
+                            publish(&updates,Update::ScreenElsewhere {screen:key,window:holder},&stop).await?;
+                        }
                         CommandKind::SwitchScreen(key) => {
                             match select_window_screen(&mut window,&mut local,&mut remotes,&key) {
-                                Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                Ok(())=>publish_model(&updates,&mut window,&stop).await?,
                                 Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                             }
                         }
                         CommandKind::MoveScreen {screen,before} => {
                             match move_window_screen(&mut window,&local,captured.expect("admitted local owner"),&screen,before.as_ref()) {
-                                Ok(true)=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                Ok(true)=>publish_model(&updates,&mut window,&stop).await?,
                                 Ok(false)=>{},
                                 Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                             }
@@ -1909,32 +2053,40 @@ async fn run_service_with_presence(
                         CommandKind::CycleScreen { step } => {
                             if let Some(key)=adjacent_screen(&window,step) {
                                 match select_window_screen(&mut window,&mut local,&mut remotes,&key) {
-                                    Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                    Ok(())=>publish_model(&updates,&mut window,&stop).await?,
                                     Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                                 }
                             }
                         }
                         CommandKind::ConnectHost { target } => {
+                            browsing.insert(sender);
                             host_connects.retain_other_targets(&target);
                             let result=known.as_deref().ok_or_else(||crate::connection::invalid("Host directory has not been read")).and_then(|known|remotes.connect(&mut window,owner,&target,known));
-                            match result {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
+                            match result {Ok(())=>publish_model(&updates,&mut window,&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
                         CommandKind::RetryHost { .. } | CommandKind::CancelHost { .. } | CommandKind::ReleaseHostBrowse { .. } | CommandKind::CloseHost { .. } => unreachable!("host lifecycle is dispatched before moving command"),
                         CommandKind::CreateRemoteScreen { request } => {
-                            let effects = create_remote_screen(&mut window, &mut local, &mut remotes, &mut host_connects, request);
+                            let effects = create_remote_screen(&mut window, &mut local, &mut remotes, &mut host_connects, request, sender);
                             publish_source_effects(&mut window, effects, &updates, &stop).await?;
                         }
+                        CommandKind::OpenRemoteScreen { screen } if window.held_elsewhere(&screen).is_some() => {
+                            let holder=window.held_elsewhere(&screen).expect("checked holder");
+                            publish(&updates,Update::ScreenElsewhere {screen,window:holder},&stop).await?;
+                        }
                         CommandKind::OpenRemoteScreen { screen } => {
-                            match remotes.open(&mut window,captured.expect("ready source capture"),&screen) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
+                            match remotes.open(&mut window,captured.expect("ready source capture"),&screen) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish_model(&updates,&mut window,&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
                         CommandKind::OpenRemoteScreens { screens } => {
-                            match remotes.open_many(&mut window,captured.expect("ready source capture"),&screens) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
+                            // A Screen another window holds stays there.
+                            let screens:Vec<ScreenKey>=screens.into_iter().filter(|key|window.held_elsewhere(key).is_none()).collect();
+                            if screens.is_empty() {continue;}
+                            match remotes.open_many(&mut window,captured.expect("ready source capture"),&screens) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish_model(&updates,&mut window,&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
                         CommandKind::DetachRemoteScreen { screen } => {
-                            match remotes.detach(&mut window,owner,&screen) {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
+                            match remotes.detach(&mut window,owner,&screen) {Ok(())=>publish_model(&updates,&mut window,&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
                         kind => {
-                            let command=Command {source:captured,kind};
+                            let command=Command {window:sender,source:captured,kind};
                             let effects=if captured.is_none_or(|scope|scope.source_id()==local.id()) {local.command(&mut window,command)?} else {remotes.command(&mut window,command)?};
                             if publish_source_effects(&mut window,effects,&updates,&stop).await? {break;}
                         }
@@ -1944,7 +2096,7 @@ async fn run_service_with_presence(
                     let event=Box::new(event?.ok_or_else(||anyhow::anyhow!("Local connection closed"))?);
                     if event.json().is_none() {
                         // Binary delivery remains charged and never clones navigation state.
-                        publish(&updates,Update::Event { source:local.owner(),event },&stop).await?;
+                        publish_routed(&updates,&window,Update::Event { source:local.owner(),event },&stop).await?;
                     } else {
                         let json=event.json().expect("JSON event");
                         let kind=MessageType::of(json);
@@ -1981,6 +2133,7 @@ async fn run_service_with_presence(
                     }
                 }
             }
+            updates.enter(None);
             if let Some(ports)=&ports {ports.revalidate(&window);}
             let effects=local.reconcile(&mut window)?;
             publish_source_effects(&mut window,effects,&updates,&stop).await?;
@@ -1998,7 +2151,7 @@ async fn run_service_with_presence(
                     for (target,screens) in list.open_hosts().into_iter().filter(|(target,_)|chosen.contains(target)) {
                         changed|=remotes.restore(&mut window,owner,&target,screens,&known).is_ok();
                     }
-                    if changed {publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;}
+                    if changed {publish_model(&updates,&mut window,&stop).await?;}
                 }
             }
         }
@@ -2027,7 +2180,7 @@ async fn run_service_with_presence(
                         // Closing must not wait for a UI that has stopped draining.
                         // Preserve final write uncertainty while a sink is available.
                         for outcome in outcomes {
-                            let _ = updates.try_send(Update::SettingsWrite(outcome));
+                            updates.try_send(Update::SettingsWrite(outcome));
                         }
                         Ok(())
                     }
@@ -2136,6 +2289,9 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::SetDrawerVisibility { .. }
             | CommandKind::CreateScreen(_)
             | CommandKind::ProfileTab { .. }
+            | CommandKind::OpenWindow { .. }
+            | CommandKind::CloseWindow
+            | CommandKind::MoveScreenToWindow { .. }
     ) || matches!(kind,CommandKind::RequestClose {plan,..} if plan.target==CloseTarget::Window)
 }
 fn select_window_screen(
@@ -2153,8 +2309,41 @@ fn select_window_screen(
     window.select(window.lifecycle_token(), key)?;
     local.cancel_created_follow();
     remotes.cancel_created_follow();
-    local.withdraw_visibility();
+    local.withdraw_visibility(window.window());
     Ok(())
+}
+
+/// Hand an opened Screen to window `target`; its shown panes stay shown.
+fn move_screen(
+    window: &mut WindowWorkspace,
+    local: &mut source::SourceRuntime,
+    remotes: &mut remote::Remotes<'_>,
+    target: WindowId,
+    key: &ScreenKey,
+) -> std::io::Result<()> {
+    let from = window
+        .holder(key)
+        .ok_or_else(|| crate::connection::invalid("Screen reference is no longer open"))?;
+    window.move_screen_to_window(key, target)?;
+    move_visibility(local, remotes, from, target, key);
+    Ok(())
+}
+
+fn move_visibility(
+    local: &mut source::SourceRuntime,
+    remotes: &mut remote::Remotes<'_>,
+    from: WindowId,
+    to: WindowId,
+    key: &ScreenKey,
+) {
+    if from == to {
+        return;
+    }
+    if key.source_id() == local.id() {
+        local.move_visibility(from, to, key.screen_id());
+    } else {
+        remotes.move_visibility(key.source_id(), from, to, key.screen_id());
+    }
 }
 
 fn move_window_screen(
@@ -2200,6 +2389,7 @@ fn create_remote_screen(
     remotes: &mut remote::Remotes<'_>,
     host_connects: &mut HostConnects,
     request: crate::workspace::RemoteScreenCreateRequest,
+    sender: WindowId,
 ) -> source::SourceEffects {
     host_connects.clear();
     local.cancel_created_follow();
@@ -2210,7 +2400,8 @@ fn create_remote_screen(
         CommandKind::CreateRemoteScreen {
             request: request.clone(),
         },
-    );
+    )
+    .in_window(sender);
     let result = if local.has_pending_close() {
         Err(anyhow::anyhow!("A window close is pending"))
     } else {
@@ -2242,21 +2433,29 @@ fn create_remote_screen(
 async fn publish_source_effects(
     window: &mut WindowWorkspace,
     mut effects: source::SourceEffects,
-    updates: &mpsc::Sender<Update>,
+    updates: &Outbox,
     stop: &AtomicBool,
 ) -> anyhow::Result<bool> {
     if let Some(request) = effects.follow_remote_creation {
         effects.changed |= window.follow_remote_creation(&request)?;
     }
-    if let Some(key) = effects.select_created {
-        window.select(window.lifecycle_token(), &key)?;
+    if let Some((creator, key)) = effects.select_created {
+        // The window that created the Screen shows it, no other.
+        let back = window.window();
+        if window.enter(creator) {
+            let shown = window.select(window.lifecycle_token(), &key);
+            if window.single_window() {
+                shown?;
+            }
+        }
+        window.enter(back);
         effects.changed = true;
     }
     if effects.changed {
-        publish(updates, Update::Workspace(Box::new(window.clone())), stop).await?;
+        publish_model(updates, window, stop).await?;
     }
     for update in effects.updates {
-        publish(updates, update, stop).await?;
+        publish_routed(updates, window, update, stop).await?;
     }
     Ok(effects.close_window)
 }
@@ -2931,6 +3130,7 @@ mod close_tests {
         let scope = model.source_token();
         commands
             .send(Command {
+                window: crate::workspace::WindowId::FIRST,
                 source: None,
                 kind: CommandKind::RequestClose {
                     plan: ClosePlan::startup_window(1),
@@ -2948,6 +3148,7 @@ mod close_tests {
         let plan = model.assess_close(2, CloseTarget::Window).unwrap();
         commands
             .send(Command {
+                window: crate::workspace::WindowId::FIRST,
                 source: Some(scope),
                 kind: CommandKind::RequestClose {
                     plan,
@@ -3071,6 +3272,7 @@ mod close_tests {
         let plan = model.assess_close(1, CloseTarget::Window).unwrap();
         commands
             .send(Command {
+                window: crate::workspace::WindowId::FIRST,
                 source: Some(scope),
                 kind: CommandKind::RequestClose {
                     plan: plan.clone(),
@@ -3137,6 +3339,9 @@ mod transfer_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod navigation_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod windows_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod hub_tests;

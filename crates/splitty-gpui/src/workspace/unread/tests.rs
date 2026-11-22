@@ -93,7 +93,7 @@ fn setup(
     window.update(|window, cx| {
         window.activate_window();
         view.update(cx, |workspace, cx| {
-            workspace.commands = sender;
+            workspace.commands = sender.into();
             workspace.destination = Destination::Screens;
             workspace.drawer_visible = true;
             workspace.reconcile(model, window, cx);

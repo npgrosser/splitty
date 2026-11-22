@@ -10,9 +10,11 @@ use splitty_transport::{
 mod diagnostic;
 mod host;
 mod host_update;
+mod views;
 pub use host::{CatalogState, HostActionTarget, HostDiagnostic, HostPresentation};
 pub(crate) use host_update::daemon_version_from_ready;
 pub use host_update::{HostUpdateOffer, HostUpdatePlan, HostUpdateState};
+pub use views::WindowId;
 
 pub const MAX_REMOTE_SOURCES: usize = 8;
 pub const MAX_PENDING_REMOTE_OPENS: usize = 4;
@@ -95,6 +97,8 @@ pub struct WindowWorkspace {
     backend_version: Option<Arc<splitty_transport::budget::Charged<String>>>,
     backend_version_failed: bool,
     staged: Arc<Budget>,
+    /// The windows of the client; `selected` is that of the one in view.
+    windows: views::Windows,
 }
 impl WindowWorkspace {
     pub fn new(connection: Uuid) -> Self {
@@ -108,6 +112,7 @@ impl WindowWorkspace {
             next_open_order: 0,
             backend_version: None,
             backend_version_failed: false,
+            windows: views::Windows::default(),
         }
     }
     pub fn accepts_host_update_plan(&self, plan: &HostUpdatePlan) -> bool {
@@ -321,7 +326,8 @@ impl WindowWorkspace {
         let key = self.selected.as_ref()?;
         self.source(key.source_id())?.screen(key.screen_id())
     }
-    pub fn opened(&self) -> Vec<OpenedScreen<'_>> {
+    /// Every Screen the client has open, whichever window holds it.
+    pub fn all_opened(&self) -> Vec<OpenedScreen<'_>> {
         let mut sources = vec![&self.local];
         let mut remote: Vec<_> = self.remotes.iter().enumerate().collect();
         remote.sort_by_key(|(position, entry)| {
@@ -730,25 +736,7 @@ impl WindowWorkspace {
     }
     pub fn select(&mut self, owner: SourceToken, key: &ScreenKey) -> io::Result<()> {
         self.check_owner(owner)?;
-        if !self.source(key.source_id()).is_some_and(|source| {
-            source
-                .screens()
-                .iter()
-                .any(|entry| entry.id.as_str() == key.screen_id())
-        }) {
-            return Err(invalid("Screen reference is no longer open"));
-        }
-        self.cancel_remote_creation_follow();
-        if let Some(previous) = self.selected.as_ref().map(ScreenKey::source_id) {
-            if let Some(source) = self.source_mut_raw(previous) {
-                source.cancel_navigation_follow();
-            }
-        }
-        self.source_mut_raw(key.source_id())
-            .ok_or_else(|| invalid("Screen source is gone"))?
-            .select_opened(key.screen_id())?;
-        self.selected = Some(key.clone());
-        Ok(())
+        self.show_held(key)
     }
     /// Open the listed Screens of one host that its catalog still has, in
     /// their order, and show the first of them. Returns whether the window
@@ -871,6 +859,9 @@ impl WindowWorkspace {
         if self.execution_token(key.source_id()) != Some(owner) {
             return Err(invalid("remote connection changed"));
         }
+        if self.held_elsewhere(key).is_some() {
+            return Err(invalid("Screen is shown in another window"));
+        }
         let already_open = self.source(key.source_id()).is_some_and(|source| {
             source
                 .screens()
@@ -914,6 +905,7 @@ impl WindowWorkspace {
                 .open_order = Some(self.next_open_order);
             self.next_open_order = next_order;
         }
+        self.hold(key);
         self.selected = Some(key.clone());
         Ok(())
     }
@@ -1061,6 +1053,7 @@ impl Drop for SourceEdit<'_> {
         };
         self.window
             .restore_selection(&self.previous, next.or_else(|| self.shown.clone()));
+        self.window.note_source_edit(self.id);
     }
 }
 fn validate_target(target: &str) -> io::Result<()> {

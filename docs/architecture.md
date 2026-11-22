@@ -67,7 +67,7 @@ Once an attached view is wired, it measures its pane again and reports that size
 
 Several connections may show one session, and the PTY has one size. With `pty-size-v1`, `resize` is a report: the size at which the connection shows the session. `protocol::sizing::SizeArbiter`, owned by the dispatcher, keeps per session each connection's report and per connection its activity, and derives the PTY size with the server's `terminal.size_policy`: the smallest columns and rows of the active connections (`active`, the default; a connection is active within `terminal.size_idle_seconds` of its last `activity`, unless it sent `idle` since or another one took over), of the most recently active one (`latest`), or of all (`smallest`); with no active connection, the most recently active one decides. Computing the size, resizing the PTY and publishing the new size on the session's watch channel happen under one lock; every stream of the session forwards a published size as a `size` event, and a one-second tick (spawned with the first connection, holding the dispatcher weakly) settles connections that became idle. Settings updates reconfigure the arbiter. A connection that never sent `activity` or `idle` is an older client: each of its reports counts as an activity.
 
-The client decides what counts as activity: terminal query replies through `input` alone do not prove user activity. A key, pointer button, window activation or resize reports activity; scrolling alone does not. Hidden windows report idle.
+The client decides what counts as activity: terminal query replies through `input` alone do not prove user activity. A key, pointer button, window activation or resize reports activity; scrolling alone does not. Hidden windows report idle. A client with several windows sums them per connection: each window reports the panes it shows, the connection reports their union, the activity goes to the connection of the Screen in the window the user acted in, and `idle` goes out once no window is visible. A window hidden beside a visible one withdraws what it shows (`hide`) until it is visible again, since the connection stays in use through the other window.
 
 The native app splits presence and sizing between its crates. `splitty-client-core`'s source worker (`native_workspace::presence`, driven by `SourceRuntime` for the local source and each host source alike) keeps per connection whether its welcome announced `pty-size-v1` and what it still has to tell it: each welcome is greeted with `activity` or `idle` before the first `attach`, according to the window's presence (a cell the window writes: visible, focused) and whether the shown Screen belongs to that connection; an interaction the window marks in the same cell becomes, at the worker's next turn, an `activity` for the connection of the Screen shown then, at most every 5 seconds; a window that became hidden makes every connection `idle`; `TakeOverSize` sends `activity` with `takeover`. Without the capability it sends none of these and no `hide`, and the first report after an attach resizes the PTY by one row and back instead of asking for `redraw`. The worker validates `size` events of the sessions it attached (1–1000 columns, 1–500 rows, a known policy) and publishes each new one as `Update::PtySize`. `splitty-gpui` only observes: the workspace marks a key or pointer button anywhere in the window, its activation and its resizing in the cell (no command, so typing never fills the worker's queue), writes visibility and focus into it, and hands each size to the terminal of its session, also to one created later. The terminal keeps the pane's measured grid, which it reports, apart from the emulator's grid, which follows the latest `size` and else the pane; it paints and hit-tests the grid from the pane's origin, moved up as far as a taller grid's cursor row needs, hatches the pane's area outside a smaller one and shows the size in a badge that takes the size over unless the policy is `smallest`.
 
@@ -112,6 +112,27 @@ service. Closing the window joins those streams and the owned helper; successful
 cleanup requires an observed successful exit, not merely a closed carrier or a
 forcibly terminated bridge. Existing released launchers retain their compatible
 owner-close API.
+
+The windows of the native app are views of that one client. One worker serves
+them all on its one connection per source and writes one ordered stream of
+updates; `splitty_gpui::windows` reads it and hands each update to the window
+it is for (`Update::ForWindow` wraps an update for a window other than the
+first). The worker's model (`workspace::window::views`) holds the selection of
+one window, the one in view, and for every other window its saved selection;
+it also holds the window that holds each opened Screen. A command names its
+window (`Command::in_window`), and the worker brings that window into view
+before it acts, so everything that speaks of "the shown Screen" means that
+window's. A window reads a projection of the model: its own selection, pruned
+to the Screens it holds, which is a model of a single window, so the view code
+knows nothing of other windows. An answer goes to the window that asked
+(`native_workspace::outbox`, by the request it names or the command being
+handled), state every window shows goes to all of them, and what belongs to a
+Screen goes to the window that holds it. Moving a Screen to another window
+changes the holder and nothing else: no source hears of it, the sessions stay
+attached, and the window that gets the Screen takes the terminal views the
+other window parked (`Windows::park`), so the emulator state comes with it.
+With a single window the model holds every Screen there, a projection is the
+model itself, and every update goes out unwrapped.
 
 The portable `core::native_api` catalog is the single source of native operation
 names, role checks, argument bounds and deadlines, reexported by the service.
@@ -1448,6 +1469,10 @@ The native window's keyboard commands come from one registry, `splitty_client_co
 Viewer annotations live in two places. `splitty-client-core::annotations` describes a selected passage as a target, turns the server's anchors into passages of the shown text (`Anchor::from_wire`; documents are decoded with the core's `viewer_source_text`, so the server's byte ranges index the window's text directly) and holds the hand-over policy (`review_delivery`). `workspace/viewer/notes.rs` holds the list beside the document, the field and the marks, and sends `Annotate`, `AnchorViewer`, `ReviewViewer` and `AnswerReview` commands; the worker turns them into screen operations, `viewer.anchor`, `viewer.review` and `viewer.review_answer`, and reports `viewer.anchored` and `viewer.reviewed` as `Update::ViewerAnchors` and `Update::ViewerReview`. The window asks for anchors when the version shown or the targets change and lists the annotations in the answer's order; copying, sending and answering ask for the review and continue with it under a token. On a host without `viewer-reviews-v1` the notes say the host needs an update. A snapshot's `reviewWait` is read from its JSON into `ScreenModel::review_wait`, because the typed record never reads a wait back. A viewer pane has no session, so drags and group actions identify it by `identity_for`, the session or the pane itself.
 
 ### Native window chrome
+
+Every window of the application is opened with the decoration chosen when the
+application started (`WindowLook` in `main.rs`); macOS and Windows cannot
+change it for an open window.
 
 The local service independently stores interface style, window decoration,
 client title-bar colors and window-button policy. The startup appearance cache

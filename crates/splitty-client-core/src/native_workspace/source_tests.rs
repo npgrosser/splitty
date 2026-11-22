@@ -431,6 +431,7 @@ async fn startup_close_consent_survives_workspace_publication_without_ui_consump
 fn absent_or_rewrapped_authority_never_admits_a_non_lifecycle_intent() {
     let current = SourceWorkspace::new(Uuid::new_v4());
     let missing = Command {
+        window: crate::workspace::WindowId::FIRST,
         source: None,
         kind: CommandKind::CreateScreen(Some("x".into())),
     };

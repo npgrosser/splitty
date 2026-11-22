@@ -14,7 +14,8 @@ pub(super) struct SourceEffects {
     pub observation_error: Option<String>,
     pub changed: bool,
     pub close_window: bool,
-    pub select_created: Option<ScreenKey>,
+    /// The Screen a window created, to show in that window.
+    pub select_created: Option<(WindowId, ScreenKey)>,
     pub follow_remote_creation: Option<RemoteScreenCreateRequest>,
     pub updates: Vec<Update>,
 }
@@ -22,6 +23,15 @@ impl SourceEffects {
     fn push(&mut self, update: Update) {
         self.updates.push(update);
     }
+}
+/// What one window shows of a source.
+#[derive(Default)]
+struct ShownByWindow {
+    /// The Screen the window reported its panes for.
+    screen: Option<String>,
+    panes: HashSet<String>,
+    /// The tab groups, as (Screen, slot), of those panes.
+    slots: HashSet<(String, String)>,
 }
 pub(super) struct SourceRuntime {
     pub client: Client,
@@ -33,10 +43,13 @@ pub(super) struct SourceRuntime {
     workspace_refresh: WorkspaceRefresh,
     attached: HashSet<String>,
     visible: HashSet<String>,
+    /// The panes the client's windows show, together.
     desired_visible: HashSet<String>,
-    /// The tab groups, as (Screen, slot), of the panes the window shows.
+    /// The tab groups, as (Screen, slot), of the panes the windows show.
     /// Their other terminal tabs follow the shown tab's measured size.
     shown_slots: HashSet<(String, String)>,
+    /// What each window shows of this source: its panes and their tab groups.
+    shown_by: HashMap<WindowId, ShownByWindow>,
     owned_sessions: HashSet<String>,
     closed_sessions: HashSet<String>,
     pending_hide: HashSet<String>,
@@ -47,8 +60,8 @@ pub(super) struct SourceRuntime {
     redraw_pending: HashSet<String>,
     /// What this connection's server still has to hear for its size policy.
     presence: presence::ConnectionPresence,
-    /// The window's presence, read when a welcome is greeted.
-    window_presence: presence::WindowPresenceCell,
+    /// The windows' presence, read when a welcome is greeted.
+    window_presence: presence::WindowPresences,
     /// The latest valid PTY size of each owned session (`size` events).
     pty_sizes: HashMap<String, presence::PtySize>,
     /// The size the window last reported for each session's pane, in the
@@ -61,7 +74,7 @@ pub(super) struct SourceRuntime {
     control_error: Option<String>,
     last_close_request: u64,
     pending_close: Option<PendingClose>,
-    select_created: Option<String>,
+    select_created: Option<(WindowId, String)>,
     files: files::FileTransfers,
     viewers: viewers::Viewers,
     editors: editors::EditorRequests,
@@ -85,13 +98,14 @@ impl SourceRuntime {
             visible: HashSet::new(),
             desired_visible: HashSet::new(),
             shown_slots: HashSet::new(),
+            shown_by: HashMap::new(),
             owned_sessions: HashSet::new(),
             closed_sessions: HashSet::new(),
             pending_hide: HashSet::new(),
             pending_resize: HashSet::new(),
             redraw_pending: HashSet::new(),
             presence: presence::ConnectionPresence::default(),
-            window_presence: presence::WindowPresenceCell::default(),
+            window_presence: presence::WindowPresences::default(),
             pty_sizes: HashMap::new(),
             sizes: HashMap::new(),
             reported: HashMap::new(),
@@ -109,8 +123,8 @@ impl SourceRuntime {
     }
     /// Greet welcomes with the presence of this window; until set, the
     /// window counts as not in use.
-    pub fn with_window_presence(mut self, presence: presence::WindowPresenceCell) -> Self {
-        self.window_presence = presence;
+    pub fn with_window_presence(mut self, presence: impl Into<presence::WindowPresences>) -> Self {
+        self.window_presence = presence.into();
         self
     }
     /// The user acted in the window while it showed a Screen of this source.
@@ -127,9 +141,22 @@ impl SourceRuntime {
     pub fn id(&self) -> SourceId {
         self.owner.source_id()
     }
-    pub fn withdraw_visibility(&mut self) {
-        self.desired_visible.clear();
-        self.shown_slots.clear();
+    /// Window `window` no longer shows what it reported.
+    pub fn withdraw_visibility(&mut self, window: WindowId) {
+        self.shown_by.remove(&window);
+    }
+    /// The panes of `screen` that window `from` shows are shown by window
+    /// `to` from now on, until `to` reports what it measures.
+    pub fn move_visibility(&mut self, from: WindowId, to: WindowId, screen: &str) {
+        if self
+            .shown_by
+            .get(&from)
+            .is_some_and(|shown| shown.screen.as_deref() == Some(screen))
+        {
+            if let Some(shown) = self.shown_by.remove(&from) {
+                self.shown_by.insert(to, shown);
+            }
+        }
     }
     pub fn has_pending_close(&self) -> bool {
         self.pending_close.is_some()
@@ -207,6 +234,7 @@ impl SourceRuntime {
         command: Command,
     ) -> anyhow::Result<SourceEffects> {
         let mut out = SourceEffects::default();
+        let sender = command.window();
         // Nothing reaches a server that did not announce what the command needs.
         let remote = window
             .source(self.id())
@@ -487,18 +515,25 @@ impl SourceRuntime {
                     if screen == &window.shown_key()
                         && *route_generation == model.route_generation()
                     {
-                        self.desired_visible = panes
+                        let panes: HashSet<String> = panes
                             .iter()
                             .filter(|pane| model.is_displayed_pane(pane))
                             .cloned()
                             .collect();
                         let shown = model.shown_screen_id().unwrap_or_default();
-                        self.shown_slots = self
-                            .desired_visible
+                        let slots = panes
                             .iter()
                             .filter_map(|pane| model.slot_for(pane))
                             .map(|slot| (shown.to_owned(), slot.to_owned()))
                             .collect();
+                        self.shown_by.insert(
+                            command.window(),
+                            ShownByWindow {
+                                screen: Some(shown.to_owned()),
+                                panes,
+                                slots,
+                            },
+                        );
                     }
                 }
                 return Ok(out);
@@ -891,6 +926,9 @@ impl SourceRuntime {
             | CommandKind::UpdateSettings { .. }
             | CommandKind::SetDrawerVisibility { .. }
             | CommandKind::SetColorScheme { .. }
+            | CommandKind::OpenWindow { .. }
+            | CommandKind::CloseWindow
+            | CommandKind::MoveScreenToWindow { .. }
             | CommandKind::RequestClose { .. } => {
                 unreachable!("close is handled before normal commands")
             }
@@ -900,7 +938,7 @@ impl SourceRuntime {
                     None => model.create_default_screen(&self.client),
                 }
                 .map(|ids| {
-                    self.select_created = Some(ids.screen_id);
+                    self.select_created = Some((sender, ids.screen_id));
                 });
                 if result.is_ok() {
                     out.changed = true;
@@ -1171,9 +1209,9 @@ impl SourceRuntime {
         let local = window
             .source(self.id())
             .is_some_and(|source| source.kind() == SourceKind::Local);
-        let shown_here = window
-            .shown_key()
-            .is_some_and(|key| key.source_id() == self.id());
+        // An outcome a window waits for changes what that window shows.
+        window.enter_awaited(self.id());
+        let shown_in = window.windows_showing(self.id());
         let mut model = Some(
             window
                 .source_mut(self.id())
@@ -1231,7 +1269,7 @@ impl SourceRuntime {
                     // Greeted in the next reconcile, before any attach.
                     self.presence.welcome(
                         presence::decides_sizes(json),
-                        shown_here && self.window_presence.get().in_use(),
+                        self.window_presence.in_use(&shown_in),
                     );
                     self.files.welcome(&self.client, json);
                     self.editors.welcome(&self.client, json);
@@ -1658,6 +1696,9 @@ impl SourceRuntime {
                     self.pending_hide.insert(route.session_id.clone());
                 }
                 self.desired_visible.remove(&route.pane_id);
+                for shown in self.shown_by.values_mut() {
+                    shown.panes.remove(&route.pane_id);
+                }
             }
         }
         if let Some(result) = delta.template {
@@ -1685,14 +1726,14 @@ impl SourceRuntime {
         if let Some(model) = &model {
             out.follow_remote_creation = model.remote_creation_follow();
         }
-        if let Some(created) = &self.select_created {
+        if let Some((creator, created)) = &self.select_created {
             let source = model.as_ref().expect("runtime source");
             if source
                 .screens()
                 .iter()
                 .any(|screen| screen.id.as_str() == created)
             {
-                out.select_created = Some(source.screen_key(created));
+                out.select_created = Some((*creator, source.screen_key(created)));
                 self.select_created = None;
             }
         }
@@ -1728,34 +1769,84 @@ impl SourceRuntime {
     /// while that is not measured yet. A group whose shown tab is not a
     /// terminal has none, and a server that does not decide sizes gets none:
     /// without `hide` a report there would claim the PTY for good.
-    fn followers(&mut self, model: &SourceWorkspace) -> HashMap<String, Option<(u16, u16)>> {
+    /// `shown` is what one window shows, and `model` the source as that
+    /// window sees it.
+    fn followers(
+        &self,
+        shown: &mut ShownByWindow,
+        model: &SourceWorkspace,
+    ) -> HashMap<String, Option<(u16, u16)>> {
         let mut followers = HashMap::new();
         if !self.presence.supported() {
-            self.shown_slots.clear();
+            shown.slots.clear();
             return followers;
         }
-        let shown = model.shown_screen_id();
-        self.shown_slots.retain(|(screen, slot)| {
-            shown == Some(screen.as_str()) && model.displayed_tabs(slot).is_some()
+        let screen = model.shown_screen_id();
+        shown.slots.retain(|(of, slot)| {
+            screen == Some(of.as_str()) && model.displayed_tabs(slot).is_some()
         });
-        for (_, slot) in &self.shown_slots {
+        for (_, slot) in &shown.slots {
             let Some((selected, tabs)) = model.displayed_tabs(slot) else {
                 continue;
             };
             let Some(session) = model.session_for(selected) else {
                 continue;
             };
-            let size = self
-                .desired_visible
+            let size = shown
+                .panes
                 .contains(selected)
                 .then(|| self.sizes.get(session).copied())
                 .flatten();
             for tab in tabs {
-                if !self.desired_visible.contains(tab) && model.session_for(tab).is_some() {
+                if !shown.panes.contains(tab) && model.session_for(tab).is_some() {
                     followers.insert(tab.to_owned(), size);
                 }
             }
         }
+        followers
+    }
+    /// What the windows show of this source, together: each window's panes
+    /// checked against the Screen that window shows, and the background tabs
+    /// that follow them. A window that shows no Screen of this source, or
+    /// that is hidden while another window is visible, shows nothing.
+    fn shown_together(
+        &mut self,
+        window: &mut WindowWorkspace,
+    ) -> HashMap<String, Option<(u16, u16)>> {
+        let back = window.window();
+        let hidden = self.window_presence.hidden_beside_visible();
+        let mut by_window = std::mem::take(&mut self.shown_by);
+        by_window.retain(|id, _| window.has_window(*id));
+        let mut followers = HashMap::new();
+        self.desired_visible.clear();
+        self.shown_slots.clear();
+        for (id, shown) in &mut by_window {
+            window.enter(*id);
+            let here = window
+                .shown_key()
+                .is_some_and(|key| key.source_id() == self.id());
+            let Some(model) = window.source(self.id()).filter(|_| here) else {
+                shown.panes.clear();
+                shown.slots.clear();
+                continue;
+            };
+            shown.panes.retain(|pane| {
+                model.screen_for(pane) == model.shown_screen_id()
+                    && model.session_for(pane).is_some()
+                    && model.is_displayed_pane(pane)
+            });
+            // What a hidden window showed is kept, and counts again once the
+            // window is visible, without the window reporting anew.
+            if hidden.contains(id) {
+                continue;
+            }
+            followers.extend(self.followers(shown, model));
+            self.desired_visible.extend(shown.panes.iter().cloned());
+            self.shown_slots.extend(shown.slots.iter().cloned());
+        }
+        by_window.retain(|_, shown| !shown.panes.is_empty() || !shown.slots.is_empty());
+        self.shown_by = by_window;
+        window.enter(back);
         followers
     }
     pub fn reconcile(&mut self, window: &mut WindowWorkspace) -> anyhow::Result<SourceEffects> {
@@ -1767,13 +1858,7 @@ impl SourceRuntime {
             out.push(Update::PortCatalogResult { source: self.owner, request_id: *request_id, error: Some("Host did not confirm the change; reconnect to check its catalog before retrying".into()) });
             false
         });
-        let globally_shown = window
-            .shown_key()
-            .is_some_and(|key| key.source_id() == self.id());
-        if !globally_shown {
-            self.desired_visible.clear();
-            self.shown_slots.clear();
-        }
+        let followers = self.shown_together(window);
         if let Some(model) = window.source(self.id()) {
             let desired_sessions: HashSet<String> = model
                 .routes()
@@ -1790,12 +1875,6 @@ impl SourceRuntime {
                 .retain(|session, _| desired_sessions.contains(session));
             self.reported
                 .retain(|session, _| desired_sessions.contains(session));
-            self.desired_visible.retain(|pane| {
-                model.screen_for(pane) == model.shown_screen_id()
-                    && model.session_for(pane).is_some()
-                    && model.is_displayed_pane(pane)
-            });
-            let followers = self.followers(model);
             // A background tab is kept reported while it follows a measured
             // size, and while its group's size is not measured yet once it
             // has been reported (a tab switch, a route refresh).
@@ -2227,9 +2306,14 @@ mod tests {
             .any(|pane| pane.session_id.is_some()));
         request.cancel_follow(); // Between event preparation and publication, as destination navigation can do.
         let (updates, mut receive) = mpsc::channel(16);
-        publish_source_effects(&mut window, effects, &updates, &AtomicBool::new(false))
-            .await
-            .unwrap();
+        publish_source_effects(
+            &mut window,
+            effects,
+            &outbox::Outbox::new(updates.clone()),
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
         while receive.try_recv().is_ok() {}
         assert_eq!(window.shown_key(), Some(local_key));
         let key = window.source(id).unwrap().screen_key(&created);
@@ -3356,6 +3440,136 @@ mod tests {
             visible: true,
             focused: true,
         }
+    }
+
+    /// What window `in_window` sends once it measured the pane it shows.
+    fn report_in(
+        shown: &mut ShownWindow,
+        in_window: WindowId,
+        screen: &ScreenKey,
+        pane: &str,
+        (cols, rows): (u16, u16),
+    ) {
+        let back = shown.window.window();
+        assert!(shown.window.enter(in_window));
+        let model = shown.window.source(shown.id).unwrap();
+        let (token, generation) = (model.source_token(), model.route_generation());
+        let route = TerminalToken::new(token, pane, model.session_for(pane).unwrap());
+        for kind in [
+            CommandKind::Visible {
+                screen: Some(screen.clone()),
+                route_generation: generation,
+                panes: vec![pane.to_owned()],
+            },
+            CommandKind::ResizePane {
+                route,
+                screen: screen.clone(),
+                route_generation: generation,
+                cols,
+                rows,
+            },
+        ] {
+            shown
+                .source
+                .command(
+                    &mut shown.window,
+                    Command::new(token, kind).in_window(in_window),
+                )
+                .unwrap();
+            shown.source.reconcile(&mut shown.window).unwrap();
+        }
+        shown.window.enter(back);
+    }
+
+    #[tokio::test]
+    async fn each_windows_panes_are_reported_and_a_hidden_window_beside_a_visible_one_gives_its_sizes_back(
+    ) {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        const SECOND: WindowId = WindowId::new(1);
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let work = client.create_screen("Screen 1").unwrap();
+        let logs = client.create_screen("Screen 2").unwrap();
+        // The first window shows one Screen of the connection in use.
+        let mut shown = ShownWindow::open(client, &work.screen_id, in_use(), (50, 15)).await;
+        shown.source.acted();
+        let session = shown.session.clone();
+        let other = client_in_use(&service, &session, 60, 20).await;
+        assert_eq!(shown.stty("FIRST").await, (50, 15));
+
+        // A second window of the same client shows another Screen of it.
+        shown.window.open_window(SECOND).unwrap();
+        let second_presence = presence::WindowPresenceCell::default();
+        second_presence.set(in_use());
+        shown.source.window_presence.insert(SECOND, second_presence);
+        assert!(shown.window.enter(SECOND));
+        let logs_key = shown
+            .window
+            .source(shown.id)
+            .unwrap()
+            .screen_key(&logs.screen_id);
+        let token = shown.token;
+        shown.window.open_existing(token, &logs_key).unwrap();
+        assert!(shown.window.enter(WindowId::FIRST));
+        let id = shown.id;
+        shown
+            .pump("the second window's pane", |this| {
+                let model = this.window.source(id).unwrap();
+                model.routes().len() == 2
+                    && model
+                        .routes()
+                        .iter()
+                        .all(|route| this.source.attached.contains(&route.session_id))
+            })
+            .await;
+        let route = shown
+            .window
+            .source(id)
+            .unwrap()
+            .routes()
+            .into_iter()
+            .find(|route| route.session_id != session)
+            .unwrap();
+        report_in(&mut shown, SECOND, &logs_key, &route.pane_id, (70, 25));
+        shown.report();
+        assert_eq!(
+            shown.source.reported.get(&route.session_id),
+            Some(&(70, 25))
+        );
+        assert_eq!(shown.source.reported.get(&session), Some(&(50, 15)));
+        assert_eq!(shown.window.windows_showing(id), [WindowId::FIRST, SECOND]);
+
+        // The first window is hidden while the second stays visible: its
+        // session gives its size back, and the second's keeps its own.
+        shown.presence.set(presence::WindowPresence {
+            visible: false,
+            focused: false,
+        });
+        assert_eq!(shown.stty_settled("HIDDEN", (60, 20)).await, (60, 20));
+        assert_eq!(shown.source.reported.get(&session), None);
+        assert_eq!(
+            shown.source.reported.get(&route.session_id),
+            Some(&(70, 25))
+        );
+
+        // Visible again, it reports what it showed without measuring anew.
+        shown.presence.set(in_use());
+        assert_eq!(shown.stty_settled("BACK", (50, 15)).await, (50, 15));
+        assert_eq!(shown.source.reported.get(&session), Some(&(50, 15)));
+
+        // A window that shows another Screen hides only what it showed.
+        shown.source.withdraw_visibility(SECOND);
+        shown.source.reconcile(&mut shown.window).unwrap();
+        assert_eq!(shown.source.reported.get(&route.session_id), None);
+        assert_eq!(shown.source.reported.get(&session), Some(&(50, 15)));
+
+        drop(other);
+        shown.source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 
     fn pty(cols: u16, rows: u16) -> presence::PtySize {

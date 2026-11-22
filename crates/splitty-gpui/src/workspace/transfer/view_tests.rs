@@ -96,7 +96,7 @@ fn with_model(
     window.update(|window, cx| {
         view.update(cx, |workspace, cx| {
             workspace.model = Some(model);
-            workspace.commands = commands;
+            workspace.commands = commands.into();
             workspace.destination = Destination::Screens;
             cx.notify();
         });

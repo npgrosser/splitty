@@ -117,7 +117,17 @@ pub struct Prompts {
     dialogs: HashMap<String, (AnyWindowHandle, WeakEntity<Askpass>)>,
 }
 
+/// The application's dialogs, shared by its windows: a question is asked
+/// once however many windows show the local service.
+impl gpui_kit::Global for Prompts {}
+
 impl Prompts {
+    /// The number of questions a dialog is open for.
+    #[cfg(all(test, feature = "ui-test-support"))]
+    pub(crate) fn asked(&self) -> usize {
+        self.dialogs.len()
+    }
+
     /// Show `list`, the questions the service waits on now: a dialog for each
     /// new one; a dialog whose question went closes without answering it. A
     /// dialog the user closed stays closed while its cancel is on its way.

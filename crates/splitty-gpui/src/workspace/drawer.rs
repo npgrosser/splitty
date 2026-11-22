@@ -491,7 +491,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(16);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model.clone(), window, cx);
                 });
                 window.draw(cx).clear(cx);
@@ -620,7 +620,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -659,7 +659,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -695,7 +695,7 @@ mod view_tests {
                 let (commands, mut receiver) = mpsc::channel(2);
                 window.update(|window, cx| {
                     view.update(cx, |workspace, _| {
-                        workspace.commands = commands;
+                        workspace.commands = commands.into();
                         workspace.model = Some(model);
                         workspace.destination = Destination::Screens;
                     });
@@ -893,7 +893,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -956,7 +956,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(2);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -997,7 +997,7 @@ mod view_tests {
             window.update(|window, cx| {
                 window.activate_window();
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -1054,7 +1054,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                     workspace.focus.focus(window, cx);
@@ -1129,7 +1129,7 @@ mod view_tests {
             };
             window.update(|_, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.destination = Destination::Screens;
                 });
             });
@@ -1210,7 +1210,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(3);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -1295,7 +1295,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model.clone(), window, cx);
                     workspace.drawer_visible = true;
                 });
@@ -1396,7 +1396,7 @@ mod view_tests {
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
                     workspace.reconcile(model.clone(), window, cx);
-                    workspace.commands = commands.clone();
+                    workspace.commands = commands.clone().into();
                     workspace.start_captured_rename(owner, source, &remote, window, cx);
                     workspace
                         .rename
@@ -1488,7 +1488,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(2);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model, window, cx);
                     workspace.drawer_visible = true;
                 });
@@ -1652,7 +1652,7 @@ mod view_tests {
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
                     workspace.model = Some(model);
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.destination = Destination::Screens;
                     cx.notify();
                 });
@@ -1753,7 +1753,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(2);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -1817,7 +1817,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.apply_appearance(
                         &settings_snapshot_with_pin(owner, 1, Availability::Full, false),
@@ -1956,7 +1956,7 @@ mod view_tests {
             window.update(|window, cx| {
                 cx.set_reduce_motion(true);
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(model);
                     workspace.apply_appearance(
                         &settings_snapshot_with_pin(owner, 1, Availability::Full, false),
@@ -2088,7 +2088,7 @@ mod view_tests {
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
                     workspace.model = Some(model);
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.destination = Destination::Screens;
                     cx.notify();
                 });
@@ -2200,7 +2200,7 @@ mod view_tests {
             window.update(|window, cx| {
                 cx.set_reduce_motion(true);
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model, window, cx);
                     workspace.apply_appearance(
                         &settings_snapshot_with_pin(owner, 1, Availability::Full, false),
@@ -2495,7 +2495,7 @@ impl Workspace {
     }
 
     /// A Screen's commands, the same from its row and its More button.
-    fn screen_menu_entries(&self, key: &ScreenKey) -> Vec<MenuEntry> {
+    fn screen_menu_entries(&self, key: &ScreenKey, cx: &App) -> Vec<MenuEntry> {
         let Some(model) = self.model.as_ref() else {
             return Vec::new();
         };
@@ -2533,6 +2533,29 @@ impl Workspace {
                 })
                 .enabled(enabled),
             );
+        }
+        // The windows of the application hand Screens to each other.
+        if crate::windows::Windows::serving(cx) {
+            let screen = key.clone();
+            entries.push(
+                MenuEntry::new(
+                    "move-to-new-window",
+                    "Move to New Window",
+                    move |this, _, cx| this.move_screen_to_new_window(screen.clone(), cx),
+                )
+                .separated(),
+            );
+            for (index, (target, title)) in crate::windows::Windows::others(self.window_id, cx)
+                .into_iter()
+                .enumerate()
+            {
+                let screen = key.clone();
+                entries.push(MenuEntry::new(
+                    format!("move-to-window-{index}"),
+                    format!("Move to Window \u{201c}{title}\u{201d}"),
+                    move |this, _, cx| this.move_screen_to_window(screen.clone(), target, cx),
+                ));
+            }
         }
         let screen = key.clone();
         let close = MenuEntry::new(
@@ -2589,7 +2612,7 @@ impl Workspace {
         {
             return;
         }
-        let entries = self.screen_menu_entries(key);
+        let entries = self.screen_menu_entries(key, cx);
         self.open_drawer_popover(
             PopoverKind::Actions(entries),
             PopoverAnchor::Pointer(position),

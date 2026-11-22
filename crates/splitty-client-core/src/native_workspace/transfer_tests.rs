@@ -293,6 +293,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
         .unwrap();
     commands
         .try_send(Command {
+            window: crate::workspace::WindowId::FIRST,
             source: Some(scope),
             kind: CommandKind::RequestClose {
                 plan,
@@ -309,6 +310,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
                 close_id += 1;
                 commands
                     .send(Command {
+                        window: crate::workspace::WindowId::FIRST,
                         source: Some(scope),
                         kind: CommandKind::RequestClose {
                             plan: latest.assess_close(close_id, CloseTarget::Window).unwrap(),
@@ -528,6 +530,7 @@ async fn worker_transfers_a_tab_group_after_a_refused_one() {
     let mut close_id = 900;
     commands
         .send(Command {
+            window: crate::workspace::WindowId::FIRST,
             source: Some(scope),
             kind: CommandKind::RequestClose {
                 plan: latest.assess_close(close_id, CloseTarget::Window).unwrap(),
@@ -543,6 +546,7 @@ async fn worker_transfers_a_tab_group_after_a_refused_one() {
                 close_id += 1;
                 commands
                     .send(Command {
+                        window: crate::workspace::WindowId::FIRST,
                         source: Some(scope),
                         kind: CommandKind::RequestClose {
                             plan: latest.assess_close(close_id, CloseTarget::Window).unwrap(),

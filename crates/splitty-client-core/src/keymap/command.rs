@@ -47,6 +47,10 @@ pub enum Command {
     RenameScreen,
     MoveScreenUp,
     MoveScreenDown,
+    /// Hand the shown Screen to a new window of the application.
+    MoveScreenToNewWindow,
+    /// Hand the shown Screen to the application's next window.
+    MoveScreenToNextWindow,
     NewTab,
     NewTabWithProfile,
     CloseTab,
@@ -85,6 +89,10 @@ pub enum Command {
     ZoomOut,
     ZoomReset,
     ToggleFullScreen,
+    /// Another window of the application, with a new local Screen.
+    NewWindow,
+    /// Close the window; its Screens go to another window while there is one.
+    CloseWindow,
     Quit,
 }
 
@@ -106,6 +114,8 @@ impl Command {
             RenameScreen,
             MoveScreenUp,
             MoveScreenDown,
+            MoveScreenToNewWindow,
+            MoveScreenToNextWindow,
             NewTab,
             NewTabWithProfile,
             CloseTab,
@@ -146,6 +156,8 @@ impl Command {
             ZoomOut,
             ZoomReset,
             ToggleFullScreen,
+            NewWindow,
+            CloseWindow,
             Quit,
         ]);
         all
@@ -174,6 +186,8 @@ impl Command {
             RenameScreen => "screen.rename",
             MoveScreenUp => "screen.move-up",
             MoveScreenDown => "screen.move-down",
+            MoveScreenToNewWindow => "screen.move-to-new-window",
+            MoveScreenToNextWindow => "screen.move-to-next-window",
             NewTab => "tab.new",
             NewTabWithProfile => "tab.new-with-profile",
             CloseTab => "tab.close",
@@ -211,6 +225,8 @@ impl Command {
             ZoomOut => "zoom.out",
             ZoomReset => "zoom.reset",
             ToggleFullScreen => "window.fullscreen",
+            NewWindow => "window.new",
+            CloseWindow => "window.close",
             Quit => "window.quit",
         };
         id.to_owned()
@@ -244,6 +260,8 @@ impl Command {
             RenameScreen => "Rename Screen",
             MoveScreenUp => "Move Screen Up",
             MoveScreenDown => "Move Screen Down",
+            MoveScreenToNewWindow => "Move Screen to New Window",
+            MoveScreenToNextWindow => "Move Screen to Next Window",
             NewTab => "New Tab",
             NewTabWithProfile => "New Tab with Profile…",
             CloseTab => "Close Tab",
@@ -281,6 +299,8 @@ impl Command {
             ZoomOut => "Zoom Out",
             ZoomReset => "Reset Zoom",
             ToggleFullScreen => "Toggle Full Screen",
+            NewWindow => "New Window",
+            CloseWindow => "Close Window",
             Quit => "Quit",
         };
         title.to_owned()
@@ -289,8 +309,16 @@ impl Command {
     pub fn category(self) -> Category {
         use Command::*;
         match self {
-            NewScreen | NextScreen | PreviousScreen | SelectScreen(_) | CloseScreen
-            | RenameScreen | MoveScreenUp | MoveScreenDown => Category::Screens,
+            NewScreen
+            | NextScreen
+            | PreviousScreen
+            | SelectScreen(_)
+            | CloseScreen
+            | RenameScreen
+            | MoveScreenUp
+            | MoveScreenDown
+            | MoveScreenToNewWindow
+            | MoveScreenToNextWindow => Category::Screens,
             NewTab | NewTabWithProfile | CloseTab | CloseOtherTabs | NextTab | PreviousTab
             | MoveTabRight | MoveTabLeft | MoveTabToScreen => Category::Tabs,
             SplitRight | SplitDown | FocusPane(_) | MaximizePane | FloatPane | ArrangePanes
@@ -307,7 +335,9 @@ impl Command {
             | OpenSelectionInViewer => Category::Terminal,
             ToggleDrawer | FocusDrawer | Hosts | Templates | Settings | CommandPalette
             | KeyboardShortcuts | ConnectHost => Category::View,
-            ZoomIn | ZoomOut | ZoomReset | ToggleFullScreen | Quit => Category::Window,
+            ZoomIn | ZoomOut | ZoomReset | ToggleFullScreen | NewWindow | CloseWindow | Quit => {
+                Category::Window
+            }
         }
     }
 }
@@ -339,6 +369,9 @@ fn default_texts(platform: Platform, command: Command) -> Vec<String> {
         RenameScreen => with("shift+r"),
         MoveScreenUp
         | MoveScreenDown
+        | MoveScreenToNewWindow
+        | MoveScreenToNextWindow
+        | CloseWindow
         | CloseOtherTabs
         | CopyWorkingDirectory
         | OpenSelectionInViewer
@@ -382,6 +415,7 @@ fn default_texts(platform: Platform, command: Command) -> Vec<String> {
         ZoomOut => either(&["ctrl+-"], &["cmd+-"]),
         ZoomReset => either(&["ctrl+0"], &["cmd+0"]),
         ToggleFullScreen => either(&["f11"], &["ctrl+cmd+f"]),
+        NewWindow => either(&["ctrl+shift+n"], &["cmd+n"]),
         Quit => either(&[], &["cmd+q"]),
     }
 }

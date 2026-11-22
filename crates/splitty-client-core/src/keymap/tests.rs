@@ -115,6 +115,20 @@ const TABLE: &[Row] = &[
     ),
     ("screen.move-up", "Move Screen Up", "Screens", &[], None),
     ("screen.move-down", "Move Screen Down", "Screens", &[], None),
+    (
+        "screen.move-to-new-window",
+        "Move Screen to New Window",
+        "Screens",
+        &[],
+        None,
+    ),
+    (
+        "screen.move-to-next-window",
+        "Move Screen to Next Window",
+        "Screens",
+        &[],
+        None,
+    ),
     ("tab.new", "New Tab", "Tabs", &["mod+t"], None),
     (
         "tab.new-with-profile",
@@ -342,6 +356,14 @@ const TABLE: &[Row] = &[
         &["f11"],
         Some(&["ctrl+cmd+f"]),
     ),
+    (
+        "window.new",
+        "New Window",
+        "Window",
+        &["ctrl+shift+n"],
+        Some(&["cmd+n"]),
+    ),
+    ("window.close", "Close Window", "Window", &[], None),
     ("window.quit", "Quit", "Window", &[], Some(&["cmd+q"])),
 ];
 

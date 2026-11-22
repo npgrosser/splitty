@@ -1743,7 +1743,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(Uuid::new_v4()));
                     let owner = workspace.model.as_ref().unwrap().lifecycle_token();
                     workspace.ports.set_owner(owner);
@@ -1818,7 +1818,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.ports.set_owner(
                         workspace
@@ -1960,7 +1960,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(8);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.ports.set_owner(
                         workspace
@@ -2037,7 +2037,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(1);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.ports.set_owner(
                         workspace
@@ -2108,7 +2108,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(1);
             window.update(|_window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.ports.set_owner(model.lifecycle_token());
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
@@ -2185,7 +2185,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(1);
             window.update(|_, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.ports.set_owner(model.lifecycle_token());
                     workspace.model = Some(model);
                     workspace.remote_link(
@@ -2304,7 +2304,7 @@ mod tests {
                 let (commands, mut receiver) = mpsc::channel(4);
                 window.update(|window, cx| {
                     view.update(cx, |workspace, _cx| {
-                        workspace.commands = commands;
+                        workspace.commands = commands.into();
                         workspace.model = Some(WindowWorkspace::new(owner));
                         let token = workspace
                             .model
@@ -2361,7 +2361,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     let token = workspace.model.as_ref().unwrap().local_source().source_token();
                     workspace.ports.set_owner(token);
@@ -2400,7 +2400,7 @@ mod tests {
             let (commands, mut receiver) = mpsc::channel(4);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     let token = workspace.model.as_ref().unwrap().local_source().source_token();
                     workspace.ports.set_owner(token);
@@ -2479,7 +2479,7 @@ mod tests {
                     let owner = model.lifecycle_token();
                     let source = model.execution_token(screen.source_id()).unwrap();
                     workspace.model = Some(model);
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.destination = Destination::Hosts;
                     workspace.ports.set_owner(owner);
                     workspace.ports.accept(Arc::new(

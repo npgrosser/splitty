@@ -790,7 +790,7 @@ mod view_tests {
         window.update(|window, cx| {
             cx.set_reduce_motion(true);
             view.update(cx, |view, cx| {
-                view.commands = commands;
+                view.commands = commands.into();
                 view.reconcile(model, window, cx);
             });
             window.draw(cx).clear(cx);

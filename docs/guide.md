@@ -26,6 +26,21 @@ tests beside them, locally or on remote machines.
 `Mod` is Cmd on macOS and Alt on Linux and Windows. Every command, its key
 and how to change it are in [Keyboard](keyboard.md).
 
+## Windows
+
+**Ctrl+Shift+N** (macOS: **Cmd+N**) opens another window of the same
+application, with a new screen. Every screen is in exactly one window, and
+each window lists its own screens in its drawer. A screen's menu in the drawer
+moves it to another window or to a new one, as do **Move Screen to New
+Window** and **Move Screen to Next Window** in the command palette; its
+terminals keep running and keep their history. Closing a window while another
+one is open closes nothing else: its screens go to the window you used last
+before it. Closing the last window, or **Quit**, ends the application.
+
+Settings, theme, zoom and key bindings are the application's and apply in
+every window. Starting the app a second time is something else: that is a
+second, independent application with screens of its own.
+
 ## Templates
 
 **Templates** (Mod+P) opens the library of saved layouts. Saving the current

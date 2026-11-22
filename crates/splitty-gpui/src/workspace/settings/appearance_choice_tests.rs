@@ -58,7 +58,7 @@ fn setup(
     let (commands, mut receiver) = mpsc::channel(64);
     window.update(|window, cx| {
         view.update(cx, |workspace, cx| {
-            workspace.commands = commands;
+            workspace.commands = commands.into();
             workspace.destination = Destination::Screens;
             workspace.reconcile(model, window, cx);
         });

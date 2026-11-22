@@ -268,8 +268,8 @@ pub(super) struct Remotes<'a> {
     /// Hosts connected at start, each with the Screens to open once its
     /// catalog is known. This demand is not a view's to release.
     restoring: Vec<(HostActionTarget, Vec<String>)>,
-    /// The window's presence, which each host connection greets its welcome with.
-    presence: super::WindowPresenceCell,
+    /// The windows' presence, which each host connection greets its welcome with.
+    presence: super::WindowPresences,
 }
 impl<'a> Remotes<'a> {
     pub fn new(service: &'a OwnedService) -> Self {
@@ -280,12 +280,33 @@ impl<'a> Remotes<'a> {
             cursor: 0,
             cleanup_error: None,
             restoring: Vec::new(),
-            presence: super::WindowPresenceCell::default(),
+            presence: super::WindowPresences::default(),
         }
     }
-    pub fn with_window_presence(mut self, presence: super::WindowPresenceCell) -> Self {
-        self.presence = presence;
+    pub fn with_window_presence(mut self, presence: impl Into<super::WindowPresences>) -> Self {
+        self.presence = presence.into();
         self
+    }
+    /// Window `window` no longer shows what it reported on any host.
+    pub fn withdraw_visibility(&mut self, window: WindowId) {
+        for source in self
+            .hosts
+            .iter_mut()
+            .filter_map(|host| host.source.as_mut())
+        {
+            source.withdraw_visibility(window);
+        }
+    }
+    /// The shown panes of `screen` on host `id` are shown by window `to`.
+    pub fn move_visibility(&mut self, id: SourceId, from: WindowId, to: WindowId, screen: &str) {
+        if let Some(source) = self
+            .hosts
+            .iter_mut()
+            .find(|host| host.action.source_id() == id)
+            .and_then(|host| host.source.as_mut())
+        {
+            source.move_visibility(from, to, screen);
+        }
     }
     /// The user acted while the window showed a Screen of the source `id`.
     pub fn acted(&mut self, id: SourceId) {

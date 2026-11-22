@@ -57,7 +57,7 @@ pub(crate) use window::tests::remote_terminal_fixture;
 pub use window::{
     CatalogState, HostActionTarget, HostDiagnostic, HostPresentation, HostUpdateOffer,
     HostUpdatePlan, HostUpdateState, OpenedScreen, OpenedScreenState, SourceEdit, SourceStatus,
-    WindowRoute, WindowWorkspace,
+    WindowId, WindowRoute, WindowWorkspace,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

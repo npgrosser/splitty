@@ -294,6 +294,66 @@ impl WindowWorkspace {
         Ok(())
     }
 
+    /// Local Screens named by their IDs, each with one running terminal: the
+    /// pane `p-<id>` on the session `s-<id>`. The first one is shown.
+    #[doc(hidden)]
+    pub fn ui_test_local_screens_fixture(
+        &mut self,
+        screens: &[&str],
+    ) -> io::Result<Vec<ScreenKey>> {
+        let owner = self.lifecycle_token();
+        {
+            let mut source = self
+                .source_mut(owner.source_id())
+                .ok_or_else(|| invalid("local fixture source missing"))?;
+            source.set_catalog_supported(true);
+            source.mark_catalog_dirty();
+            source.flush_catalog_request(|| Ok(()))?;
+            source.apply_catalog(
+                owner.connection_id(),
+                &json!({
+                    "type": "mux.workspace_snapshot",
+                    "screens": screens.iter().map(|id| json!({"id": id, "name": id})).collect::<Vec<_>>(),
+                    "activeScreenId": screens.first(),
+                }),
+            )?;
+            for id in screens {
+                let (pane, session) = (format!("p-{id}"), format!("s-{id}"));
+                source.apply_snapshot(
+                    owner.connection_id(),
+                    &json!({"type":"mux.screen_snapshot","screen":{
+                        "id":id,"revision":1,
+                        "root":{"type":"slot","id":format!("slot-{id}"),"paneIds":[pane],"activePaneId":pane},
+                        "panes":{pane.clone():{"id":pane,"sessionId":session}},
+                        "sessions":{session.clone():{"id":session,"status":"running"}}
+                    }}),
+                )?;
+            }
+        }
+        let keys: Vec<ScreenKey> = screens
+            .iter()
+            .map(|id| self.local_source().screen_key(id))
+            .collect();
+        if let Some(first) = keys.first() {
+            self.select(owner, first)?;
+        }
+        Ok(keys)
+    }
+
+    /// What the worker does for another window of the client.
+    #[doc(hidden)]
+    pub fn ui_test_open_window(&mut self, id: WindowId) -> io::Result<()> {
+        self.open_window(id)
+    }
+    #[doc(hidden)]
+    pub fn ui_test_move_screen(&mut self, key: &ScreenKey, target: WindowId) -> io::Result<()> {
+        self.move_screen_to_window(key, target)
+    }
+    #[doc(hidden)]
+    pub fn ui_test_close_window(&mut self, id: WindowId, heir: WindowId) -> io::Result<()> {
+        self.close_window(id, heir)
+    }
+
     #[doc(hidden)]
     pub fn ui_test_local_screen_fixture(&mut self, name: &str) -> io::Result<ScreenKey> {
         let owner = self.lifecycle_token();

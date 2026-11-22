@@ -26,7 +26,7 @@ fn setup(
     let (commands, receiver) = mpsc::channel(capacity);
     window.update(|_, cx| {
         view.update(cx, |workspace, _| {
-            workspace.commands = commands;
+            workspace.commands = commands.into();
             workspace.ports.set_owner(model.lifecycle_token());
             workspace.model = Some(model);
         })

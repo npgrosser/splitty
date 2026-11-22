@@ -13,6 +13,7 @@ mod offscreen;
 mod startup;
 mod terminal;
 mod terminal_engine;
+mod windows;
 mod workspace;
 
 use appearance::titlebar::{
@@ -416,6 +417,77 @@ mod title_tests {
         );
     }
 }
+/// What every window of the application is opened with. macOS and Windows
+/// choose their decoration when the application starts.
+#[derive(Clone, Copy)]
+struct WindowLook {
+    title_bar_style: TitleBarStyle,
+    window_decoration: WindowDecoration,
+    custom_titlebar: bool,
+    /// Whether windows show and keep what the application remembers.
+    remembers: bool,
+}
+impl Global for WindowLook {}
+
+/// Open the platform window of another window of the application, on the
+/// worker `link` leads to. The worker says what the window holds.
+fn open_window(
+    id: splitty_client_core::workspace::WindowId,
+    link: workspace::WorkerLink,
+    cx: &mut App,
+) -> anyhow::Result<()> {
+    let look = *cx.global::<WindowLook>();
+    // Where the platform lets the application place a window, each one opens
+    // a step beside the last instead of exactly over it.
+    let mut bounds = WindowBounds::centered(size(px(1200.), px(760.)), cx);
+    if let WindowBounds::Windowed(bounds) = &mut bounds {
+        let step = px(28. * f32::from(u8::try_from(id.ordinal() % 8).unwrap_or_default()));
+        bounds.origin.x += step;
+        bounds.origin.y += step;
+    }
+    gpui_kit::open_window(
+        WindowOptions {
+            app_id: cfg!(target_os = "linux").then(|| "splitty".into()),
+            window_bounds: Some(bounds),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Splitty".into()),
+                appears_transparent: look.custom_titlebar,
+                traffic_light_position: look.custom_titlebar.then_some(MACOS_TRAFFIC_LIGHTS),
+            }),
+            app_owns_titlebar_drag: look.custom_titlebar,
+            ..Default::default()
+        },
+        cx,
+        move |window, cx| {
+            let workspace = cx.new(|cx| {
+                let mut workspace = workspace::Workspace::new_in_app(
+                    false,
+                    Arc::new(AtomicBool::new(false)),
+                    link,
+                    window,
+                    cx,
+                );
+                if look.remembers {
+                    workspace.remember_what_the_app_keeps(window, cx);
+                }
+                workspace
+            });
+            windows::Windows::register(id, window.window_handle(), &workspace, cx);
+            cx.new(|cx| {
+                RootView::new(
+                    workspace.clone().into(),
+                    Some(&workspace),
+                    look.title_bar_style,
+                    look.window_decoration,
+                    window,
+                    cx,
+                )
+            })
+        },
+    )?;
+    Ok(())
+}
+
 enum OwnedWorker {
     Probe(app::Worker),
     Workspace(splitty_client_core::native_workspace::Worker),
@@ -522,23 +594,23 @@ fn main() -> anyhow::Result<()> {
     if let splitty_client_core::owned_service::LocalBackend::Wsl(launch) = &backend {
         startup::set_wsl_distro(launch.distro());
     }
-    let (startup_title_bar_style, startup_window_decoration) =
-        if !probe && !workspace_smoke && workspace::remembers_for(&backend) {
-            let memory = splitty_client_core::appearance::AppearanceMemory::open(
-                splitty_client_core::appearance::AppearanceMemory::default_path(),
-            );
-            memory
-                .stored()
-                .map(|saved| {
-                    (
-                        TitleBarStyle::from_setting(&saved.title_bar_style),
-                        WindowDecoration::from_setting(&saved.window_decoration),
-                    )
-                })
-                .unwrap_or_default()
-        } else {
-            (TitleBarStyle::default(), WindowDecoration::default())
-        };
+    let remembers = !probe && !workspace_smoke && workspace::remembers_for(&backend);
+    let (startup_title_bar_style, startup_window_decoration) = if remembers {
+        let memory = splitty_client_core::appearance::AppearanceMemory::open(
+            splitty_client_core::appearance::AppearanceMemory::default_path(),
+        );
+        memory
+            .stored()
+            .map(|saved| {
+                (
+                    TitleBarStyle::from_setting(&saved.title_bar_style),
+                    WindowDecoration::from_setting(&saved.window_decoration),
+                )
+            })
+            .unwrap_or_default()
+    } else {
+        (TitleBarStyle::default(), WindowDecoration::default())
+    };
     let custom_titlebar = !probe
         && cfg!(any(target_os = "windows", target_os = "macos"))
         && !startup_window_decoration.native(startup_title_bar_style);
@@ -552,6 +624,12 @@ fn main() -> anyhow::Result<()> {
     application.run(move |cx| {
         gpui_kit::init(cx);
         cx.set_global(DesktopAppearance::detect(cx));
+        cx.set_global(WindowLook {
+            title_bar_style: startup_title_bar_style,
+            window_decoration: startup_window_decoration,
+            custom_titlebar,
+            remembers,
+        });
         terminal::init(cx);
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,
@@ -606,8 +684,9 @@ fn main() -> anyhow::Result<()> {
                     });
                     (view.into(), None)
                 } else {
+                    let mut served = None;
                     let workspace = cx.new(|cx| {
-                        let (workspace, owned_worker) = workspace::Workspace::new(
+                        let (workspace, owned_worker, link, updates) = workspace::Workspace::new(
                             workspace_smoke,
                             reported_outcome,
                             backend,
@@ -615,8 +694,20 @@ fn main() -> anyhow::Result<()> {
                             cx,
                         );
                         *launched_worker.borrow_mut() = Some(OwnedWorker::Workspace(owned_worker));
+                        served = Some((link, updates));
                         workspace
                     });
+                    // Every window of the application reads the worker's one
+                    // stream through the registry; this is its first.
+                    if let Some((link, updates)) = served {
+                        windows::Windows::start(link, updates, open_window, cx);
+                        windows::Windows::register(
+                            splitty_client_core::workspace::WindowId::FIRST,
+                            window.window_handle(),
+                            &workspace,
+                            cx,
+                        );
+                    }
                     (workspace.clone().into(), Some(workspace))
                 };
                 cx.new(|cx| {

@@ -1216,6 +1216,7 @@ async fn remote_creation_navigation_withdraws_browsing_even_when_exact_connectio
         &mut remotes,
         &mut connects,
         request.clone(),
+        crate::workspace::WindowId::FIRST,
     );
     assert!(result.changed);
     assert!(
@@ -1298,6 +1299,7 @@ async fn first_remote_screen_keeps_empty_browsed_host_alive_until_terminal_arriv
         &mut remotes,
         &mut HostConnects::default(),
         request.clone(),
+        crate::workspace::WindowId::FIRST,
     );
     assert!(result.changed);
     assert!(result.updates.is_empty());

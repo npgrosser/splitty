@@ -40,6 +40,8 @@ mod title;
 mod transfer;
 mod unread;
 mod viewer;
+#[cfg(all(test, feature = "ui-test-support"))]
+mod windows_tests;
 
 use crate::appearance::edges::{Edged as _, Relief, Sides};
 use crate::appearance::{NativeAppearance, ThemeCatalog};
@@ -69,7 +71,7 @@ use splitty_client_core::workspace::{
     CloseScope, CloseTarget, FloatingActionOutcome, GroupDrag, LayoutKey, LayoutNode,
     MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ProgramStatusSeen,
     RemoteScreenCreateRequest, ScreenKey, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget,
-    SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
+    SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken, WindowId, WindowWorkspace,
 };
 use splitty_client_core::zoom::{PresentedZoom, Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -96,6 +98,99 @@ use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
 use self::terminal_menu::TerminalMenu;
 use self::transfer::TabContextMenu;
+
+/// The worker's command queue as one window writes to it: every command
+/// carries that window's ID, so the worker acts on what the window shows.
+#[derive(Clone)]
+pub(crate) struct Commands {
+    sender: mpsc::Sender<WorkerCommand>,
+    window: WindowId,
+}
+impl Commands {
+    pub(crate) fn new(sender: mpsc::Sender<WorkerCommand>, window: WindowId) -> Self {
+        Self { sender, window }
+    }
+    pub(crate) fn try_send(&self, command: WorkerCommand) -> Result<(), NotSent> {
+        self.sender
+            .try_send(command.in_window(self.window))
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => NotSent::Full,
+                mpsc::error::TrySendError::Closed(_) => NotSent::Closed,
+            })
+    }
+    /// The same queue, as another window writes to it.
+    pub(crate) fn for_window(&self, window: WindowId) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            window,
+        }
+    }
+}
+/// Why the worker's queue did not take a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotSent {
+    Full,
+    Closed,
+}
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Full => "no available capacity",
+            Self::Closed => "channel closed",
+        })
+    }
+}
+impl std::error::Error for NotSent {}
+
+impl From<mpsc::Sender<WorkerCommand>> for Commands {
+    fn from(sender: mpsc::Sender<WorkerCommand>) -> Self {
+        Self::new(sender, WindowId::FIRST)
+    }
+}
+
+/// Where a window reads its updates: a queue of its own, or its part of the
+/// one stream the worker writes for every window of the application.
+pub(crate) trait UpdateSource {
+    fn next_update(&mut self) -> Option<Update>;
+    /// Whether the worker ended and nothing more will come.
+    fn ended(&self) -> bool;
+}
+impl UpdateSource for mpsc::Receiver<Update> {
+    fn next_update(&mut self) -> Option<Update> {
+        self.try_recv().ok()
+    }
+    fn ended(&self) -> bool {
+        self.is_closed()
+    }
+}
+
+/// The user's key bindings as the application applied them last, which the
+/// next change in any window starts from.
+pub(crate) struct AppliedKeyOverrides(pub(crate) keymap::Overrides);
+impl Global for AppliedKeyOverrides {}
+
+/// What a window shares with the worker that serves it.
+pub(crate) struct WorkerLink {
+    pub(crate) window: WindowId,
+    pub(crate) commands: Commands,
+    pub(crate) presence: WindowPresenceCell,
+    pub(crate) stopping: Arc<AtomicBool>,
+    pub(crate) cleanup_complete: Arc<AtomicBool>,
+    pub(crate) worker_finished: Arc<AtomicBool>,
+}
+impl WorkerLink {
+    /// The link of another window on the same worker.
+    pub(crate) fn for_window(&self, window: WindowId, presence: WindowPresenceCell) -> Self {
+        Self {
+            window,
+            commands: self.commands.for_window(window),
+            presence,
+            stopping: self.stopping.clone(),
+            cleanup_complete: self.cleanup_complete.clone(),
+            worker_finished: self.worker_finished.clone(),
+        }
+    }
+}
 
 /// The local appearance read has produced either a usable theme or a visible
 /// failure. The window shell may now reveal its first painted frame.
@@ -622,7 +717,7 @@ struct PendingResize {
 }
 
 fn terminal_commands(
-    sender: mpsc::Sender<WorkerCommand>,
+    sender: Commands,
     capture: ResizeCapture,
     pending_resize: Arc<Mutex<Option<PendingResize>>>,
 ) -> impl Fn(terminal::Command) -> Result<(), String> {
@@ -684,7 +779,7 @@ fn terminal_commands(
 }
 
 fn workspace_terminal_commands(
-    sender: mpsc::Sender<WorkerCommand>,
+    sender: Commands,
     capture: ResizeCapture,
     pending_resize: Arc<Mutex<Option<PendingResize>>>,
     inputs: Option<Arc<AtomicU64>>,
@@ -708,7 +803,7 @@ fn workspace_terminal_commands(
 }
 
 fn retry_pending_resize(
-    sender: &mpsc::Sender<WorkerCommand>,
+    sender: &Commands,
     expected: &ResizeCapture,
     pending: &Arc<Mutex<Option<PendingResize>>>,
 ) -> Result<(), String> {
@@ -1121,7 +1216,7 @@ fn tabs_stayed_open(count: usize) -> String {
     }
 }
 fn admit_close(
-    commands: &mpsc::Sender<WorkerCommand>,
+    commands: &Commands,
     plan: ClosePlan,
     confirmed: bool,
 ) -> Result<PendingClose, String> {
@@ -1177,7 +1272,11 @@ pub struct Workspace {
     settings_trigger: FocusHandle,
     _settings_subscription: Subscription,
     panes: HashMap<PaneKey, PaneView>,
-    commands: mpsc::Sender<WorkerCommand>,
+    /// The window this view is, among the windows of the application.
+    window_id: WindowId,
+    /// Whether the window held a Screen since it opened or last emptied.
+    held_screens: bool,
+    commands: Commands,
     stopping: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
     worker_finished: Arc<AtomicBool>,
@@ -1313,6 +1412,9 @@ pub struct Workspace {
     smoke_screen: Option<String>,
     smoke_second_screen: Option<String>,
     smoke_initial: Option<Entity<Terminal>>,
+    /// The Screen handed to another window and back, with its pane and the
+    /// terminal view that has to come with it.
+    smoke_moved: Option<(ScreenKey, PaneKey, EntityId)>,
     smoke_markers: bool,
     smoke_hidden_output: bool,
     smoke_editor_reconciles: u64,
@@ -1394,26 +1496,51 @@ impl Workspace {
         backend: splitty_client_core::owned_service::LocalBackend,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> (Self, Worker) {
+    ) -> (Self, Worker, WorkerLink, mpsc::Receiver<Update>) {
         // A smoke run is a test and an explicit WSL target an isolated
         // preview: neither shows nor replaces what the app's windows remember.
         let remembers = !smoke && remembers_for(&backend);
-        let (mut workspace, worker) =
-            Self::new_with_worker(smoke, outcome, window, cx, |receiver, sender, scheme| {
-                Worker::start_with_backend(receiver, sender, scheme, backend)
-            });
-        if remembers {
-            workspace.remember_appearance(
-                AppearanceMemory::open(AppearanceMemory::default_path()),
-                window,
-                cx,
-            );
-            workspace.use_keybindings(
-                keymap::KeybindingsFile::open(keymap::KeybindingsFile::default_path()),
-                cx,
-            );
+        if !cfg!(test) {
+            prompt::install(cx);
         }
-        (workspace, worker)
+        let (commands, receiver) = mpsc::channel(64);
+        let (sender, updates) = mpsc::channel(64);
+        let worker =
+            Worker::start_with_backend(receiver, sender, Self::window_scheme(window), backend);
+        let link = WorkerLink {
+            window: WindowId::FIRST,
+            commands: Commands::new(commands, WindowId::FIRST),
+            presence: worker.presence.clone(),
+            stopping: worker.stop.clone(),
+            cleanup_complete: worker.cleanup_complete.clone(),
+            worker_finished: worker.finished.clone(),
+        };
+        // The application's windows read the worker's stream through
+        // `crate::windows`; this view polls nothing by itself.
+        let shared = link.for_window(WindowId::FIRST, worker.presence.clone());
+        let mut workspace = Self::assemble(smoke, outcome, link, Task::ready(()), window, cx);
+        if remembers {
+            workspace.remember_what_the_app_keeps(window, cx);
+        }
+        (workspace, worker, shared, updates)
+    }
+
+    /// Show the remembered look until the local service's arrives, and keep
+    /// the look and the key bindings in the application's files.
+    pub(crate) fn remember_what_the_app_keeps(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.remember_appearance(
+            AppearanceMemory::open(AppearanceMemory::default_path()),
+            window,
+            cx,
+        );
+        self.use_keybindings(
+            keymap::KeybindingsFile::open(keymap::KeybindingsFile::default_path()),
+            cx,
+        );
     }
 
     /// Apply the bindings `file` holds and keep later changes in it.
@@ -1441,6 +1568,9 @@ impl Workspace {
             cx,
         );
         self.key_overrides = overrides.clone();
+        // Every window of the application binds the same keys.
+        cx.set_global(AppliedKeyOverrides(overrides.clone()));
+        cx.refresh_windows();
         cx.notify();
         match &mut self.keybindings {
             Some(file) => file.save(overrides),
@@ -1479,6 +1609,8 @@ impl Workspace {
         self.appearance_memory = Some(memory);
     }
 
+    /// A view that reads a queue of its own, as a view test builds one.
+    #[cfg(all(test, feature = "ui-test-support"))]
     pub(crate) fn new_with_worker(
         smoke: bool,
         outcome: Arc<AtomicBool>,
@@ -1498,11 +1630,14 @@ impl Workspace {
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
         let worker = start_worker(receiver, sender, initial_scheme);
-        let presence = worker.presence.clone();
-        presence.set(splitty_client_core::native_workspace::WindowPresence {
-            visible: window.is_visible(),
-            focused: window.is_window_active(),
-        });
+        let link = WorkerLink {
+            window: WindowId::FIRST,
+            commands: Commands::new(commands, WindowId::FIRST),
+            presence: worker.presence.clone(),
+            stopping: worker.stop.clone(),
+            cleanup_complete: worker.cleanup_complete.clone(),
+            worker_finished: worker.finished.clone(),
+        };
         let stopping = worker.stop.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
             let maintenance = Duration::from_millis(16);
@@ -1568,10 +1703,52 @@ impl Workspace {
                 }
             }
         });
+        (
+            Self::assemble(smoke, outcome, link, poll, window, cx),
+            worker,
+        )
+    }
+
+    /// A window of an application that reads the worker's one stream for all
+    /// its windows (`crate::windows`): the view polls nothing by itself.
+    pub(crate) fn new_in_app(
+        smoke: bool,
+        outcome: Arc<AtomicBool>,
+        link: WorkerLink,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        if !cfg!(test) {
+            prompt::install(cx);
+        }
+        Self::assemble(smoke, outcome, link, Task::ready(()), window, cx)
+    }
+
+    fn assemble(
+        smoke: bool,
+        outcome: Arc<AtomicBool>,
+        link: WorkerLink,
+        poll: Task<()>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let WorkerLink {
+            window: window_id,
+            commands,
+            presence,
+            stopping,
+            cleanup_complete,
+            worker_finished,
+        } = link;
+        presence.set(splitty_client_core::native_workspace::WindowPresence {
+            visible: window.is_visible(),
+            focused: window.is_window_active(),
+        });
+        let initial_scheme = Self::window_scheme(window);
         let entity = cx.entity().downgrade();
         window.on_window_should_close(cx, move |window, cx| {
             let _ = entity.update(cx, |this, cx| {
-                this.request_close(CloseTarget::Window, window, cx);
+                this.request_window_close(window, cx);
             });
             false
         });
@@ -1592,6 +1769,7 @@ impl Workspace {
             this.window_presence_changed(window);
             if window.is_window_active() {
                 this.user_acted();
+                crate::windows::Windows::activated(this.window_id, cx);
             }
             this.refresh_notification_watch(cx);
             if !window.is_window_active() && this.cancel_screen_drag() {
@@ -1671,160 +1849,212 @@ impl Workspace {
                 }
             },
         );
-        (
-            Self {
-                model: None,
-                focus: cx.focus_handle(),
-                hosts: HostsView::default(),
-                ports: PortsView::default(),
-                drawer_popover: None,
-                file_stores: HashMap::new(),
-                file_notices: Vec::new(),
-                activity_serial: 0,
-                viewers: HashMap::new(),
-                shares: None,
-                ssh_prompts: Default::default(),
-                pending_notified: None,
-                file_drops: HashMap::new(),
-                drawer_anchors: Rc::default(),
-                remote_create_enqueues: HashMap::new(),
-                remote_create_follow: None,
-                remote_create_latest: None,
-                remote_create_notice: None,
-                settings,
-                destination: Destination::Screens,
-                host_browser_focus: cx.focus_handle(),
-                host_connect_trigger: cx.focus_handle(),
-                port_trigger: cx.focus_handle(),
-                settings_trigger: cx.focus_handle(),
-                _settings_subscription: settings_subscription,
-                panes: HashMap::new(),
-                commands,
-                stopping: worker.stop.clone(),
-                cleanup_complete: worker.cleanup_complete.clone(),
-                worker_finished: worker.finished.clone(),
-                split_bounds: HashMap::new(),
-                slot_bounds: HashMap::new(),
-                tab_voids: HashMap::new(),
-                tab_scrolls: HashMap::new(),
-                drawer_scroll: ScrollHandle::new(),
-                drop_target: None,
-                drop_motion_generation: 0,
-                drop_motion_duration: Duration::from_millis(70),
-                drag: None,
-                visible: Vec::new(),
-                visible_screen: None,
-                visible_owner: None,
-                visible_route_generation: 0,
-                search_owner: None,
-                visible_pending: false,
-                status: String::new(),
-                startup: startup_page::Startup::default(),
-                appearance: NativeAppearance::fallback(&ui_family),
-                themes,
-                appearance_memory: None,
-                key_overrides: keymap::Overrides::default(),
-                keybindings: None,
-                tab_prefs: TabPrefs::default(),
-                scroll_to_bottom: true,
-                clipboard_writes: false,
-                editor_prefs: Default::default(),
-                appearance_error: None,
-                appearance_generation: 0,
-                confirmed_appearance: None,
-                appearance_choices: Default::default(),
-                drawer_visible: true,
-                drawer_authoritative_pinned: true,
-                drawer_width: 200,
-                drawer_edge_reveal: true,
-                drawer_overlay_open: false,
-                drawer_keyboard_reveal: false,
-                drawer_focus: cx.focus_handle(),
-                drawer_focus_row: None,
-                drawer_edge_last: None,
-                drawer_edge_task: None,
-                drawer_collapsed: HashSet::new(),
-                drawer_hovered: None,
-                drawer_host_hovered: None,
-                drawer_screen_menu: None,
-                drawer_pane_hovered: None,
-                drawer_drag: None,
-                drawer_host_drag: None,
-                drawer_host_press: None,
-                drawer_host_slots: Rc::default(),
-                drawer_press: None,
-                drawer_row_slots: Rc::default(),
-                drawer_pending: None,
-                wheel_navigation: WheelNavigation::default(),
-                zoom: PresentedZoom::new(Zoom::default()),
-                zoom_feedback: None,
-                profiles: None,
-                profiles_error: None,
-                profiles_generation: 0,
-                profile_picker: None,
-                template_dialog: None,
-                palette: None,
-                pending_template_apply: None,
-                tab_context_menu: None,
-                terminal_menu: None,
-                scratchpads: scratchpad::ScratchpadState::default(),
-                pending_transfer: None,
-                float_order: HashMap::new(),
-                float_viewport: None,
-                screen_viewport: None,
-                screen_motion: ScreenMotion::default(),
-                float_gesture: None,
-                pending_float: None,
-                desired_scheme: initial_scheme,
-                sent_scheme: initial_scheme,
-                scheme_pending: false,
-                _appearance_subscription: appearance_subscription,
-                _activation_subscription: activation_subscription,
-                _notification_visibility_subscription: notification_visibility_subscription,
-                notifications: NotificationCenter::default(),
-                program_status_seen: ProgramStatusSeen::default(),
-                notification_settings_generation: 0,
-                notification_settings_error: None,
-                notification_window_active: window.is_window_active(),
-                notification_window_visible: window.is_visible(),
-                view_watch: unread::ViewWatch::default(),
-                presence,
-                pty_sizes: HashMap::new(),
-                _drawer_bounds_subscription: drawer_bounds_subscription,
-                ui_family,
-                mono_family,
-                rename: None,
-                arrange: None,
-                rename_subscription: None,
-                pending_close: None,
-                assessing_close: None,
-                next_close_id: 0,
-                _poll: poll,
-                started: Instant::now(),
-                smoke,
-                smoke_stage: 0,
-                smoke_first: None,
-                smoke_tab: None,
-                smoke_screen: None,
-                smoke_second_screen: None,
-                smoke_initial: None,
-                smoke_markers: false,
-                smoke_hidden_output: false,
-                smoke_editor_reconciles: 0,
-                smoke_editor_clean: Arc::new(AtomicBool::new(false)),
-                smoke_terminal_inputs: smoke.then(|| Arc::new(AtomicU64::new(0))),
-                smoke_last_input_pane: smoke.then(|| Arc::new(Mutex::new(None))),
-                smoke_shortcut_checks: Arc::new(AtomicU64::new(0)),
-                smoke_shortcuts_clean: Arc::new(AtomicBool::new(true)),
-                smoke_normal_input: Arc::new(AtomicBool::new(false)),
-                outcome,
-            },
-            worker,
-        )
+        Self {
+            model: None,
+            focus: cx.focus_handle(),
+            hosts: HostsView::default(),
+            ports: PortsView::default(),
+            drawer_popover: None,
+            file_stores: HashMap::new(),
+            file_notices: Vec::new(),
+            activity_serial: 0,
+            viewers: HashMap::new(),
+            shares: None,
+            ssh_prompts: Default::default(),
+            pending_notified: None,
+            file_drops: HashMap::new(),
+            drawer_anchors: Rc::default(),
+            remote_create_enqueues: HashMap::new(),
+            remote_create_follow: None,
+            remote_create_latest: None,
+            remote_create_notice: None,
+            settings,
+            destination: Destination::Screens,
+            host_browser_focus: cx.focus_handle(),
+            host_connect_trigger: cx.focus_handle(),
+            port_trigger: cx.focus_handle(),
+            settings_trigger: cx.focus_handle(),
+            _settings_subscription: settings_subscription,
+            panes: HashMap::new(),
+            window_id,
+            held_screens: false,
+            commands,
+            stopping,
+            cleanup_complete,
+            worker_finished,
+            split_bounds: HashMap::new(),
+            slot_bounds: HashMap::new(),
+            tab_voids: HashMap::new(),
+            tab_scrolls: HashMap::new(),
+            drawer_scroll: ScrollHandle::new(),
+            drop_target: None,
+            drop_motion_generation: 0,
+            drop_motion_duration: Duration::from_millis(70),
+            drag: None,
+            visible: Vec::new(),
+            visible_screen: None,
+            visible_owner: None,
+            visible_route_generation: 0,
+            search_owner: None,
+            visible_pending: false,
+            status: String::new(),
+            startup: startup_page::Startup::default(),
+            appearance: NativeAppearance::fallback(&ui_family),
+            themes,
+            appearance_memory: None,
+            key_overrides: keymap::Overrides::default(),
+            keybindings: None,
+            tab_prefs: TabPrefs::default(),
+            scroll_to_bottom: true,
+            clipboard_writes: false,
+            editor_prefs: Default::default(),
+            appearance_error: None,
+            appearance_generation: 0,
+            confirmed_appearance: None,
+            appearance_choices: Default::default(),
+            drawer_visible: true,
+            drawer_authoritative_pinned: true,
+            drawer_width: 200,
+            drawer_edge_reveal: true,
+            drawer_overlay_open: false,
+            drawer_keyboard_reveal: false,
+            drawer_focus: cx.focus_handle(),
+            drawer_focus_row: None,
+            drawer_edge_last: None,
+            drawer_edge_task: None,
+            drawer_collapsed: HashSet::new(),
+            drawer_hovered: None,
+            drawer_host_hovered: None,
+            drawer_screen_menu: None,
+            drawer_pane_hovered: None,
+            drawer_drag: None,
+            drawer_host_drag: None,
+            drawer_host_press: None,
+            drawer_host_slots: Rc::default(),
+            drawer_press: None,
+            drawer_row_slots: Rc::default(),
+            drawer_pending: None,
+            wheel_navigation: WheelNavigation::default(),
+            zoom: PresentedZoom::new(Zoom::default()),
+            zoom_feedback: None,
+            profiles: None,
+            profiles_error: None,
+            profiles_generation: 0,
+            profile_picker: None,
+            template_dialog: None,
+            palette: None,
+            pending_template_apply: None,
+            tab_context_menu: None,
+            terminal_menu: None,
+            scratchpads: scratchpad::ScratchpadState::default(),
+            pending_transfer: None,
+            float_order: HashMap::new(),
+            float_viewport: None,
+            screen_viewport: None,
+            screen_motion: ScreenMotion::default(),
+            float_gesture: None,
+            pending_float: None,
+            desired_scheme: initial_scheme,
+            sent_scheme: initial_scheme,
+            scheme_pending: false,
+            _appearance_subscription: appearance_subscription,
+            _activation_subscription: activation_subscription,
+            _notification_visibility_subscription: notification_visibility_subscription,
+            notifications: NotificationCenter::default(),
+            program_status_seen: ProgramStatusSeen::default(),
+            notification_settings_generation: 0,
+            notification_settings_error: None,
+            notification_window_active: window.is_window_active(),
+            notification_window_visible: window.is_visible(),
+            view_watch: unread::ViewWatch::default(),
+            presence,
+            pty_sizes: HashMap::new(),
+            _drawer_bounds_subscription: drawer_bounds_subscription,
+            ui_family,
+            mono_family,
+            rename: None,
+            arrange: None,
+            rename_subscription: None,
+            pending_close: None,
+            assessing_close: None,
+            next_close_id: window_id.ordinal() << 32,
+            _poll: poll,
+            started: Instant::now(),
+            smoke,
+            smoke_stage: 0,
+            smoke_first: None,
+            smoke_tab: None,
+            smoke_screen: None,
+            smoke_second_screen: None,
+            smoke_initial: None,
+            smoke_moved: None,
+            smoke_markers: false,
+            smoke_hidden_output: false,
+            smoke_editor_reconciles: 0,
+            smoke_editor_clean: Arc::new(AtomicBool::new(false)),
+            smoke_terminal_inputs: smoke.then(|| Arc::new(AtomicU64::new(0))),
+            smoke_last_input_pane: smoke.then(|| Arc::new(Mutex::new(None))),
+            smoke_shortcut_checks: Arc::new(AtomicU64::new(0)),
+            smoke_shortcuts_clean: Arc::new(AtomicBool::new(true)),
+            smoke_normal_input: Arc::new(AtomicBool::new(false)),
+            outcome,
+        }
     }
     fn stop(&mut self) {
         self.cancel_remote_create_follow();
         self.stopping.store(true, Ordering::Release);
+    }
+    /// Park every terminal view for the window that takes this one's Screens.
+    fn park_terminals(&mut self, cx: &mut Context<Self>) {
+        for (pane, view) in self.panes.drain() {
+            view.terminal
+                .update(cx, |terminal, _| terminal.cancel_pointer());
+            crate::windows::Windows::park(pane, view.route.clone(), view.terminal.clone(), cx);
+        }
+    }
+    /// Ask the worker to remove this window; its Screens go to another one.
+    /// The window closes when the worker says so.
+    fn close_this_window(&mut self, cx: &mut Context<Self>) {
+        let Some(owner) = self.lifecycle_token() else {
+            return;
+        };
+        if let Err(error) = self
+            .commands
+            .try_send(WorkerCommand::new(owner, Command::CloseWindow))
+        {
+            self.status = format!("Window not closed: {error}");
+            cx.notify();
+        }
+    }
+    /// A window whose last Screen was closed or moved away closes, unless it
+    /// is the application's last.
+    fn close_when_emptied(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        if !model.opened().is_empty() {
+            self.held_screens = true;
+        } else if std::mem::take(&mut self.held_screens)
+            && crate::windows::Windows::count(cx) > 1
+            && !model.local_source().has_pending_creation()
+        {
+            self.close_this_window(cx);
+        }
+    }
+    /// Show a Screen this window holds, as when its Drawer row is chosen.
+    pub(crate) fn show_held_screen(
+        &mut self,
+        screen: ScreenKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == &screen))
+        {
+            self.switch_screen_key(screen, window, cx);
+        }
     }
     fn window_scheme(window: &Window) -> ColorScheme {
         match window.appearance() {
@@ -2262,7 +2492,15 @@ impl Workspace {
                 ));
             }
         });
-        self.ssh_prompts.show(list, &sink, cx);
+        if crate::windows::Windows::serving(cx) {
+            // Every window hears of the questions; the application asks once.
+            cx.default_global::<crate::askpass::Prompts>();
+            cx.update_global::<crate::askpass::Prompts, _>(|prompts, cx| {
+                prompts.show(list, &sink, cx)
+            });
+        } else {
+            self.ssh_prompts.show(list, &sink, cx);
+        }
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         let Some(source) = self.selected_model().map(SourceWorkspace::source_token) else {
@@ -2480,8 +2718,23 @@ impl Workspace {
     pub(crate) fn appearance(&self) -> &NativeAppearance {
         &self.appearance
     }
+    /// Close this window. While the application has another one, its
+    /// Screens go there and nothing ends; the last window closes the
+    /// application, after its assessment.
     pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_close(CloseTarget::Window, window, cx);
+        if crate::windows::Windows::count(cx) > 1 && self.model.is_some() {
+            if self.cleanup_complete.load(Ordering::Acquire)
+                || self.worker_finished.load(Ordering::Acquire)
+            {
+                // No worker is left to hand the Screens over.
+                self.park_terminals(cx);
+                crate::windows::Windows::closed(self.window_id, window, cx);
+            } else {
+                self.close_this_window(cx);
+            }
+        } else {
+            self.request_close(CloseTarget::Window, window, cx);
+        }
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         let source = if target == CloseTarget::Window {
@@ -3215,7 +3468,19 @@ impl Workspace {
         let terminal_scale = self.appearance.zoom.terminal_scale(terminal_font.size);
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
-        let terminal = cx.new(|cx| Terminal::new(commands, origin, cx));
+        // A terminal view another window showed for this terminal comes with
+        // its Screen; any other terminal starts a view of its own.
+        let terminal = match crate::windows::Windows::take_parked(&key, &route, cx) {
+            Some(terminal) => {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.replace_commands(commands);
+                    terminal.enter_window();
+                    terminal.invalidate_size_report(cx);
+                });
+                terminal
+            }
+            None => cx.new(|cx| Terminal::new(commands, origin, cx)),
+        };
         self.apply_known_pty_size(&route, &terminal, cx);
         let link_route = route.clone();
         let link_subscription = cx.subscribe(
@@ -3454,15 +3719,22 @@ impl Workspace {
             self.tab_scrolls.clear();
         }
         self.retain_pty_sizes(&window_model);
+        let mut left = Vec::new();
         self.panes.retain(|pane, view| {
             let retained = *pane == view.route.pane_key()
                 && window_model.contains_terminal_binding(&view.route);
             if !retained {
                 view.terminal
                     .update(cx, |terminal, _| terminal.cancel_pointer());
+                left.push((pane.clone(), view.route.clone(), view.terminal.clone()));
             }
             retained
         });
+        // The Screen may have gone to another window, which then shows the
+        // same terminal views.
+        for (pane, route, terminal) in left {
+            crate::windows::Windows::park(pane, route, terminal, cx);
+        }
         for route in window_model.routes() {
             let origin = if route.terminal().source_token().source_id()
                 == window_model.local_source().source_id()
@@ -4228,6 +4500,8 @@ impl Workspace {
             KeyCommand::RenameScreen => self.rename_shown_screen(window, cx),
             KeyCommand::MoveScreenUp => self.move_shown_screen(true, cx),
             KeyCommand::MoveScreenDown => self.move_shown_screen(false, cx),
+            KeyCommand::MoveScreenToNewWindow => self.move_shown_screen_to_new_window(cx),
+            KeyCommand::MoveScreenToNextWindow => self.move_shown_screen_to_next_window(cx),
             KeyCommand::NewTab => self.tab(cx),
             KeyCommand::NewTabWithProfile => self.new_tab_with_profile(window, cx),
             KeyCommand::CloseTab => self.close_focused_pane(window, cx),
@@ -4281,6 +4555,8 @@ impl Workspace {
             KeyCommand::ZoomOut => self.submit_zoom(ZoomAction::Out, window, cx),
             KeyCommand::ZoomReset => self.submit_zoom(ZoomAction::Reset, window, cx),
             KeyCommand::ToggleFullScreen => self.toggle_fullscreen(window),
+            KeyCommand::NewWindow => self.new_window(cx),
+            KeyCommand::CloseWindow => self.request_window_close(window, cx),
             KeyCommand::Quit => self.quit(window, cx),
         }
     }
@@ -4400,10 +4676,10 @@ impl Workspace {
             }
         }
     }
-    fn poll(
+    pub(crate) fn poll(
         &mut self,
         first: Option<Update>,
-        updates: &mut mpsc::Receiver<Update>,
+        updates: &mut impl UpdateSource,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (bool, usize) {
@@ -4417,7 +4693,7 @@ impl Workspace {
             let update = if let Some(update) = first.take() {
                 update
             } else {
-                let Ok(update) = updates.try_recv() else {
+                let Some(update) = updates.next_update() else {
                     break;
                 };
                 update
@@ -4427,6 +4703,22 @@ impl Workspace {
                 Update::Workspace(model) => {
                     self.reconcile(*model, window, cx);
                     self.settle_notified(window, cx);
+                    self.close_when_emptied(cx);
+                }
+                // The application's pump unwraps these for their window.
+                Update::ForWindow { .. } => {}
+                Update::WindowClosed { .. } => {
+                    // The window is gone with this: nothing of it is kept up.
+                    self.park_terminals(cx);
+                    crate::windows::Windows::closed(self.window_id, window, cx);
+                    return (false, processed);
+                }
+                Update::ScreenElsewhere {
+                    screen,
+                    window: holder,
+                } => {
+                    // The Screen is another window's: that window shows it.
+                    cx.defer(move |cx| crate::windows::Windows::show(holder, screen, cx));
                 }
                 Update::RemoteScreenCreateRejected {
                     owner,
@@ -4779,7 +5071,7 @@ impl Workspace {
         self.flush_visible(cx);
         self.flush_resizes(cx);
         self.flush_scheme();
-        if updates.is_closed() && self.cleanup_complete.load(Ordering::Acquire) {
+        if updates.ended() && self.cleanup_complete.load(Ordering::Acquire) {
             if let Some(pending) = self.pending_close.take() {
                 if pending.plan.target == CloseTarget::Window {
                     self.stop();
@@ -5154,13 +5446,70 @@ impl Workspace {
                 && count == 1
                 && model.shown_screen_id() != self.smoke_screen.as_deref() =>
             {
+                // A second Screen, to hand to another window and take back.
+                self.create_screen(window, cx);
+                self.smoke_stage = 19;
+            }
+            19 if model.screens().len() == 2 && count == 1 => {
+                let (Some(key), Some(pane)) = (
+                    self.current_screen_key(),
+                    model.focused_pane().map(|pane| model.pane_key(pane)),
+                ) else {
+                    return;
+                };
+                let Some(terminal) = self.panes.get(&pane).map(|view| view.terminal.entity_id())
+                else {
+                    return;
+                };
+                self.smoke_moved = Some((key, pane, terminal));
+                self.move_shown_screen_to_new_window(cx);
+                self.smoke_stage = 20;
+            }
+            // The new window shows the very terminal view this one showed.
+            20 if model.screens().len() == 1 && crate::windows::Windows::count(cx) == 2 => {
+                let Some((key, pane, terminal)) = self.smoke_moved.clone() else {
+                    return;
+                };
+                if !crate::windows::Windows::shows_elsewhere(self.window_id, &pane, terminal, cx) {
+                    return;
+                }
+                let owner = model.source_token();
+                self.send_captured(
+                    owner,
+                    Command::MoveScreenToWindow {
+                        screen: key,
+                        target: self.window_id,
+                    },
+                    cx,
+                );
+                self.smoke_stage = 21;
+            }
+            // Back here with the same view, and the emptied window closed.
+            21 if model.screens().len() == 2 && crate::windows::Windows::count(cx) == 1 => {
+                let same = self
+                    .smoke_moved
+                    .as_ref()
+                    .is_some_and(|(key, pane, terminal)| {
+                        self.current_screen_key().as_ref() == Some(key)
+                            && self
+                                .panes
+                                .get(pane)
+                                .is_some_and(|view| view.terminal.entity_id() == *terminal)
+                    });
                 self.finish_smoke(
-                    self.smoke_hidden_output && self.smoke_editor_clean.load(Ordering::Acquire),
+                    same && self.smoke_hidden_output
+                        && self.smoke_editor_clean.load(Ordering::Acquire),
                     cx,
                 );
             }
             _ => {}
         }
+    }
+    /// Whether this window shows exactly this terminal view for the pane.
+    pub(crate) fn shows_terminal(&self, pane: &PaneKey, terminal: EntityId) -> bool {
+        self.panes
+            .get(pane)
+            .is_some_and(|view| view.terminal.entity_id() == terminal)
     }
     fn finish_smoke(&mut self, passed: bool, cx: &mut Context<Self>) {
         self.outcome.store(passed, Ordering::Release);
@@ -7769,6 +8118,7 @@ mod tests {
     #[test]
     fn full_close_command_queue_leaves_no_pending_close_and_recovers() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let sender = crate::workspace::Commands::from(sender);
         sender
             .try_send(WorkerCommand::close(ClosePlan::startup_window(1), false))
             .unwrap();

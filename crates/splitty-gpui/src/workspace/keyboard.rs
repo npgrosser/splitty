@@ -630,6 +630,10 @@ impl Workspace {
     /// file, and tell the Keyboard page how it went.
     pub(super) fn change_key_binding(&mut self, change: BindingChange, cx: &mut Context<Self>) {
         let keymap = crate::keys::keymap(cx);
+        // Another window may have changed the bindings since this one did.
+        if let Some(applied) = cx.try_global::<super::AppliedKeyOverrides>() {
+            self.key_overrides.clone_from(&applied.0);
+        }
         let (notices, saved) = match changed_overrides(&self.key_overrides, &keymap, &change) {
             Ok((next, notices)) => (notices, Some(self.apply_key_overrides(next, cx))),
             Err(refusal) => (vec![refusal], None),

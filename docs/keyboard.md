@@ -77,6 +77,8 @@ receives those keys.
 | Rename Screen | `screen.rename` | `Alt+Shift+R` | `⇧⌘R` |
 | Move Screen Up | `screen.move-up` | none | none |
 | Move Screen Down | `screen.move-down` | none | none |
+| Move Screen to New Window | `screen.move-to-new-window` | none | none |
+| Move Screen to Next Window | `screen.move-to-next-window` | none | none |
 
 ### Tabs
 
@@ -143,6 +145,8 @@ receives those keys.
 | Zoom Out | `zoom.out` | `Ctrl+-` | `⌘-` |
 | Reset Zoom | `zoom.reset` | `Ctrl+0` | `⌘0` |
 | Toggle Full Screen | `window.fullscreen` | `F11` | `⌃⌘F` |
+| New Window | `window.new` | `Ctrl+Shift+N` | `⌘N` |
+| Close Window | `window.close` | none | none |
 | Quit | `window.quit` | none | `⌘Q` |
 
 <!-- keys:end -->

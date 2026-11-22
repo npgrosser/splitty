@@ -972,6 +972,13 @@ impl Terminal {
         self.invalidate_presentation();
     }
 
+    /// The view is shown in another window from now on: what it observed of
+    /// the window it was in is observed anew at its next render.
+    pub(crate) fn enter_window(&mut self) {
+        self.focus_out_subscription = None;
+        self.activation_subscription = None;
+    }
+
     /// Capture only already measured geometry; this never lays out the engine
     /// or claims a visible route. The caller must retain at most its outgoing
     /// Screen's presentation and release it when that Screen's owner changes.

@@ -1955,7 +1955,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.hosts.set_owner(owner);
                     assert!(workspace.hosts.accept(HubUpdate {
@@ -2071,7 +2071,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.hosts.set_owner(owner);
                     workspace.drawer_visible = true;
@@ -2138,7 +2138,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model.clone(), window, cx);
                     workspace.hosts.set_owner(owner.connection_id());
                     assert!(workspace.hosts.accept(HubUpdate {
@@ -2273,7 +2273,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model.clone(), window, cx);
                     workspace.hosts.set_owner(owner.connection_id());
                     assert!(workspace.hosts.accept(HubUpdate {
@@ -2375,7 +2375,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model.clone(), window, cx);
                     workspace.hosts.set_owner(owner);
                     assert!(workspace.hosts.accept(HubUpdate {

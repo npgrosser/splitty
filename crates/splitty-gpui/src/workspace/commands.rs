@@ -434,8 +434,110 @@ impl Workspace {
         window.toggle_fullscreen();
     }
 
-    /// Close the window as its close button does, after the assessment.
+    /// Close the application for all its windows, after the assessment.
     pub(super) fn quit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_window_close(window, cx);
+        self.request_close(CloseTarget::Window, window, cx);
+    }
+
+    /// Open another window of the application with a new local Screen.
+    pub(super) fn new_window(&mut self, cx: &mut Context<Self>) {
+        self.open_window(
+            splitty_client_core::native_workspace::WindowStart::NewScreen,
+            cx,
+        );
+    }
+
+    /// Hand a Screen this window holds to a new window.
+    pub(super) fn move_screen_to_new_window(&mut self, screen: ScreenKey, cx: &mut Context<Self>) {
+        if self.holds_screen(&screen) {
+            self.open_window(
+                splitty_client_core::native_workspace::WindowStart::Screen(screen),
+                cx,
+            );
+        }
+    }
+
+    /// Hand a Screen this window holds to another open window.
+    pub(super) fn move_screen_to_window(
+        &mut self,
+        screen: ScreenKey,
+        target: WindowId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(owner) = self
+            .lifecycle_token()
+            .filter(|_| self.holds_screen(&screen))
+        else {
+            return;
+        };
+        self.send_captured(owner, Command::MoveScreenToWindow { screen, target }, cx);
+    }
+
+    /// The shown Screen goes to a new window.
+    pub(super) fn move_shown_screen_to_new_window(&mut self, cx: &mut Context<Self>) {
+        if let Some(screen) = self.current_screen_key() {
+            self.move_screen_to_new_window(screen, cx);
+        }
+    }
+
+    /// The shown Screen goes to the window opened after this one, or to the
+    /// first one from the last.
+    pub(super) fn move_shown_screen_to_next_window(&mut self, cx: &mut Context<Self>) {
+        let Some(screen) = self.current_screen_key() else {
+            return;
+        };
+        let mut others: Vec<WindowId> = crate::windows::Windows::others(self.window_id, cx)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        others.sort();
+        let next = others
+            .iter()
+            .find(|id| **id > self.window_id)
+            .or(others.first())
+            .copied();
+        match next {
+            Some(target) => self.move_screen_to_window(screen, target, cx),
+            None => {
+                self.status = "There is no other window to move the Screen to".into();
+                cx.notify();
+            }
+        }
+    }
+
+    fn holds_screen(&self, screen: &ScreenKey) -> bool {
+        self.model
+            .as_ref()
+            .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == screen))
+    }
+
+    /// The platform window opens first, so that it reads from the start what
+    /// the worker then says it holds.
+    fn open_window(
+        &mut self,
+        start: splitty_client_core::native_workspace::WindowStart,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(owner) = self.lifecycle_token() else {
+            return;
+        };
+        let commands = self.commands.clone();
+        cx.defer(move |cx| {
+            let Some((id, presence)) = crate::windows::Windows::open(cx) else {
+                return;
+            };
+            let opened = commands.try_send(WorkerCommand::new(
+                owner,
+                Command::OpenWindow {
+                    window: id,
+                    presence,
+                    start,
+                },
+            ));
+            if opened.is_err() {
+                // The worker never heard of the window: it has nothing to show.
+                crate::windows::Windows::abandon(id, cx);
+            }
+        });
     }
 }

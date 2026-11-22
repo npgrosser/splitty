@@ -69,6 +69,16 @@ pub(super) struct PendingFloating {
     follow: Option<String>,
 }
 impl SourceWorkspace {
+    /// Drop a pending action of a Screen a projection leaves out.
+    pub(super) fn prune_floating(&mut self, keep: &impl Fn(&str) -> bool) {
+        if self
+            .pending_floating
+            .as_ref()
+            .is_some_and(|pending| !keep(pending.intent.screen()))
+        {
+            self.pending_floating = None;
+        }
+    }
     pub fn floating_action_pending(&self) -> bool {
         self.pending_floating.is_some()
     }

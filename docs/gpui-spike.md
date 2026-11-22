@@ -2254,3 +2254,35 @@ admission (16 concurrent openings, 128 streams), whose exhaustion reports
 that message. Each test service now has its own limits
 (`Connector::isolated()`). Input methods, dead keys and the clipboard are
 not verified on macOS, and the look was checked by eye.
+
+## Several windows of one application (2026-11-22)
+
+`native-multi-window`: one process, one worker, any number of windows; each
+Screen is held by one window and moves between them without a message to its
+server other than size reports.
+
+Checked on Linux (Wayland, hardware graphics):
+
+- `splitty-gpui --workspace-smoke` passes with its window stages: after the
+  existing local workspace stages it creates a second Screen, hands it to a
+  new window, waits until that window shows the very terminal view the first
+  one showed, takes the Screen back, and requires the same view again and the
+  emptied window closed. The run ends with `{"probe":"splitty-local-workspace","passed":true,"stage":21,…}`
+  and a complete worker shutdown. These are real platform windows, a real
+  embedded service and real PTYs; the steps are driven by the app, not by
+  keys or the pointer.
+- In-process, with real PTYs (`cargo test -p splitty-client-core`): a second
+  window opens no connection; a Screen's session is attached once before and
+  after a move and after its window closed; output reaches the window that
+  holds the Screen; a Screen another client creates lands in the window that
+  was active last; two windows' panes are both reported, and a window hidden
+  beside a visible one gives its sizes back and reports them again when it
+  is visible.
+- View tests with two windows (`cargo test -p splitty-gpui --features
+  ui-test-support windows_tests`): the same terminal view in the window that
+  gets a Screen, commands stamped with their window, a window that closes
+  only after the worker removed it, and the last window's assessed close.
+
+Not checked: keys, the Drawer menu and the pointer in a second real window
+(no input automation on the test machine), a host Screen moved between real
+windows, two windows under sustained input at once, macOS and Windows.

@@ -39,7 +39,7 @@ fn setup(
     let (sender, receiver) = mpsc::channel(128);
     window.update(|window, cx| {
         view.update(cx, |workspace, cx| {
-            workspace.commands = sender;
+            workspace.commands = sender.into();
             workspace.destination = Destination::Screens;
             workspace.drawer_visible = false;
             workspace.drawer_overlay_open = false;

@@ -812,3 +812,269 @@ fn remote_creation_admission_uses_exact_current_source_and_aggregate_capacity() 
         .prepare_remote_screen_creation(&action, current)
         .is_err());
 }
+
+fn local_catalog(window: &mut WindowWorkspace, ids: &[&str]) {
+    let id = window.local_source().source_id();
+    catalog(window, id, ids);
+}
+fn listed(window: &WindowWorkspace) -> Vec<String> {
+    window
+        .opened()
+        .iter()
+        .map(|entry| entry.key().screen_id().to_owned())
+        .collect()
+}
+fn local_key(window: &WindowWorkspace, screen: &str) -> ScreenKey {
+    window.local_source().screen_key(screen)
+}
+const SECOND: WindowId = WindowId::new(1);
+
+#[test]
+fn every_screen_is_held_by_one_window_and_each_window_shows_its_own() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    local_catalog(&mut window, &["work", "logs", "notes"]);
+    let owner = window.lifecycle_token();
+    window.select(owner, &local_key(&window, "work")).unwrap();
+    assert!(window.single_window());
+    assert_eq!(
+        window.holder(&local_key(&window, "notes")),
+        Some(WindowId::FIRST)
+    );
+
+    // A new window holds nothing and changes nothing of the first.
+    window.open_window(SECOND).unwrap();
+    assert!(window.open_window(SECOND).is_err());
+    assert_eq!(listed(&window), ["work", "logs", "notes"]);
+    assert_eq!(window.shown_key(), Some(local_key(&window, "work")));
+    assert!(window.enter(SECOND));
+    assert!(listed(&window).is_empty());
+    assert_eq!(window.shown_key(), None);
+    assert!(!window.enter(WindowId::new(7)));
+    assert!(window.enter(WindowId::FIRST));
+
+    // A moved Screen is shown where it goes; no source hears of the move.
+    let mutation = window.local_source().mutation_generation();
+    let notes = local_key(&window, "notes");
+    window.move_screen_to_window(&notes, SECOND).unwrap();
+    assert_eq!(window.local_source().mutation_generation(), mutation);
+    assert_eq!(listed(&window), ["work", "logs"]);
+    assert_eq!(window.shown_key(), Some(local_key(&window, "work")));
+    assert_eq!(window.holder(&notes), Some(SECOND));
+    assert_eq!(window.held_elsewhere(&notes), Some(SECOND));
+    assert_eq!(window.shown_in(SECOND), Some(notes.clone()));
+    assert_eq!(window.take_losers(), [WindowId::FIRST]);
+
+    // Each window's choice stays its own, and a Screen another window holds
+    // cannot be shown here.
+    window.select(owner, &local_key(&window, "logs")).unwrap();
+    assert!(window.select(owner, &notes).is_err());
+    assert_eq!(window.shown_in(SECOND), Some(notes.clone()));
+    assert!(window.enter(SECOND));
+    assert_eq!(listed(&window), ["notes"]);
+    assert_eq!(window.shown_key(), Some(notes.clone()));
+    assert!(window.select(owner, &local_key(&window, "work")).is_err());
+    assert!(window.enter(WindowId::FIRST));
+    assert_eq!(window.shown_key(), Some(local_key(&window, "logs")));
+
+    // Each window reads a model of its own Screens.
+    let first = window.projection(WindowId::FIRST).unwrap();
+    assert!(first.single_window());
+    assert_eq!(listed(&first), ["work", "logs"]);
+    assert_eq!(first.local_source().screens().len(), 2);
+    assert_eq!(first.shown_key(), Some(local_key(&window, "logs")));
+    let second = window.projection(SECOND).unwrap();
+    assert_eq!(second.window(), SECOND);
+    assert_eq!(listed(&second), ["notes"]);
+    assert_eq!(second.shown_key(), Some(notes));
+    assert_eq!(second.local_source().shown_screen_id(), Some("notes"));
+    assert!(window.projection(WindowId::new(7)).is_none());
+}
+
+#[test]
+fn a_window_shows_the_neighbor_of_a_screen_that_left_it() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    local_catalog(&mut window, &["work", "logs", "notes", "mail"]);
+    let owner = window.lifecycle_token();
+    window.open_window(SECOND).unwrap();
+    window.select(owner, &local_key(&window, "logs")).unwrap();
+    window.settle();
+
+    // The shown Screen moves away: the next one in the window's order shows.
+    window
+        .move_screen_to_window(&local_key(&window, "logs"), SECOND)
+        .unwrap();
+    assert_eq!(window.shown_key(), Some(local_key(&window, "notes")));
+
+    // The other window's shown Screen is removed on its server: it shows the
+    // neighbor it holds, and the first window keeps its own.
+    window
+        .move_screen_to_window(&local_key(&window, "mail"), SECOND)
+        .unwrap();
+    assert_eq!(window.shown_in(SECOND), Some(local_key(&window, "mail")));
+    local_catalog(&mut window, &["work", "logs", "notes"]);
+    window.settle();
+    assert_eq!(window.shown_in(SECOND), Some(local_key(&window, "logs")));
+    assert_eq!(window.shown_key(), Some(local_key(&window, "notes")));
+    assert_eq!(window.holder(&local_key(&window, "mail")), None);
+
+    // A window that loses its last Screen shows none.
+    local_catalog(&mut window, &["work", "notes"]);
+    window.settle();
+    assert_eq!(window.shown_in(SECOND), None);
+    assert!(window.projection(SECOND).unwrap().opened().is_empty());
+}
+
+#[test]
+fn a_screen_nobody_here_asked_for_goes_to_the_window_active_last() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    local_catalog(&mut window, &["work"]);
+    window.open_window(SECOND).unwrap();
+    local_catalog(&mut window, &["work", "first"]);
+    window.settle();
+    assert_eq!(
+        window.holder(&local_key(&window, "first")),
+        Some(WindowId::FIRST)
+    );
+    window.set_intake(SECOND);
+    local_catalog(&mut window, &["work", "first", "second"]);
+    window.settle();
+    assert_eq!(window.holder(&local_key(&window, "second")), Some(SECOND));
+    assert_eq!(window.shown_in(SECOND), Some(local_key(&window, "second")));
+    assert_eq!(listed(&window), ["work", "first"]);
+    // A window that does not exist takes nothing.
+    window.set_intake(WindowId::new(7));
+    local_catalog(&mut window, &["work", "first", "second", "third"]);
+    window.settle();
+    assert_eq!(window.holder(&local_key(&window, "third")), Some(SECOND));
+}
+
+#[test]
+fn a_closed_window_hands_its_screens_to_its_heir() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    local_catalog(&mut window, &["work", "logs", "notes"]);
+    let owner = window.lifecycle_token();
+    window.select(owner, &local_key(&window, "work")).unwrap();
+    window.open_window(SECOND).unwrap();
+    window
+        .move_screen_to_window(&local_key(&window, "logs"), SECOND)
+        .unwrap();
+    assert!(window.close_window(SECOND, SECOND).is_err());
+    assert!(window
+        .close_window(WindowId::new(7), WindowId::FIRST)
+        .is_err());
+
+    // The heir keeps the Screen it shows and lists the Screens in their order.
+    window.close_window(SECOND, WindowId::FIRST).unwrap();
+    assert!(window.single_window());
+    assert_eq!(listed(&window), ["work", "logs", "notes"]);
+    assert_eq!(window.shown_key(), Some(local_key(&window, "work")));
+    assert!(!window.has_window(SECOND));
+
+    // The window in view can close too; its heir comes into view.
+    window.open_window(SECOND).unwrap();
+    window
+        .move_screen_to_window(&local_key(&window, "notes"), SECOND)
+        .unwrap();
+    window.close_window(WindowId::FIRST, SECOND).unwrap();
+    assert_eq!(window.window(), SECOND);
+    assert_eq!(listed(&window), ["work", "logs", "notes"]);
+    assert_eq!(window.shown_key(), Some(local_key(&window, "notes")));
+}
+
+#[test]
+fn the_close_of_the_application_covers_the_screens_of_every_window() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    let local = window.local_source().source_id();
+    local_catalog(&mut window, &["work", "logs"]);
+    // The fixture's pane IDs are the same on every Screen, so only the Screen
+    // the other window gets has a snapshot.
+    snapshot(&mut window, local, "logs", 2).unwrap();
+    window.open_window(SECOND).unwrap();
+    window
+        .move_screen_to_window(&local_key(&window, "logs"), SECOND)
+        .unwrap();
+    let whole = window
+        .local_source()
+        .assess_close(1, CloseTarget::Window)
+        .unwrap();
+    assert!(whole.affected.len() > 2);
+    for id in [WindowId::FIRST, SECOND] {
+        let projection = window.projection(id).unwrap();
+        let plan = projection
+            .local_source()
+            .assess_close(1, CloseTarget::Window)
+            .unwrap();
+        assert_eq!(plan.affected, whole.affected);
+        // The worker checks a window's plan against every window's Screens.
+        window.local_source().validate_close(&plan, true).unwrap();
+    }
+}
+
+#[test]
+fn a_host_serves_every_window_and_its_screens_stay_where_they_are_held() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    local_catalog(&mut window, &["work"]);
+    let host = remote(&mut window, "alice@example.test");
+    catalog(&mut window, host, &["api", "infra"]);
+    let api = open(&mut window, host, "api");
+    window.open_window(SECOND).unwrap();
+    assert!(window.enter(SECOND));
+
+    // A Screen another window holds is not opened a second time.
+    let token = window.source(host).unwrap().source_token();
+    assert!(window.open_existing(token, &api).is_err());
+    assert_eq!(window.held_elsewhere(&api), Some(WindowId::FIRST));
+    let infra = open(&mut window, host, "infra");
+    assert_eq!(window.holder(&infra), Some(SECOND));
+    assert_eq!(listed(&window), ["infra"]);
+    assert_eq!(window.windows_showing(host), [WindowId::FIRST, SECOND]);
+
+    // Each window's model shows the host with the Screen it holds.
+    let second = window.projection(SECOND).unwrap();
+    assert_eq!(second.source(host).unwrap().screens().len(), 1);
+    assert!(second.host(host).is_some());
+    let first = window.projection(WindowId::FIRST).unwrap();
+    assert_eq!(listed(&first), ["work", "api"]);
+
+    // Detaching in one window leaves the other's reference.
+    let owner = window.lifecycle_token();
+    window.detach(owner, &infra).unwrap();
+    window.settle();
+    assert_eq!(window.holder(&api), Some(WindowId::FIRST));
+    assert_eq!(window.source(host).unwrap().screens().len(), 1);
+
+    // Closing the host takes its Screens out of every window.
+    window.detach_all(owner, host).unwrap();
+    window.settle();
+    assert!(window.source(host).unwrap().screens().is_empty());
+    assert_eq!(window.holder(&api), None);
+    assert!(window.enter(WindowId::FIRST));
+    assert_eq!(listed(&window), ["work"]);
+}
+
+#[test]
+fn a_window_lists_the_screens_it_holds_in_their_sources_order() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    local_catalog(&mut window, &["work", "notes", "logs"]);
+    let owner = window.lifecycle_token();
+    window.open_window(SECOND).unwrap();
+    window
+        .move_screen_to_window(&local_key(&window, "notes"), SECOND)
+        .unwrap();
+    assert_eq!(listed(&window), ["work", "logs"]);
+    // The service moved `logs` before `work` in its own order, as a
+    // placement within the window asks: the window lists them so.
+    let (logs, work) = (local_key(&window, "logs"), local_key(&window, "work"));
+    local_catalog(&mut window, &["logs", "work", "notes"]);
+    window.settle();
+    assert_eq!(listed(&window), ["logs", "work"]);
+    assert!(window.enter(SECOND));
+    assert_eq!(listed(&window), ["notes"]);
+    // Relative navigation stays within the window.
+    assert!(!window.cycle(owner, TabStep::Next).unwrap());
+    assert!(window.enter(WindowId::FIRST));
+    window.select(owner, &logs).unwrap();
+    assert!(window.cycle(owner, TabStep::Next).unwrap());
+    assert_eq!(window.shown_key(), Some(work));
+    assert!(!window.cycle(owner, TabStep::Next).unwrap());
+}

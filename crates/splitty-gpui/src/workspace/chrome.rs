@@ -201,7 +201,7 @@ pub(super) mod view_tests {
             let at = |level| Zoom::from_values(level, "window", &ZoomSteps::default());
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.apply_appearance(
                         &settings_snapshot(owner, 1, Availability::Full),
@@ -348,7 +348,7 @@ pub(super) mod view_tests {
             let bundled = window.update(|_, cx| crate::terminal::terminal_family(cx).to_string());
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.destination = Destination::Screens;
                     workspace.model = Some(model.clone());
                     workspace.apply_appearance(
@@ -444,7 +444,7 @@ pub(super) mod view_tests {
                 serde_json::json!({"min": 0.25, "max": 4, "values": [0.25, 0.5, 1, 2, 4]});
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.model = Some(WindowWorkspace::new(owner));
                     workspace.apply_appearance(
                         &settings_snapshot_with_metadata(owner, 1, metadata),
@@ -492,7 +492,7 @@ pub(super) mod view_tests {
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
                     workspace.model = Some(model);
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.destination = Destination::Screens;
                     cx.notify();
                 });

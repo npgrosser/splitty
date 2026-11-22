@@ -1401,7 +1401,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model, window, cx);
                     workspace.status.clear();
                     cx.notify();
@@ -1547,7 +1547,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model, window, cx);
                     workspace.status.clear();
                     cx.notify();
@@ -1604,7 +1604,7 @@ mod view_tests {
                 cx.set_reduce_motion(true);
                 window.resize(size(px(900.), px(620.)));
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model, window, cx);
                     workspace.status.clear();
                     cx.notify();
@@ -1704,7 +1704,7 @@ mod view_tests {
             let (commands, mut receiver) = mpsc::channel(32);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = commands;
+                    workspace.commands = commands.into();
                     workspace.reconcile(model, window, cx);
                     workspace.ensure_pane(
                         route.clone(),

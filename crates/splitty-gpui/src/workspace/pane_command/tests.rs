@@ -77,7 +77,7 @@ fn forwarded_commands_act_on_a_pane_of_the_shown_screen_of_their_service() {
         window.update(|window, cx| {
             window.activate_window();
             view.update(cx, |workspace, cx| {
-                workspace.commands = sender;
+                workspace.commands = sender.into();
                 workspace.destination = Destination::Screens;
                 workspace.reconcile(model, window, cx);
             });

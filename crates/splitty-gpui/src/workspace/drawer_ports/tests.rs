@@ -64,7 +64,7 @@ fn setup(
         cx.set_reduce_motion(true);
         window.resize(size(px(900.), px(620.)));
         view.update(cx, |workspace, cx| {
-            workspace.commands = commands;
+            workspace.commands = commands.into();
             workspace.reconcile(model, window, cx);
             assert!(workspace
                 .ports
@@ -341,7 +341,7 @@ fn exact_detach_revokes_follow_only_after_queue_admission() {
             .unwrap();
         window.update(|window, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.commands = full_sender;
+                workspace.commands = full_sender.into();
                 workspace.request_close_screen(screen.clone(), window, cx);
             })
         });
@@ -390,7 +390,7 @@ fn accepted_window_close_revokes_follow_before_worker_acknowledgement() {
             .unwrap();
         window.update(|_, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.commands = full_sender;
+                workspace.commands = full_sender.into();
                 workspace.submit_close(plan.clone(), false, cx);
             })
         });

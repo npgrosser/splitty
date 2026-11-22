@@ -370,7 +370,7 @@ mod tests {
         let (commands, receiver) = mpsc::channel(8);
         window.update(|window, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.commands = commands;
+                workspace.commands = commands.into();
                 workspace.model = Some(model);
                 workspace.hosts.set_owner(owner);
                 assert!(workspace.hosts.accept(HubUpdate {

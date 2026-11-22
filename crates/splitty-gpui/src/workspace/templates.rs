@@ -1547,7 +1547,7 @@ mod tests {
             let (sender, mut commands) = mpsc::channel(64);
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.commands = sender;
+                    workspace.commands = sender.into();
                     workspace.destination = Destination::Screens;
                     workspace.reconcile(model, window, cx);
                     workspace.toggle_templates(window, cx);
