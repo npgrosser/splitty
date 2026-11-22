@@ -1,4 +1,4 @@
-# Splitty
+<h1><img src="icon.png" alt="" width="40" align="top"> Splitty</h1>
 
 A graphical terminal multiplexer for Linux, macOS and Windows.
 
