@@ -221,7 +221,7 @@ The native connection's attachment and pending-pane admission bound SHALL cover 
 - **AND** a rejected creation or confirmed closure restores usable capacity without detaching surviving screens
 
 ### Requirement: Native Local Terminal Close Assessment
-The experimental native local workspace SHALL use one terminal close policy for pane, Screen and normal owned-window close requests. Before it asks or closes, it SHALL obtain the server's close assessment of the target (see `mux-protocol`, Close Assessment) and SHALL require confirmation when that assessment asks, when the server does not assess, or when an affected creation, Screen or reconciliation of the client is still unresolved; known idle targets SHALL not. Window assessment SHALL include hidden Screens and pending local creations. Cancellation SHALL preserve affected sessions and layout. This policy covers the owned local terminal workspace only.
+The experimental native local workspace SHALL use one terminal close policy for pane, Screen and application close requests; the application closes with its last window or with Quit (see `desktop-windows`, Closing The Application). Before it asks or closes, it SHALL obtain the server's close assessment of the target (see `mux-protocol`, Close Assessment) and SHALL require confirmation when that assessment asks, when the server does not assess, or when an affected creation, Screen or reconciliation of the client is still unresolved; known idle targets SHALL not. The application's assessment SHALL include the Screens of every window, hidden ones too, and pending local creations. Closing a window that is not the last ends nothing and SHALL be neither assessed nor asked about. Cancellation SHALL preserve affected sessions and layout. This policy covers the owned local terminal workspace only.
 
 #### Scenario: Busy pane and Screen close
 - **WHEN** a pane button, pane-close shortcut or Screen close would end a session the server's assessment reports running
@@ -236,9 +236,19 @@ The experimental native local workspace SHALL use one terminal close policy for 
 - **THEN** the close requires confirmation rather than treating missing state as idle
 
 #### Scenario: Hidden busy session on window close
-- **WHEN** normal owned-window close is requested while a hidden Screen contains a busy terminal
+- **WHEN** the close of the last window is requested while a hidden Screen contains a busy terminal
 - **THEN** confirmation describes ending the owned local workspace
 - **AND** cancellation leaves the window, hidden session and its output stream usable
+
+#### Scenario: Busy session in another window on Quit
+- **WHEN** Quit is requested in one window while a Screen held by another window contains a busy terminal
+- **THEN** confirmation describes ending the owned local workspace
+- **AND** cancellation leaves every window and that session usable
+
+#### Scenario: One of several windows closed
+- **WHEN** a window that is not the last is closed while one of its Screens contains a busy terminal
+- **THEN** the window closes without an assessment or a question
+- **AND** the terminal keeps running in the window that takes the Screen over
 
 #### Scenario: Service without assessment
 - **WHEN** the close target's service does not announce `close-assessment-v1`
@@ -263,21 +273,26 @@ A native local close decision SHALL be bound to its request, connection generati
 - **AND** unchanged affected identities remain eligible for confirmation
 
 ### Requirement: Native Owned Window Close Acceptance
-A normal close of the experimental owned local window SHALL keep its UI and service running until the current close request is accepted or owned cleanup is known complete. Stale decisions or failed command admission SHALL NOT stop the service or quit the UI. Once accepted, the native client SHALL execute owned shutdown once, cease further user mutations, and await owned cleanup before normal process exit. Forced termination and non-cancellable platform quit events are outside this confirmation guarantee.
+A normal close of the experimental owned local application (its last window, or Quit; see `desktop-windows`, Closing The Application) SHALL keep its windows and service running until the current close request is accepted or owned cleanup is known complete. Stale decisions or failed command admission SHALL NOT stop the service or quit the UI. Once accepted, the native client SHALL execute owned shutdown once, close every window, cease further user mutations, and await owned cleanup before normal process exit. Closing a window that is not the last SHALL NOT stop the service or wait for it. Forced termination and non-cancellable platform quit events are outside this confirmation guarantee.
 
 #### Scenario: Stale or unadmitted window request
-- **WHEN** a window-close decision is stale or its bounded command queue cannot admit it
-- **THEN** the window stays open with its service running
+- **WHEN** an application-close decision is stale or its bounded command queue cannot admit it
+- **THEN** every window stays open with the service running
 - **AND** an approval for another request or connection cannot quit it
 
 #### Scenario: Accepted owned shutdown
-- **WHEN** the current window-close request passes confirmation and execution-time validation
-- **THEN** the native window receives acceptance before quitting
+- **WHEN** the current application-close request passes confirmation and execution-time validation
+- **THEN** the native client receives acceptance before quitting
 - **AND** later queued user mutations are not executed
 - **AND** the owned service and sessions are cleaned up once before normal process exit
 
+#### Scenario: Close of one of several windows
+- **WHEN** a window that is not the last is closed
+- **THEN** it closes without an acceptance from the service
+- **AND** the service, its sessions and the other windows keep running
+
 #### Scenario: Close during startup or completed cleanup
-- **WHEN** normal window close is requested before workspace discovery completes
+- **WHEN** the close of the only window is requested before workspace discovery completes
 - **THEN** unknown impact is assessed without assuming it is idle
 - **WHEN** owned cleanup has already completed after a startup or connection failure
 - **THEN** the window can close without waiting for an approval from a terminated owner

@@ -122,7 +122,7 @@ When a host's connection drops after `remote.ready`, the client SHALL mark that 
 - **THEN** `vm1`'s screens show "reconnecting…" and then their content again, with the output written in the meantime
 
 ### Requirement: Collapse And Terminate
-Closing a remote screen SHALL detach it without a question: the screen leaves the open list, its panes are detached, and its sessions keep running on the host. Terminating a remote screen SHALL be a separate action that ends its panes and their processes on the host (`close_screen`), and the client SHALL ask for confirmation before the first terminate. Closing the last pane of a remote screen ends that screen on its host as it does for a local one (see `workspace-model`, Closing a Pane): the screen SHALL leave the open list, and where a host of an earlier version keeps it without panes, the native window SHALL end it there with `close_screen` once the close of the pane it requested is confirmed. A remote screen without panes that a window shows SHALL accept a new terminal as a local one does. Quitting the app or closing the window SHALL only detach remote screens, and remote sessions SHALL NOT count as running processes that block quitting.
+Closing a remote screen SHALL detach it without a question: the screen leaves the open list, its panes are detached, and its sessions keep running on the host. Terminating a remote screen SHALL be a separate action that ends its panes and their processes on the host (`close_screen`), and the client SHALL ask for confirmation before the first terminate. Closing the last pane of a remote screen ends that screen on its host as it does for a local one (see `workspace-model`, Closing a Pane): the screen SHALL leave the open list, and where a host of an earlier version keeps it without panes, the native window SHALL end it there with `close_screen` once the close of the pane it requested is confirmed. A remote screen without panes that a window shows SHALL accept a new terminal as a local one does. Quitting the app or closing its last window SHALL only detach remote screens, and remote sessions SHALL NOT count as running processes that block quitting. Closing a window that is not the app's last SHALL detach nothing: its remote screens stay open in another window (see `desktop-windows`, Closing A Window).
 
 #### Scenario: Collapse
 - **WHEN** the user closes a remote screen with the default action
@@ -139,6 +139,10 @@ Closing a remote screen SHALL detach it without a question: the screen leaves th
 #### Scenario: New terminal in a remote screen without panes
 - **WHEN** a remote screen of a host of an earlier version shows no panes after its last process exited, and the user starts a terminal in it
 - **THEN** the host starts the terminal in that screen, which keeps its ID and name
+
+#### Scenario: One of two windows closed
+- **WHEN** a window that holds a screen of `vm1` is closed while the app has another window
+- **THEN** the screen stays open in the other window with its panes attached, and `vm1`'s connection stays as it is
 
 ### Requirement: Reopen Offer
 When the user creates a screen on a host whose `remote.ready` lists screens that the window does not show, the client SHALL first offer to open those screens, each with its name and number of panes, or to create a new screen. Choosing New Screen explicitly within a host directory SHALL count as choosing creation and SHALL skip that offer.
@@ -798,3 +802,25 @@ Servers SHALL advertise `port-catalog-v1` and durably store port numbers and nam
 #### Scenario: Removed host reads
 - **WHEN** a native main client requests `host.list`, `hostPreferences.get` or `hostOrder.get`
 - **THEN** the request is refused as an unsupported operation and the connection stays open
+
+### Requirement: One Host Connection For All Windows
+An app with several windows (see `desktop-windows`) SHALL hold its one hub connection per host for all of them, and each window SHALL show the group of every host of which it holds a screen, with that host's connection state. What Remote Screens In The Window says about a window's screen list and reference order SHALL apply to each window for the screens it holds.
+
+#### Scenario: Host in two windows
+- **WHEN** one window holds `api` and another holds `infra`, both screens of `vm1`
+- **THEN** the app has one hub connection to `vm1`, and each window shows `vm1`'s group with its own screen
+
+### Requirement: Host Actions And Remembered Screens Across Windows
+Connecting, retrying, updating and closing a host SHALL act on the host for the whole app from whichever window they are started: closing a host SHALL take its screens out of every window and keep them remembered as `closed`. The list of remembered remote screens SHALL describe all windows together: a host SHALL be forgotten when its last screen leaves the app's windows, not one of them, and a screen that moves between windows SHALL cause no write.
+
+#### Scenario: Host closed from one window
+- **WHEN** the user closes host `vm1` in a window while another window holds a screen of `vm1` too
+- **THEN** `vm1`'s screens leave both windows, keep running on the host and stay remembered as `closed`
+
+#### Scenario: Detach in one window
+- **WHEN** one window detaches `api` while another still holds `infra` of the same host
+- **THEN** `vm1` stays connected and remembered with `infra`
+
+#### Scenario: Remote screen moved
+- **WHEN** a screen of `vm1` moves from one window to another
+- **THEN** the list of remembered remote screens is not written

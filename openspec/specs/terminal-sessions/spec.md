@@ -524,7 +524,7 @@ The server SHALL send `size` with the `sessionId`, `cols`, `rows` and the `polic
 - **THEN** it receives the `size` event before the first binary frame of the replay
 
 ### Requirement: Client Size Reports
-With a server that announces `pty-size-v1`, a client SHALL report as `resize` the size of a shown pane (its panel visible on the active screen), report it again when the pane becomes shown, and send `hide` when it stops being shown. It SHALL report no other pane, except that it MAY report the other terminal tabs of a shown pane's tab group at that pane's measured size, follow that size, and send `hide` for them once the group stops being shown; the native app does. Its first report after an attach SHALL carry `redraw: true` instead of resizing the PTY by one row and back. With other servers it SHALL resize the PTY as before, send none of these messages and resize no background tab.
+With a server that announces `pty-size-v1`, a client SHALL report as `resize` the size of a shown pane (its panel visible on the active screen), report it again when the pane becomes shown, and send `hide` when it stops being shown. In a client with several windows (see `desktop-windows`) every window has its active screen: a pane is shown while its panel is visible on the screen a window shows, and SHALL stop being shown when its window becomes hidden while another window of the client stays visible, until that window is visible again. It SHALL report no other pane, except that it MAY report the other terminal tabs of a shown pane's tab group at that pane's measured size, follow that size, and send `hide` for them once the group stops being shown; the native app does. Its first report after an attach SHALL carry `redraw: true` instead of resizing the PTY by one row and back. With other servers it SHALL resize the PTY as before, send none of these messages and resize no background tab.
 
 #### Scenario: Background screen
 - **WHEN** the user switches from a host's screen to another screen of the same host
@@ -539,13 +539,35 @@ With a server that announces `pty-size-v1`, a client SHALL report as `resize` th
 - **WHEN** a client attaches to a session of a server whose `mux.welcome` has no `pty-size-v1`
 - **THEN** it resizes the PTY by one row and back after the attach and sends no `activity`, `idle` or `hide`
 
+#### Scenario: Two windows on one server
+- **WHEN** a client shows screen `s1` in one visible window and screen `s2` of the same server in another, and the first window switches to `s3`
+- **THEN** it has reported the panes of `s1` and of `s2`, and the switch sends `hide` for the sessions of `s1` and none for those of `s2`
+
+#### Scenario: Hidden window beside a visible one
+- **WHEN** one of a client's two windows becomes hidden while the other stays visible
+- **THEN** the client sends `hide` for the sessions of the screen the hidden window shows
+- **AND** it sends `resize` for them when that window is visible again
+
+#### Scenario: Screen moved to another window
+- **WHEN** a screen moves to another window of its client, where its pane measures 100×30 instead of 120×40
+- **THEN** the client sends `resize` with 100×30 for the pane's session and neither `detach` nor `attach`
+
 ### Requirement: Client Activity Reports
-A client SHALL send `activity` to a server that announces `pty-size-v1` only for its user's own interaction with the window and only to the connection of the active screen, at least once per idle time while the user interacts. It SHALL send `idle` to those connections when the window becomes hidden, and on each `mux.welcome` with the capability `activity` or `idle`, before it attaches any session, according to whether its window is visible and focused on a screen of that connection.
+A client SHALL send `activity` to a server that announces `pty-size-v1` only for its user's own interaction with the window and only to the connection of the active screen, at least once per idle time while the user interacts. It SHALL send `idle` to those connections when the window becomes hidden, and on each `mux.welcome` with the capability `activity` or `idle`, before it attaches any session, according to whether its window is visible and focused on a screen of that connection. In a client with several windows (see `desktop-windows`), the active screen SHALL be the one shown in the window the user interacts with, `idle` SHALL be sent when the last visible window becomes hidden and not before, and a welcome SHALL be greeted with `activity` only while a visible, focused window shows a screen of that connection.
 
 #### Scenario: Automatic actions do not take the size
 - **WHEN** a client reconnects and re-attaches the sessions of a screen while its window is not focused
 - **THEN** it sends `idle` before attaching and no `activity`
 - **AND** the sessions' PTY sizes stay those of the client in use
+
+#### Scenario: Activity follows the window in use
+- **WHEN** a client shows a local screen in one window and a screen of `vm1` in another, and the user types in the second
+- **THEN** the connection of `vm1` gets `activity` and the local one gets none
+
+#### Scenario: One of two windows hidden
+- **WHEN** one of a client's two windows becomes hidden while the other stays visible
+- **THEN** the client sends no `idle`
+- **AND** it sends `idle` to every connection once the other window is hidden as well
 
 ### Requirement: Client Display of the PTY Size
 A client SHALL show each session at the PTY size of the latest `size` event. When that size differs from the pane's, it SHALL show that the size is set by another client and, unless the policy is `smallest`, SHALL offer to take the size over with `activity` and `takeover: true`. A session taller than the pane SHALL keep the row of its cursor visible. A `size` event outside 1–1000 columns or 1–500 rows, or with an unknown policy, SHALL be ignored.

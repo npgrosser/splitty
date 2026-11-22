@@ -8,6 +8,19 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-multi-window` NMW-P1 to NMW-P11** (2026-11-22, provisional, tbd; recorded in the change's design, behavior in the `desktop-windows` spec and in `remote-screens`, `terminal-sessions` and `mux-protocol`):
+  - **NMW-P1:** closing a window that is not the last hands its Screens to the window that was active last among the others; nothing ends and nothing is asked. Alternative: the close ends the window's local Screens after the assessed question and detaches its remote ones, as a browser window closes its tabs.
+  - **NMW-P2:** `window.new` opens a window with one new local Screen. Alternative: an empty window that offers "New Screen".
+  - **NMW-P3:** a Screen that enters the workspace without a window's command (CLI, control API, another client) is held by the window that was active last. Alternative: always the first window.
+  - **NMW-P4:** opening a Screen that another window holds activates that window. Alternative: move the Screen to the window that asked.
+  - **NMW-P5:** a window left without a Screen closes unless it is the last. Alternative: it stays open with the empty page.
+  - **NMW-P6:** connecting, retrying, updating and closing a host act on the host for the whole application; closing it takes its Screens out of every window. Alternative: closing a host in a window removes only that window's references.
+  - **NMW-P7:** a hidden window withdraws its size reports only while another window is visible; one hidden window keeps today's behavior (`idle`, sizes stay). Alternatives: withdraw for every hidden window, or never.
+  - **NMW-P8:** default keys: `window.new` is Ctrl+Shift+N, on macOS Cmd+N; `window.close`, `screen.move-to-new-window` and `screen.move-to-next-window` have none.
+  - **NMW-P9:** the Hosts, Ports and Settings pages belong to a window and can be open in several at once; what they edit is shared. Alternative: one Settings surface for the application.
+  - **NMW-P10:** "Move to Screen" for a tab or tab group offers the Screens its window holds. Alternative: offer the Screens of its server in every window.
+  - **NMW-P11:** each window keeps its own notifications: an event is added in the window that holds its Screen, and the unread marks of a Screen that moves to another window go. Alternative: one ledger for the application, whose marks follow the Screen.
+
 - **`salon-default-theme` SDT-1 and SDT-2** (2026-11-22, provisional, tbd; recorded in the change's proposal):
   - **SDT-1:** Windows 11 Light keeps taking the default light palette, so its terminals get the paper background of Splitty Salon Light in place of white. Alternative: give Windows 11 Light a palette of its own with the white background.
   - **SDT-2:** the default themes are named Splitty Salon (`splitty-salon`, `splitty-salon-light`). Alternative: another name; the identifiers would change with it.

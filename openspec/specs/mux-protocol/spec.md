@@ -223,7 +223,7 @@ For any single op, the server MUST deliver every `mux.pane_spawned` event for th
 - **THEN** that client SHALL receive `mux.pane_spawned` for `p2` and `p3` before the `mux.nudge` for that op
 
 ### Requirement: Server Commands
-The server SHALL deliver a server-initiated `command` event to every connected client, carrying a nested `command` object whose `type` is one of `pane.activate`, `pane.copy`, `pane.paste`, `pane.clear`, `pane.close`, or `pane.split` (with `direction`), and an optional `paneId`. A client SHALL apply a command only to panes of the screens it shows from the server whose connection delivered the command: to the named pane, or, when `paneId` is absent, to the active pane of its active screen if that screen belongs to that server. Otherwise it SHALL ignore the command. A command SHALL NOT change which screen is active. How commands are triggered is defined in `control-api`.
+The server SHALL deliver a server-initiated `command` event to every connected client, carrying a nested `command` object whose `type` is one of `pane.activate`, `pane.copy`, `pane.paste`, `pane.clear`, `pane.close`, or `pane.split` (with `direction`), and an optional `paneId`. A client SHALL apply a command only to panes of the screens it shows from the server whose connection delivered the command: to the named pane, or, when `paneId` is absent, to the active pane of its active screen if that screen belongs to that server. Otherwise it SHALL ignore the command. In a client with several windows (see `desktop-windows`), the screens it shows are those its windows show, a named pane is found in whichever window shows its screen, and the active screen is the one shown in the active window or, while none is active, in the window that was active last. A command SHALL NOT change which screen is active. How commands are triggered is defined in `control-api`.
 
 #### Scenario: Split command without pane
 - **WHEN** a client receives `command` with `{"type": "pane.split", "direction": "right"}` and its active screen belongs to the server that sent it
@@ -236,6 +236,14 @@ The server SHALL deliver a server-initiated `command` event to every connected c
 #### Scenario: Pane of another server
 - **WHEN** a window shows screens of two servers and one of them sends `pane.close` naming a pane id that only exists on a screen of the other server
 - **THEN** the client SHALL ignore the command
+
+#### Scenario: Named pane in another window
+- **WHEN** a client has two windows, the active one shows screen `s1` and the other shows `s2`, and their server sends `pane.clear` naming a pane of `s2`
+- **THEN** the client SHALL clear that pane in the window that shows `s2`
+
+#### Scenario: No pane named with two windows
+- **WHEN** a client has two windows showing screens of the same server and receives `{"type": "pane.split", "direction": "right"}` without a pane
+- **THEN** the client SHALL split the active pane of the window that is active, or was active last, and leave the other window's screen unchanged
 
 ### Requirement: Disconnect Handling
 When a connection ends through a close frame, a transport error, or heartbeat timeout, the server SHALL stop delivering events and terminal output to it. A disconnect MUST NOT terminate any session and MUST NOT change workspace state, and other clients SHALL NOT be notified of it.
@@ -542,7 +550,7 @@ A session SHALL exit user-initiated when the server closed it while its program 
 - **THEN** its notice's title starts with `Unnamed Screen: `, not with `Screen 2: `
 
 ### Requirement: Notifications in the Window
-A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the seen pane that has the focus, see Seen Panes) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back.
+A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the seen pane that has the focus, see Seen Panes) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back. In an application with several windows (see `desktop-windows`) an event SHALL add one notification, in the window that holds the event's screen. The notifications a window holds for a screen SHALL NOT follow the screen to another window: they go when the screen leaves.
 
 #### Scenario: Own pane closed
 - **WHEN** the user closes a pane whose shell still runs
@@ -559,6 +567,16 @@ A window SHALL add a notification for an event with a notice that is not suppres
 #### Scenario: Switch turned off later
 - **WHEN** a window holds an unread `process.finished` notification and the user turns `notifications.processFinished` off
 - **THEN** the notification goes and does not return when the switch is turned on again
+
+#### Scenario: Two windows of one application
+- **WHEN** an application has two windows and a notice that is not suppressed arrives for a pane of a screen the second window holds
+- **THEN** the application adds one notification, marked on that screen in the second window
+- **AND** the first window shows no mark for it
+
+#### Scenario: Screen with an unread notification moves
+- **WHEN** a screen with an unread notification moves to another window
+- **THEN** neither window marks that notification any more
+- **AND** a notice that arrives afterwards is marked in the window that holds the screen now
 
 ### Requirement: Server-Chosen Screen Names
 A server SHALL list `screen-names-v1` in `mux.welcome.capabilities`. A client SHALL send `create_screen`, and `move_pane_to_screen` with `createScreen`, for a new screen without a name to such a server, SHALL show the name the server reports for the screen, and SHALL send no label of its own in place of it. Until the name arrives it SHALL show a placeholder that names no screen. A screen the server reports without a name SHALL be shown as "Unnamed Screen", never by its position.
