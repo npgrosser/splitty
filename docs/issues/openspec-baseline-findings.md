@@ -539,6 +539,12 @@ that area touches them.
 
 ## Flaky tests
 
+- Seen on 2026-11-22 in a local full run on Fedora: `the_hub_relays_a_host_through_real_ssh`
+  (`crates/splitty-server/tests/remote_connect.rs`) fails with "SSH terminal ended before" the pick list of
+  `splitty attach`, every time and also on the commit before the change that was being checked. Its remote
+  command runs under `script -qefc`, and `script` was not installed (Fedora ships it in `util-linux-script`,
+  apart from `util-linux`). The test does not check for the program and fails instead of saying what is missing;
+  not changed.
 - Seen on 2026-11-21 in CI on `main`, in the macOS job, in two attempts of one run, for a commit that changed a
   test of another crate only: `pty::session::tests::managed_input_backpressure_does_not_block_revocation_or_stop`
   (`splitty-core`) failed at its `stop` with "killpg owned leader group … with SIGTERM: EPERM". A stop signals
