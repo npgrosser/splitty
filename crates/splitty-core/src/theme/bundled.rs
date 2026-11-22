@@ -4,6 +4,8 @@
 
 use super::types::ThemeFile;
 
+const SPLITTY_SALON_TOML: &str = include_str!("bundled/splitty-salon.toml");
+const SPLITTY_SALON_LIGHT_TOML: &str = include_str!("bundled/splitty-salon-light.toml");
 const SPLITTY_DARK_TOML: &str = include_str!("bundled/splitty-dark.toml");
 const SPLITTY_LIGHT_TOML: &str = include_str!("bundled/splitty-light.toml");
 const SPLITTY_CLASSIC_TOML: &str = include_str!("bundled/splitty-classic.toml");
@@ -18,6 +20,14 @@ const SPLITTY_CLASSIC_LIGHT_GRAY_TOML: &str =
     include_str!("bundled/splitty-classic-light-gray.toml");
 const ADWAITA_DARK_TOML: &str = include_str!("bundled/adwaita-dark.toml");
 const ADWAITA_LIGHT_TOML: &str = include_str!("bundled/adwaita-light.toml");
+
+pub fn splitty_salon() -> ThemeFile {
+    toml::from_str(SPLITTY_SALON_TOML).expect("bundled splitty-salon.toml is valid")
+}
+
+pub fn splitty_salon_light() -> ThemeFile {
+    toml::from_str(SPLITTY_SALON_LIGHT_TOML).expect("bundled splitty-salon-light.toml is valid")
+}
 
 pub fn splitty_dark() -> ThemeFile {
     toml::from_str(SPLITTY_DARK_TOML).expect("bundled splitty-dark.toml is valid")
@@ -75,6 +85,8 @@ pub fn adwaita_light() -> ThemeFile {
 
 pub fn bundled_theme(name: &str) -> Option<ThemeFile> {
     match name {
+        "splitty-salon" => Some(splitty_salon()),
+        "splitty-salon-light" => Some(splitty_salon_light()),
         "splitty-dark" => Some(splitty_dark()),
         "splitty-light" => Some(splitty_light()),
         "splitty-classic" => Some(splitty_classic()),
@@ -94,6 +106,8 @@ pub fn bundled_theme(name: &str) -> Option<ThemeFile> {
 
 pub fn bundled_names() -> Vec<String> {
     vec![
+        "splitty-salon".into(),
+        "splitty-salon-light".into(),
         "splitty-dark".into(),
         "splitty-light".into(),
         "splitty-classic".into(),
@@ -120,6 +134,25 @@ mod tests {
         assert_eq!(theme.name, "Splitty Modern");
         assert_eq!(theme.palette.gray_900, "#0f0f0f");
         assert_eq!(theme.palette.accent, "#63a0ff");
+    }
+
+    #[test]
+    fn test_bundled_salon_parses() {
+        let (dark, light) = (splitty_salon(), splitty_salon_light());
+        assert_eq!(dark.name, "Splitty Salon");
+        assert_eq!(dark.palette.accent, "#cfa55b");
+        assert_eq!(light.name, "Splitty Salon Light");
+        assert_eq!(light.palette.accent, "#2f6f73");
+        // Both name their terminal colors: the ANSI colors are not the
+        // muted ones of the interface.
+        assert_eq!(
+            dark.terminal.get("blue").map(String::as_str),
+            Some("#63a0ff")
+        );
+        assert_eq!(
+            light.terminal.get("blue").map(String::as_str),
+            Some("#3589d6")
+        );
     }
 
     #[test]

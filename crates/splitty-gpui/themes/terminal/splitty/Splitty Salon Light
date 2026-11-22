@@ -1,0 +1,23 @@
+# name: Splitty Salon Light
+palette = 0=#393631
+palette = 1=#c24a53
+palette = 2=#588c39
+palette = 3=#ad7a35
+palette = 4=#3589d6
+palette = 5=#a24bc2
+palette = 6=#2b919d
+palette = 7=#5b574f
+palette = 8=#787368
+palette = 9=#d4545e
+palette = 10=#5d8c41
+palette = 11=#a07030
+palette = 12=#3f84c1
+palette = 13=#b55dd0
+palette = 14=#318b97
+palette = 15=#4a4740
+background = #faf9f6
+foreground = #131311
+cursor-color = #2f6f73
+cursor-text = #faf9f6
+selection-background = #bfbbb1
+selection-foreground = #131311

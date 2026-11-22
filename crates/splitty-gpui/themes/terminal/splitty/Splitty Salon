@@ -1,0 +1,23 @@
+# name: Splitty Salon
+palette = 0=#0d1110
+palette = 1=#e06c75
+palette = 2=#98c379
+palette = 3=#e5c07b
+palette = 4=#63a0ff
+palette = 5=#c678dd
+palette = 6=#56b6c2
+palette = 7=#c5cbca
+palette = 8=#627471
+palette = 9=#e88891
+palette = 10=#a9d48b
+palette = 11=#ecd08e
+palette = 12=#7db4ff
+palette = 13=#d48ce6
+palette = 14=#6bc5d0
+palette = 15=#fafafa
+background = #0d1110
+foreground = #c5cbca
+cursor-color = #cfa55b
+cursor-text = #0d1110
+selection-background = #262e2d
+selection-foreground = #c5cbca

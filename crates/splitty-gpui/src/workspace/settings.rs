@@ -1763,7 +1763,7 @@ mod tests {
             let state = view.read(cx);
             assert_eq!(
                 state.snapshot.as_ref().unwrap().value(SettingsField::Theme),
-                Some(SettingsValue::Text("splitty-dark".into()))
+                Some(SettingsValue::Text("splitty-salon".into()))
             );
             // settings, Older server without metadata: the fields every
             // server knows stay editable within the fallback limits; the
@@ -1802,7 +1802,7 @@ mod tests {
             let selected = state.selects[&SettingsField::Theme].read(cx);
             assert_eq!(
                 selected.selected_value().map(String::as_str),
-                Some("Splitty Modern")
+                Some("Splitty Salon")
             );
         });
         show(

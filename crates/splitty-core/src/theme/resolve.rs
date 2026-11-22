@@ -304,7 +304,7 @@ pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme 
 
 /// The theme shown where the requested one cannot be: the default theme.
 fn fallback() -> ResolvedTheme {
-    let mut theme = resolve_theme_file(&bundled::splitty_dark());
+    let mut theme = resolve_theme_file(&bundled::splitty_salon());
     theme.id = Some(crate::config::DEFAULT_THEME_DARK.to_owned());
     theme
 }
@@ -407,11 +407,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_unknown_falls_back_to_dark() {
+    fn test_resolve_unknown_falls_back_to_the_default() {
         let dir = tempfile::tempdir().unwrap();
         let theme = resolve_theme("nonexistent", dir.path());
-        assert_eq!(theme.name, "Splitty Modern");
-        assert_eq!(theme.id.as_deref(), Some("splitty-dark"));
+        assert_eq!(theme.name, "Splitty Salon");
+        assert_eq!(theme.id.as_deref(), Some("splitty-salon"));
     }
 
     /// settings, Terminal Palette Choice: the named palette, then the one

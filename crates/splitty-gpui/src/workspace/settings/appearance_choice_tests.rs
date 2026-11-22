@@ -203,7 +203,7 @@ fn a_chosen_theme_shows_at_once_and_gives_way_to_the_saved_value() {
         let (owner, mut commands) = setup(window, &view, |owner| {
             settings_snapshot_with_terminal(owner, 1, json!({}), json!({}))
         });
-        assert_eq!(remembered(window), "splitty-dark");
+        assert_eq!(remembered(window), "splitty-salon");
         let light = confirmed(
             window,
             &view,
@@ -231,7 +231,7 @@ fn a_chosen_theme_shows_at_once_and_gives_way_to_the_saved_value() {
         assert!(status(window, &view, field)
             .unwrap()
             .starts_with("Applying"));
-        assert_eq!(remembered(window), "splitty-dark");
+        assert_eq!(remembered(window), "splitty-salon");
 
         // A read that was in flight before the write carries other changes
         // but not the choice: the choice stays drawn over it.
@@ -245,7 +245,7 @@ fn a_chosen_theme_shows_at_once_and_gives_way_to_the_saved_value() {
             shown(window, &view),
             (light.surface, light.terminal.background, 16.)
         );
-        assert_eq!(remembered(window), "splitty-dark");
+        assert_eq!(remembered(window), "splitty-salon");
         window.update(|_, cx| assert_eq!(view.read(cx).appearance_generation, 2));
 
         deliver(

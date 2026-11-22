@@ -8,6 +8,10 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`salon-default-theme` SDT-1 and SDT-2** (2026-11-22, provisional, tbd; recorded in the change's proposal):
+  - **SDT-1:** Windows 11 Light keeps taking the default light palette, so its terminals get the paper background of Splitty Salon Light in place of white. Alternative: give Windows 11 Light a palette of its own with the white background.
+  - **SDT-2:** the default themes are named Splitty Salon (`splitty-salon`, `splitty-salon-light`). Alternative: another name; the identifiers would change with it.
+
 - **`show-pending-appearance` SPA-1** (2026-11-21, provisional, tbd; recorded in the change's proposal): after the OS light or dark preference changes, outstanding appearance choices (a theme, palette or font sent but not yet read back) are resolved for the new preference when the settings read that the change starts arrives, together with the confirmed values, not at the moment the window learns of the change. Alternative: resolve the choices for the new preference at once and the confirmed values with the read.
 
 - **`terminal-font` TF-1 to TF-7** (2026-11-21, provisional, tbd; recorded in the change's proposal):

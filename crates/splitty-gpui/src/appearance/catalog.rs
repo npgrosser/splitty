@@ -9,8 +9,8 @@ use std::{collections::HashSet, path::Path, rc::Rc};
 
 include!(concat!(env!("OUT_DIR"), "/bundled_themes.rs"));
 
-pub const DEFAULT_DARK: &str = "splitty-dark";
-pub const DEFAULT_LIGHT: &str = "splitty-light";
+pub const DEFAULT_DARK: &str = "splitty-salon";
+pub const DEFAULT_LIGHT: &str = "splitty-salon-light";
 
 const MAX_THEME_SET_BYTES: u64 = 1024 * 1024;
 const MAX_THEMES_PER_SET: usize = 64;
@@ -347,6 +347,8 @@ mod tests {
         // The names stored by earlier versions still select a theme and a
         // terminal palette of the same name.
         for id in [
+            "splitty-salon",
+            "splitty-salon-light",
             "splitty-dark",
             "splitty-light",
             "splitty-classic",

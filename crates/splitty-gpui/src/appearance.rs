@@ -1505,7 +1505,7 @@ mod tests {
             .expect("a bundled light theme without a palette of its name");
         assert_eq!(
             background(&selection(&unpaired.id)),
-            (of("splitty-light"), None)
+            (of(catalog::DEFAULT_LIGHT), None)
         );
     }
 
@@ -1518,7 +1518,7 @@ mod tests {
         assert_eq!(shown.scheme, ColorScheme::Light);
         assert_eq!(
             shown.surface,
-            resolve(&selection("splitty-light"), &catalog).surface
+            resolve(&selection(catalog::DEFAULT_LIGHT), &catalog).surface
         );
         assert!(shown.notice.unwrap().contains("no-such-theme"));
     }
