@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
 #
-# Generate all icon variants from the single source icon (icon.png in project root).
-# Requires: sips + iconutil (macOS) or ImageMagick (convert) on Linux.
+# Generate all icon files from the single source icon (icon.png in project root).
+# Requires: sips + iconutil (macOS) or ImageMagick (magick/convert) on Linux; the
+# macOS icon needs iconutil or python3 with Pillow.
+#
+# Usage: generate-icons.sh [variant]
+#   With a variant (a name from icon-variants/, e.g. "framed"), that variant
+#   first replaces icon.png.
 #
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/icon.png"
+
+if [ $# -gt 0 ]; then
+  VARIANT="$ROOT/icon-variants/$1.png"
+  if [ ! -f "$VARIANT" ]; then
+    echo "Error: no variant $1 in $ROOT/icon-variants" >&2
+    exit 1
+  fi
+  cp "$VARIANT" "$SRC"
+fi
 
 if [ ! -f "$SRC" ]; then
   echo "Error: source icon not found at $SRC" >&2
@@ -68,8 +82,17 @@ generate_icns() {
   if command -v iconutil &>/dev/null; then
     iconutil -c icns "$iconset" -o "$out"
     echo "  icns → $out"
+  elif python3 -c 'import PIL' &>/dev/null; then
+    python3 - "$SQUARE_SRC" "$out" <<'PY'
+import sys
+from PIL import Image
+
+image = Image.open(sys.argv[1]).convert("RGBA").resize((1024, 1024), Image.LANCZOS)
+image.save(sys.argv[2], format="ICNS")
+PY
+    echo "  icns → $out"
   else
-    echo "  ⚠ iconutil not available, skipping $out"
+    echo "  ⚠ neither iconutil nor python3 with Pillow available, skipping $out"
   fi
   rm -rf "$(dirname "$iconset")"
 }
