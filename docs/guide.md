@@ -36,9 +36,12 @@ Window** and **Move Screen to Next Window** in the command palette; its
 terminals keep running and keep their history. A host's panel moves all its
 screens at once, and **Move Screen Group to New Window** or **to Next
 Window** does that for the group of the shown screen, the local screens
-included. Closing a window while another
-one is open closes nothing else: its screens go to the window you used last
-before it. Closing the last window, or **Quit**, ends the application.
+included. Closing a window while another one is open closes what it holds:
+its local screens close, and a host's screens are detached and keep running
+on the host. When a program still runs in one of them, the window asks first
+and also offers **Move to Other Window**, which hands its screens to the
+window you used last before it and ends nothing. Closing the last window, or
+**Quit**, ends the application.
 
 Settings, theme, zoom and key bindings are the application's and apply in
 every window. Starting the app a second time is something else: that is a

@@ -183,7 +183,7 @@ fn a_screen_changes_windows_with_its_terminal_view() {
 }
 
 #[test]
-fn a_window_closes_by_handing_its_screens_over_and_the_last_one_ends_the_application() {
+fn a_window_asks_before_its_screens_close_and_can_hand_them_over_instead() {
     let (mut app, mut commands) = application();
     let mut model = WindowWorkspace::new(Uuid::new_v4());
     let keys = model
@@ -201,18 +201,96 @@ fn a_window_closes_by_handing_its_screens_over_and_the_last_one_ends_the_applica
     model_for(&mut app, &model, SECOND);
     let notes = terminal(&mut app, SECOND, &model, "p-notes").expect("its terminal view");
 
-    // One of two windows: nothing is assessed, the worker is asked to
-    // remove the window, and the window stays until the worker did.
-    run(&mut app, SECOND, KeyCommand::CloseWindow);
+    // One of two windows: its Screen is assessed, and since a program runs
+    // in it one question is asked. Nothing closes and nothing moves before
+    // the answer.
+    let (handle, second) = app
+        .update(|cx| Windows::ui_test_window(SECOND, cx))
+        .unwrap();
+    let mut window = gpui_kit::VisualTestContext::from_window(handle, &app);
+    let mut ask = |app: &mut TestAppContext,
+                   commands: &mut mpsc::Receiver<WorkerCommand>,
+                   window: &mut gpui_kit::VisualTestContext| {
+        run(app, SECOND, KeyCommand::CloseWindow);
+        let asked = sent(commands);
+        assert!(!asked.iter().any(|command| matches!(
+            command.kind(),
+            CommandKind::CloseWindow | CommandKind::RequestClose { .. }
+        )));
+        let assess = asked
+            .into_iter()
+            .find(|command| {
+                command.window() == SECOND
+                    && matches!(command.kind(), CommandKind::AssessClose { .. })
+            })
+            .expect("the window's Screens are assessed");
+        // The service's answer: a program runs in the window's Screen.
+        let CommandKind::AssessClose { request_id, .. } = assess.kind() else {
+            unreachable!("found as an assessment");
+        };
+        let (source, request_id) = (assess.source_token().expect("its source"), *request_id);
+        let assessment: splitty_client_core::workspace::CloseAssessment =
+            serde_json::from_value(serde_json::json!({
+                "confirm": true, "running": 1, "starting": 0, "scratchpads": 0,
+                "annotations": 0,
+                "entries": [{
+                    "screenId": "notes", "paneId": "p-notes", "sessionId": "s-notes",
+                    "running": true, "starting": false, "scratchpad": false,
+                    "annotations": 0,
+                }],
+            }))
+            .expect("assessment");
+        window.update(|window, cx| {
+            second.update(cx, |workspace, cx| {
+                workspace.close_assessed(
+                    source,
+                    request_id,
+                    splitty_client_core::workspace::CloseImpact::Assessed(assessment),
+                    window,
+                    cx,
+                );
+            })
+        });
+        let (title, detail) = window.pending_prompt().expect("one question");
+        assert_eq!(title, "Close this window?");
+        assert!(detail.contains("Its Screen closes"), "{detail}");
+        assert!(detail.contains("Running sessions: 1"), "{detail}");
+    };
+    ask(&mut app, &mut commands, &mut window);
+    window.simulate_prompt_answer("Keep open");
+    window.run_until_parked();
+    assert!(
+        sent(&mut commands).is_empty(),
+        "the window and its Screen stay"
+    );
+    assert_eq!(app.update(|cx| Windows::count(cx)), 2);
+
+    // Closing: the Screen's close is submitted, confirmed. The window goes
+    // once it is empty, as after any last Screen.
+    ask(&mut app, &mut commands, &mut window);
+    window.simulate_prompt_answer("Close");
+    window.run_until_parked();
+    let closing = sent(&mut commands);
+    assert!(closing.iter().any(|command| command.window() == SECOND
+        && matches!(command.kind(), CommandKind::RequestClose { .. })));
+    assert!(!closing
+        .iter()
+        .any(|command| matches!(command.kind(), CommandKind::CloseWindow)));
+    window.update(|_, cx| second.update(cx, |workspace, _| workspace.pending_close = None));
+
+    // Moving instead: the worker is asked to remove the window, whose
+    // Screens it hands to another one, and the window stays until it did.
+    ask(&mut app, &mut commands, &mut window);
+    window.simulate_prompt_answer("Move to Other Window");
+    window.run_until_parked();
     let asked = sent(&mut commands);
     assert!(asked
         .iter()
         .any(|command| command.window() == SECOND
             && matches!(command.kind(), CommandKind::CloseWindow)));
-    assert!(!asked.iter().any(|command| matches!(
-        command.kind(),
-        CommandKind::AssessClose { .. } | CommandKind::RequestClose { .. }
-    )));
+    assert!(!asked
+        .iter()
+        .any(|command| matches!(command.kind(), CommandKind::RequestClose { .. })));
     assert_eq!(app.update(|cx| Windows::count(cx)), 2);
 
     // The worker removed it: the window goes, and the heir shows the same
@@ -248,6 +326,44 @@ fn a_window_closes_by_handing_its_screens_over_and_the_last_one_ends_the_applica
         command.kind(),
         CommandKind::AssessClose { .. } | CommandKind::RequestClose { .. }
     )));
+}
+
+#[test]
+fn a_window_whose_screens_end_nothing_closes_them_without_a_question() {
+    let (mut app, mut commands) = application();
+    let mut model = WindowWorkspace::new(Uuid::new_v4());
+    let keys = model
+        .ui_test_local_screens_fixture(&["work", "notes"])
+        .unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    run(&mut app, WindowId::FIRST, KeyCommand::NewWindow);
+    model.ui_test_open_window(SECOND).unwrap();
+    model.ui_test_move_screen(&keys[1], SECOND).unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    model_for(&mut app, &model, SECOND);
+    sent(&mut commands);
+
+    run(&mut app, SECOND, KeyCommand::CloseWindow);
+    let assess = sent(&mut commands)
+        .into_iter()
+        .find(|command| matches!(command.kind(), CommandKind::AssessClose { .. }))
+        .expect("the window's Screens are assessed");
+    let (handle, second) = app
+        .update(|cx| Windows::ui_test_window(SECOND, cx))
+        .unwrap();
+    let mut window = gpui_kit::VisualTestContext::from_window(handle, &app);
+    window.update(|window, cx| {
+        second.update(cx, |workspace, cx| {
+            assert!(workspace.answer_close_assessment_for_test(&assess, window, cx));
+        })
+    });
+    assert!(!window.has_pending_prompt(), "an idle shell asks nothing");
+    let closing = sent(&mut commands);
+    assert!(closing.iter().any(|command| command.window() == SECOND
+        && matches!(command.kind(), CommandKind::RequestClose { .. })));
+    assert!(!closing
+        .iter()
+        .any(|command| matches!(command.kind(), CommandKind::CloseWindow)));
 }
 
 #[test]
@@ -468,4 +584,18 @@ fn a_hosts_screen_changes_windows_with_its_terminal_view() {
         before,
         "the same terminal view, with what it shows"
     );
+
+    // Closing the window that holds only the host's Screen detaches it:
+    // its sessions stay on the host, so nothing is assessed or asked.
+    sent(&mut commands);
+    run(&mut app, SECOND, KeyCommand::CloseWindow);
+    let closing = sent(&mut commands);
+    assert!(closing.iter().any(|command| matches!(
+        command.kind(),
+        CommandKind::DetachRemoteScreen { screen } if screen == &remote
+    )));
+    assert!(!closing.iter().any(|command| matches!(
+        command.kind(),
+        CommandKind::AssessClose { .. } | CommandKind::CloseWindow
+    )));
 }

@@ -1132,6 +1132,8 @@ struct ClosePrompt<'a> {
     detail: &'a str,
     answers: &'a [&'a str],
 }
+/// What closing a window that holds Screens with something running offers.
+const WINDOW_CLOSE_ANSWERS: &[&str] = &["Keep open", "Close", "Move to Other Window"];
 /// How long a close waits for the service's assessment before it asks a
 /// generic question.
 const CLOSE_ASSESSMENT_WAIT: Duration = Duration::from_secs(5);
@@ -1154,6 +1156,9 @@ enum CloseFollowUp {
     },
     /// Several tabs of one Screen, with their titles for the prompt.
     Tabs { titles: HashMap<String, String> },
+    /// The local Screens of a window that closes while another is open,
+    /// with the hosts' Screens it holds, which are detached.
+    WindowScreens { remotes: Vec<ScreenKey> },
 }
 
 fn comments_end(count: usize) -> String {
@@ -2721,22 +2726,209 @@ impl Workspace {
     pub(crate) fn appearance(&self) -> &NativeAppearance {
         &self.appearance
     }
-    /// Close this window. While the application has another one, its
-    /// Screens go there and nothing ends; the last window closes the
-    /// application, after its assessment.
+    /// Close this window. While the application has another one, the window
+    /// closes with what it holds: its local Screens close, after their
+    /// assessment, and the hosts' Screens are detached. The last window
+    /// closes the application, after its assessment.
     pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if crate::windows::Windows::count(cx) > 1 && self.model.is_some() {
             if self.cleanup_complete.load(Ordering::Acquire)
                 || self.worker_finished.load(Ordering::Acquire)
             {
-                // No worker is left to hand the Screens over.
+                // No worker is left to close or hand over anything.
                 self.park_terminals(cx);
                 crate::windows::Windows::closed(self.window_id, window, cx);
             } else {
-                self.close_this_window(cx);
+                self.request_close_window_screens(window, cx);
             }
         } else {
             self.request_close(CloseTarget::Window, window, cx);
+        }
+    }
+    /// Close the Screens this window holds; the emptied window then closes
+    /// (`close_when_emptied`). One assessment covers its local Screens, and
+    /// one question is asked when any of them ends something.
+    fn request_close_window_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        let local = model.local_source().source_id();
+        let (locals, remotes): (Vec<ScreenKey>, Vec<ScreenKey>) = model
+            .opened()
+            .iter()
+            .map(|entry| entry.key().clone())
+            .partition(|key| key.source_id() == local);
+        if locals.is_empty() {
+            if remotes.is_empty() {
+                // Nothing is held: the window only has to go.
+                self.close_this_window(cx);
+            }
+            for screen in remotes {
+                self.detach_remote_screen(screen, cx);
+            }
+            return;
+        }
+        self.wheel_navigation.reset();
+        self.float_gesture = None;
+        self.tab_context_menu = None;
+        self.close_profile_picker(window, cx);
+        self.dismiss_templates(window, cx);
+        if self.pending_close.is_some() {
+            self.status = "A close is still in progress".into();
+            cx.notify();
+            return;
+        }
+        let Some(model) = self.local_model() else {
+            return;
+        };
+        let mut request_id = self.next_close_id;
+        let mut plans = VecDeque::new();
+        for screen in &locals {
+            request_id = request_id.saturating_add(1);
+            match model.assess_close(
+                request_id,
+                CloseTarget::Screen {
+                    screen: screen.screen_id().to_owned(),
+                },
+            ) {
+                Ok(plan) => plans.push_back(plan),
+                Err(error) => {
+                    self.status = error.to_string();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.next_close_id = request_id;
+        let scope = CloseScope::Screens {
+            screen_ids: locals
+                .iter()
+                .map(|screen| screen.screen_id().into())
+                .collect(),
+        };
+        self.assess_then_decide(
+            plans,
+            scope,
+            CloseFollowUp::WindowScreens { remotes },
+            window,
+            cx,
+        );
+    }
+    /// One decision for a window's local Screens: without anything that
+    /// ends they close at once; otherwise one question offers to close
+    /// them, to keep the window, or to hand its Screens to another window.
+    fn decide_window_screens_close(
+        &mut self,
+        mut plans: VecDeque<ClosePlan>,
+        remotes: Vec<ScreenKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let count = plans.len();
+        let mut unresolved = 0;
+        let mut unknown = false;
+        let mut total = splitty_client_core::workspace::CloseAssessment::default();
+        for plan in &plans {
+            unresolved += plan.unresolved_count;
+            let Some(assessment) = plan.impact.assessment() else {
+                unknown = true;
+                continue;
+            };
+            total.running += assessment.running;
+            total.starting += assessment.starting;
+            total.scratchpads += assessment.scratchpads;
+            total.annotations = total.annotations.saturating_add(assessment.annotations);
+        }
+        let needs_confirmation = plans.iter().any(ClosePlan::needs_confirmation);
+        let Some(first) = plans.pop_front() else {
+            return;
+        };
+        if !needs_confirmation {
+            for screen in remotes {
+                self.detach_remote_screen(screen, cx);
+            }
+            self.submit_close_queued(first, false, plans, cx);
+            return;
+        }
+        let screens = match count {
+            1 => "Its Screen closes".to_owned(),
+            count => format!("Its {count} Screens close"),
+        };
+        let detail = if unresolved != 0 {
+            format!("{screens}. Session state is still loading.")
+        } else if unknown {
+            format!("{screens}. {UNKNOWN_CLOSE_IMPACT}")
+        } else {
+            format!("{screens}. {}", impact_detail(&total))
+        };
+        let request_id = first.request_id;
+        self.pending_close = Some(PendingClose {
+            plan: first,
+            prompting: true,
+            queued: plans,
+            confirmed: false,
+        });
+        prompt::set_theme(&self.appearance, cx);
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            "Close this window?",
+            Some(&detail),
+            WINDOW_CLOSE_ANSWERS,
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = prompt.await.ok();
+            let _ = this.update_in(cx, |this, window, cx| {
+                if !this
+                    .pending_close
+                    .as_ref()
+                    .is_some_and(|pending| pending.is_prompt_for(request_id))
+                {
+                    return;
+                }
+                let pending = this.pending_close.take().expect("checked prompt");
+                match answer {
+                    // The Screens go to another window, and nothing ends.
+                    Some(2) => this.close_this_window(cx),
+                    Some(1) => {
+                        match pending.resolve_prompt(this.close_model(&pending.plan), true) {
+                            Ok(Some(plan)) => {
+                                for screen in remotes {
+                                    this.detach_remote_screen(screen, cx);
+                                }
+                                this.submit_close_queued(plan, true, pending.queued, cx);
+                            }
+                            Ok(None) => {}
+                            Err(error) => this.status = error,
+                        }
+                    }
+                    _ => {}
+                }
+                this.focus_current(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    /// Detach a host's Screen this window holds; its sessions stay on the host.
+    fn detach_remote_screen(&mut self, screen: ScreenKey, cx: &mut Context<Self>) {
+        let Some(owner) = self.lifecycle_token() else {
+            return;
+        };
+        match self.commands.try_send(WorkerCommand::new(
+            owner,
+            Command::DetachRemoteScreen {
+                screen: screen.clone(),
+            },
+        )) {
+            Ok(()) => {
+                self.cancel_remote_create_follow_for_detach(&screen);
+                self.revoke_screen_links(&screen, cx);
+            }
+            Err(error) => {
+                self.status = format!("Detach was not sent: {error}");
+                cx.notify();
+            }
         }
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
@@ -2909,6 +3101,9 @@ impl Workspace {
                 }
             }
             CloseFollowUp::Tabs { titles } => self.decide_tabs_close(plans, &titles, window, cx),
+            CloseFollowUp::WindowScreens { remotes } => {
+                self.decide_window_screens_close(plans, remotes, window, cx)
+            }
         }
     }
 
@@ -3283,6 +3478,16 @@ impl Workspace {
                     .validate_close(&plan, confirmed)
                     .map_err(|error| error.to_string())
             }
+            // A closing window's Screens: each is one this window holds,
+            // shown or not.
+            (CloseTarget::Screen { screen }, Some(source), Some(model))
+                if model.source_token() == source
+                    && self.holds_screen(&model.screen_key(screen)) =>
+            {
+                model
+                    .validate_close(&plan, confirmed)
+                    .map_err(|error| error.to_string())
+            }
             _ => Err("The Screen changed".to_owned()),
         };
         match check {
@@ -3372,23 +3577,7 @@ impl Workspace {
             .as_ref()
             .is_some_and(|model| source != model.local_source().source_id())
         {
-            if let Some(owner) = self.lifecycle_token() {
-                match self.commands.try_send(WorkerCommand::new(
-                    owner,
-                    Command::DetachRemoteScreen {
-                        screen: screen.clone(),
-                    },
-                )) {
-                    Ok(()) => {
-                        self.cancel_remote_create_follow_for_detach(&screen);
-                        self.revoke_screen_links(&screen, cx);
-                    }
-                    Err(error) => {
-                        self.status = format!("Detach was not sent: {error}");
-                        cx.notify();
-                    }
-                }
-            }
+            self.detach_remote_screen(screen, cx);
         } else {
             self.request_close_from(
                 CloseTarget::Screen {

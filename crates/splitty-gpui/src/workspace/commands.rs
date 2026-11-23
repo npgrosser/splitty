@@ -547,7 +547,7 @@ impl Workspace {
         self.send_captured(owner, Command::MoveScreensToWindow { screens, target }, cx);
     }
 
-    fn holds_screen(&self, screen: &ScreenKey) -> bool {
+    pub(super) fn holds_screen(&self, screen: &ScreenKey) -> bool {
         self.model
             .as_ref()
             .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == screen))
