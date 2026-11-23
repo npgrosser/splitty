@@ -2562,11 +2562,27 @@ mod tests {
             },
         )
         .await;
+        // The redraw after the attach has passed before the watcher's output
+        // counts: what it printed for that redraw is drained and dropped.
+        redraw_settled().await;
+        source
+            .command(&mut window, input(b"SETTLED\n".to_vec()))
+            .unwrap();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the redraw's end",
+            |_, _, output| {
+                output
+                    .get(&session_b)
+                    .is_some_and(|bytes| contains(bytes, b"GOT_SETTLED"))
+            },
+        )
+        .await;
         output.remove(&session_b);
 
         // Splitting the other pane changes nothing about this one's size.
-        // The redraw after the attach has passed by then.
-        redraw_settled().await;
         source
             .command(
                 &mut window,
@@ -2824,6 +2840,23 @@ mod tests {
             (&pane, 50, 30),
             "the watcher",
             seen(b"READY"),
+        )
+        .await;
+        // The redraw after the attach has passed before the watcher's output
+        // counts.
+        redraw_settled().await;
+        source
+            .command(&mut window, input(b"SETTLED\n".to_vec()))
+            .unwrap();
+        pump_reporting(
+            &mut source,
+            &mut window,
+            &mut output,
+            id,
+            &screen,
+            (&pane, 50, 30),
+            "the redraw's end",
+            seen(b"GOT_SETTLED"),
         )
         .await;
         output.remove(&session);
