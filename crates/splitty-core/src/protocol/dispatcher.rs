@@ -2412,6 +2412,87 @@ mod tests {
         backend.close_all();
     }
 
+    /// A program that reads the terminal's size a moment after the signal
+    /// and draws only when it changed, as editors and prompt toolkits do.
+    const REDRAWS_ON_A_NEW_SIZE: &str = r#"last=$(stty size); echo ready; trap 'sleep 0.02; now=$(stty size); if [ "$now" != "$last" ]; then echo "redraw $now"; last=$now; fi' WINCH; while :; do sleep 0.05; done"#;
+
+    /// After a connection was lost, the next one attaches and asks for a
+    /// redraw at the size the PTY already has. A real program on a real PTY
+    /// must draw again; resizing there and back at once left it idle.
+    #[tokio::test]
+    async fn a_program_redraws_for_the_connection_that_follows_a_lost_one() {
+        if !pty_available() {
+            return;
+        }
+        let backend = Arc::new(PtyBackend::new());
+        backend
+            .create(sh_opts("redraw", REDRAWS_ON_A_NEW_SIZE))
+            .await
+            .expect("spawn sh");
+        let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
+        let printed = |sender: &MockSender| {
+            let bytes: Vec<u8> = sender
+                .binary_chunks()
+                .into_iter()
+                .flat_map(|(_, bytes)| bytes)
+                .collect();
+            text(&bytes)
+        };
+
+        let first = Arc::new(MockSender::new());
+        let mut lost = dispatcher.new_connection(first.clone());
+        lost.mux_managed = true;
+        lost.handle(&activity()).await;
+        lost.handle(&attach("redraw")).await;
+        assert!(wait_until(Duration::from_secs(5), || printed(&first).contains("ready")).await);
+        lost.handle(&resize("redraw", 100, 30)).await;
+        assert!(
+            wait_until(Duration::from_secs(5), || printed(&first)
+                .contains("redraw 30 100"))
+            .await,
+            "the first size: {}",
+            printed(&first)
+        );
+        lost.close();
+        drop(lost);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        dispatcher.sizes.tick(Instant::now());
+
+        let second = Arc::new(MockSender::new());
+        let next = dispatcher.new_connection(second.clone());
+        next.handle(&activity()).await;
+        next.handle(&attach("redraw")).await;
+        assert_eq!(
+            sizes(&second, "redraw").first(),
+            Some(&(100, 30)),
+            "the size comes with the attach"
+        );
+        let replayed = printed(&second).matches("redraw").count();
+        next.handle(&Request {
+            redraw: true,
+            ..resize("redraw", 100, 30)
+        })
+        .await;
+        assert!(
+            wait_until(Duration::from_secs(5), || {
+                let printed = printed(&second);
+                printed.matches("redraw").count() >= replayed + 2
+                    && printed.trim_end().ends_with("redraw 30 100")
+            })
+            .await,
+            "the program drew again and ended at its size: {}",
+            printed(&second)
+        );
+        assert!(printed(&second).contains("redraw 29 100"));
+        assert!(
+            !sizes(&second, "redraw").contains(&(100, 29)),
+            "the size in between is not published"
+        );
+
+        next.close();
+        backend.close_all();
+    }
+
     fn input(id: &str, data: &[u8]) -> Request {
         Request {
             msg_type: MSG_INPUT.to_string(),
