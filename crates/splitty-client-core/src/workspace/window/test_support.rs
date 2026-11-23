@@ -342,6 +342,11 @@ impl WindowWorkspace {
 
     /// What the worker does for another window of the client.
     #[doc(hidden)]
+    /// The host's connection dropped and is being opened again.
+    pub fn ui_test_reconnecting(&mut self, id: SourceId) -> io::Result<()> {
+        self.disconnect(id)?;
+        self.wait_recovery(id)
+    }
     pub fn ui_test_open_window(&mut self, id: WindowId) -> io::Result<()> {
         self.open_window(id)
     }

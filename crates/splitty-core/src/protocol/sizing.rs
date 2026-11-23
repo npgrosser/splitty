@@ -17,6 +17,10 @@ use tracing::debug;
 /// How often the arbiter looks for connections that have become idle.
 pub const TICK: Duration = Duration::from_secs(1);
 
+/// How long a redraw keeps the PTY one row off: long enough for a program to
+/// handle the signal and read the changed size, short enough to pass unseen.
+pub const NUDGE: Duration = Duration::from_millis(150);
+
 /// Which connections' reports decide a session's PTY size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SizePolicy {
@@ -144,6 +148,8 @@ struct Session {
     reports: HashMap<ClientKey, PtySize>,
     /// The size the PTY was last set to by the arbiter.
     applied: Option<PtySize>,
+    /// A redraw in progress: the PTY is one row off until this time.
+    nudged: Option<Instant>,
     published: watch::Sender<Option<SizeState>>,
 }
 
@@ -152,6 +158,7 @@ impl Session {
         Self {
             reports: HashMap::new(),
             applied: None,
+            nudged: None,
             published: watch::channel(None).0,
         }
     }
@@ -232,20 +239,36 @@ impl SizeArbiter {
     }
 
     /// The session's sizes from now on; the current one is marked as seen.
-    pub fn subscribe(&self, session: &str) -> watch::Receiver<Option<SizeState>> {
+    /// `known` is the size its PTY has, for a session this arbiter forgot:
+    /// a stream then starts with a size as any other.
+    pub fn subscribe(
+        &self,
+        session: &str,
+        known: Option<PtySize>,
+    ) -> watch::Receiver<Option<SizeState>> {
         let mut state = self.lock();
+        let policy = state.config.policy;
         let entry = state
             .sessions
             .entry(session.to_string())
             .or_insert_with(Session::new);
+        if let (None, Some(size)) = (entry.applied, known) {
+            entry.applied = Some(size);
+            entry
+                .published
+                .send_replace(Some(SizeState { size, policy }));
+        }
         let mut receiver = entry.published.subscribe();
         receiver.borrow_and_update();
         receiver
     }
 
     /// `client` shows `session` at `size`. With `redraw`, a report that does
-    /// not change the size resizes the PTY by one row and back, so the
-    /// session's processes redraw, without publishing the intermediate size.
+    /// not change the size sets the PTY one row off, so the session's
+    /// processes redraw, without publishing the intermediate size;
+    /// [`restore`](Self::restore) sets it back after [`NUDGE`]. The two
+    /// resizes are apart because a program that reads the size only once it
+    /// handles the signal would find it unchanged and redraw nothing.
     pub fn report(
         &self,
         session: &str,
@@ -278,7 +301,7 @@ impl SizeArbiter {
                 state: current,
                 changed: true,
                 result: if redraw && unknown {
-                    nudge(&self.resize, session, current.size)
+                    nudge(&self.resize, session, entry, current.size, now)
                 } else {
                     Ok(())
                 },
@@ -292,7 +315,7 @@ impl SizeArbiter {
                 state: current,
                 changed: false,
                 result: if redraw {
-                    nudge(&self.resize, session, current.size)
+                    nudge(&self.resize, session, entry, current.size, now)
                 } else {
                     Ok(())
                 },
@@ -358,17 +381,43 @@ impl SizeArbiter {
     /// Settle sessions whose connections became idle since; forget sessions
     /// nobody shows or streams.
     pub fn tick(&self, now: Instant) {
+        self.restore(now);
         let mut state = self.lock();
         state.settle_all(now, &self.resize);
         prune(&mut state);
+    }
+
+    /// End the redraws whose time has come: each PTY gets its size back.
+    pub fn restore(&self, now: Instant) {
+        let mut state = self.lock();
+        for (id, session) in &mut state.sessions {
+            if session.nudged.is_some_and(|due| due <= now) {
+                session.nudged = None;
+                if let Some(size) = session.applied {
+                    if let Err(error) = (self.resize)(id, size) {
+                        debug!(session = %id, %error, "PTY resize failed");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a redraw of `session` waits for [`restore`](Self::restore).
+    pub fn nudged(&self, session: &str) -> bool {
+        self.lock()
+            .sessions
+            .get(session)
+            .is_some_and(|session| session.nudged.is_some())
     }
 }
 
 /// Forget sessions without reports and without streams.
 fn prune(state: &mut State) {
-    state
-        .sessions
-        .retain(|_, session| !session.reports.is_empty() || session.published.receiver_count() > 0);
+    state.sessions.retain(|_, session| {
+        !session.reports.is_empty()
+            || session.published.receiver_count() > 0
+            || session.nudged.is_some()
+    });
 }
 
 /// Set the session's PTY to the size the policy derives, if that changed it.
@@ -394,6 +443,8 @@ fn settle(
     }
     let result = resize(id, size);
     if result.is_ok() {
+        // A real resize makes the processes redraw, and ends one in progress.
+        session.nudged = None;
         session.applied = Some(size);
         session.published.send_replace(Some(SizeState {
             size,
@@ -403,12 +454,19 @@ fn settle(
     Some(result)
 }
 
-/// Resize the PTY one row up (down at the largest size) and back.
-fn nudge(resize: &ResizeFn, id: &str, size: PtySize) -> io::Result<()> {
-    let rows = if size.rows < u16::MAX {
-        size.rows + 1
-    } else {
+/// Set the PTY one row short (one more for a single row) until
+/// [`SizeArbiter::restore`]: what is drawn meanwhile still fits the clients.
+fn nudge(
+    resize: &ResizeFn,
+    id: &str,
+    session: &mut Session,
+    size: PtySize,
+    now: Instant,
+) -> io::Result<()> {
+    let rows = if size.rows > 1 {
         size.rows - 1
+    } else {
+        size.rows + 1
     };
     resize(
         id,
@@ -417,7 +475,8 @@ fn nudge(resize: &ResizeFn, id: &str, size: PtySize) -> io::Result<()> {
             rows,
         },
     )?;
-    resize(id, size)
+    session.nudged = Some(now + NUDGE);
+    Ok(())
 }
 
 /// The PTY size the policy derives from the connections' reports at `now`:
@@ -614,6 +673,7 @@ mod tests {
         arbiter.report(SID, A, WIDE, false, now);
         arbiter.idle(B, now);
         arbiter.report(SID, B, NARROW, true, now);
+        arbiter.restore(now + NUDGE);
         assert_eq!(last_resize(&resizes), Some(WIDE));
     }
 
@@ -663,25 +723,33 @@ mod tests {
         let (arbiter, resizes) = arbiter(SizePolicy::Active);
         let now = Instant::now();
         two_active(&arbiter, WIDE, NARROW, now);
-        let sizes = arbiter.subscribe(SID);
+        let sizes = arbiter.subscribe(SID, None);
         resizes.lock().unwrap().clear();
 
         let reported = arbiter.report(SID, A, WIDE, true, now);
         assert!(!reported.changed);
         assert_eq!(reported.state.size, NARROW);
+        let off = (
+            SID.to_string(),
+            PtySize {
+                cols: 100,
+                rows: 29,
+            },
+        );
         assert_eq!(
             resizes.lock().unwrap().as_slice(),
-            [
-                (
-                    SID.to_string(),
-                    PtySize {
-                        cols: 100,
-                        rows: 31
-                    }
-                ),
-                (SID.to_string(), NARROW)
-            ]
+            std::slice::from_ref(&off),
+            "one row off, and not back at once: a program would find the size unchanged"
         );
+        assert!(arbiter.nudged(SID));
+        arbiter.restore(now + NUDGE / 2);
+        assert_eq!(resizes.lock().unwrap().len(), 1, "not before its time");
+        arbiter.restore(now + NUDGE);
+        assert_eq!(
+            resizes.lock().unwrap().as_slice(),
+            [off, (SID.to_string(), NARROW)]
+        );
+        assert!(!arbiter.nudged(SID));
         assert!(!sizes.has_changed().unwrap(), "nothing published");
     }
 
@@ -699,6 +767,7 @@ mod tests {
         arbiter.activity(B, false, now);
         let reported = arbiter.report(SID, B, WIDE, true, now);
         assert!(reported.result.is_ok());
+        arbiter.tick(now + NUDGE);
         assert_eq!(
             resizes.lock().unwrap().as_slice(),
             [
@@ -707,12 +776,20 @@ mod tests {
                     SID.to_string(),
                     PtySize {
                         cols: 120,
-                        rows: 41
+                        rows: 39
                     }
                 ),
                 (SID.to_string(), WIDE)
             ]
         );
+
+        // A session whose PTY size is known starts with it, so a stream
+        // that begins before any report has a size too.
+        arbiter.disconnect(B, now);
+        arbiter.tick(now + NUDGE);
+        assert!(arbiter.lock().sessions.is_empty(), "forgotten again");
+        let sizes = arbiter.subscribe(SID, Some(WIDE));
+        assert_eq!(sizes.borrow().map(|state| state.size), Some(WIDE));
     }
 
     #[test]
@@ -737,7 +814,7 @@ mod tests {
             )
         };
         let now = Instant::now();
-        let mut sizes = arbiter.subscribe(SID);
+        let mut sizes = arbiter.subscribe(SID, None);
         arbiter.activity(A, false, now);
         arbiter.report(SID, A, WIDE, false, now);
         sizes.borrow_and_update();
@@ -762,7 +839,7 @@ mod tests {
     fn a_changing_report_publishes_once() {
         let (arbiter, _) = arbiter(SizePolicy::Active);
         let now = Instant::now();
-        let mut sizes = arbiter.subscribe(SID);
+        let mut sizes = arbiter.subscribe(SID, None);
         arbiter.activity(A, false, now);
         let reported = arbiter.report(SID, A, WIDE, true, now);
         assert!(reported.changed);
@@ -784,7 +861,7 @@ mod tests {
         arbiter.report(SID, B, NARROW, false, now);
         arbiter.activity(A, false, now);
         arbiter.report(SID, A, WIDE, false, now);
-        let mut sizes = arbiter.subscribe(SID);
+        let mut sizes = arbiter.subscribe(SID, None);
 
         arbiter.configure(
             SizeConfig {
@@ -841,7 +918,7 @@ mod tests {
     fn sessions_nobody_shows_or_streams_are_forgotten() {
         let (arbiter, _) = arbiter(SizePolicy::Smallest);
         let now = Instant::now();
-        let sizes = arbiter.subscribe(SID);
+        let sizes = arbiter.subscribe(SID, None);
         arbiter.report(SID, A, WIDE, false, now);
         arbiter.disconnect(A, now);
         assert!(arbiter.lock().sessions.contains_key(SID), "still streamed");

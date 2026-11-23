@@ -23,6 +23,7 @@ impl Connector for GatedForward {
     fn prepare<'a>(
         &'a self,
         _: &'a SshTarget,
+        _: splitty_remote::install::Running,
         _: Box<dyn FnOnce(&str) + Send + 'a>,
         _: &'a queue::Context,
     ) -> BoxFuture<'a, Result<Prepared, HubError>> {

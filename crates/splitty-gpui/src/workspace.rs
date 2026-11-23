@@ -7373,6 +7373,9 @@ impl Render for Workspace {
                             splitty_client_core::workspace::OpenedScreenState::Missing => {
                                 Some("This Screen is missing on its host. Detach it from Screens.")
                             }
+                            splitty_client_core::workspace::OpenedScreenState::Reconnecting => {
+                                Some("Reconnecting to the host… Terminal input is paused, and the picture is the last one received.")
+                            }
                             splitty_client_core::workspace::OpenedScreenState::Offline => Some(
                                 "Host offline. Terminal input is unavailable until reconnection.",
                             ),

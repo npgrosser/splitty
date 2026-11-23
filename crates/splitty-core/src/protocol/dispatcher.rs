@@ -252,7 +252,10 @@ impl Connection {
         let mut subscription = session.subscribe_with(self.sender.delivery_context());
 
         // The size first, so the client's terminal has it before the replay.
-        let mut sizes = self.dispatcher.sizes.subscribe(&sid);
+        // A session whose size the arbiter forgot (no connection showed it
+        // meanwhile) still has the size of its PTY.
+        let known = session.size().map(|(cols, rows)| PtySize { cols, rows });
+        let mut sizes = self.dispatcher.sizes.subscribe(&sid, known);
         let size = *sizes.borrow_and_update();
         if let Some(size) = size {
             let _ = self.sender.send(&size_event(&sid, size));
@@ -411,6 +414,19 @@ impl Connection {
                 Some(req.id.clone()),
                 format!("resize failed: {e}"),
             ));
+        }
+        // A redraw holds the PTY one row off for a moment; without a runtime
+        // (a synchronous test) the arbiter's tick sets it back.
+        if self.dispatcher.sizes.nudged(&req.id) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let dispatcher = Arc::downgrade(&self.dispatcher);
+                runtime.spawn(async move {
+                    tokio::time::sleep(sizing::NUDGE).await;
+                    if let Some(dispatcher) = dispatcher.upgrade() {
+                        dispatcher.sizes.restore(Instant::now());
+                    }
+                });
+            }
         }
         let streamed = self.streams.lock().unwrap().contains_key(&req.id);
         if !reported.changed || !streamed {
@@ -929,6 +945,10 @@ mod tests {
         fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
             self.resizes.lock().unwrap().push((cols, rows));
             Ok(())
+        }
+
+        fn size(&self) -> Option<(u16, u16)> {
+            self.resizes.lock().unwrap().last().copied()
         }
 
         fn close(&self) -> std::io::Result<()> {
@@ -2145,11 +2165,39 @@ mod tests {
                 ..resize("sess-1", 120, 40)
             })
             .await;
-        assert_eq!(*session.resizes.lock().unwrap(), [(100, 31), (100, 30)]);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            *session.resizes.lock().unwrap(),
+            [(100, 29)],
+            "one row off, not back at once"
+        );
+        tokio::time::sleep(sizing::NUDGE * 3).await;
+        assert_eq!(*session.resizes.lock().unwrap(), [(100, 29), (100, 30)]);
         for sender in &senders {
-            assert!(!sizes(sender, "sess-1").contains(&(100, 31)));
+            assert!(!sizes(sender, "sess-1").contains(&(100, 29)));
         }
+    }
+
+    #[tokio::test]
+    async fn an_attach_after_every_connection_left_still_gets_the_size_first() {
+        let (session, _senders, mut conns) = shown_by(1, b"replayed").await;
+        conns[0].handle(&resize("sess-1", 100, 30)).await;
+        let dispatcher = Arc::clone(&conns[0].dispatcher);
+        // The connection ends and the session lives on, as a pane's does.
+        conns[0].mux_managed = true;
+        conns[0].close();
+        drop(conns);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        dispatcher.sizes.tick(Instant::now());
+        assert_eq!(session.size(), Some((100, 30)), "the PTY keeps its size");
+
+        let sender = Arc::new(MockSender::new());
+        let late = dispatcher.new_connection(sender.clone());
+        late.handle(&attach("sess-1")).await;
+        let order = sender.order();
+        let size = order.iter().position(|kind| kind == "size");
+        let replay = order.iter().position(|kind| kind == "binary");
+        assert!(size.is_some() && size < replay, "order: {order:?}");
+        assert_eq!(sizes(&sender, "sess-1"), [(100, 30)]);
     }
 
     #[tokio::test]

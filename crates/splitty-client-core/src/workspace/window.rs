@@ -32,6 +32,8 @@ pub enum OpenedScreenState {
     Loading,
     Ready,
     Missing,
+    /// Its host's connection is being opened again; the picture is the last one.
+    Reconnecting,
     Offline,
 }
 
@@ -340,6 +342,18 @@ impl WindowWorkspace {
                 *position,
             )
         });
+        let returning: Vec<SourceId> = self
+            .remotes
+            .iter()
+            .filter(|source| {
+                matches!(
+                    source.presentation.status,
+                    SourceStatus::Connecting | SourceStatus::Reconnecting
+                )
+            })
+            .map(|source| source.id)
+            .collect();
+        let returning = &returning;
         sources.extend(
             remote
                 .into_iter()
@@ -350,7 +364,11 @@ impl WindowWorkspace {
             .flat_map(|source| {
                 source.screens().iter().map(move |info| {
                     let state = if !source.is_ready() {
-                        OpenedScreenState::Offline
+                        if returning.contains(&source.source_token().source_id()) {
+                            OpenedScreenState::Reconnecting
+                        } else {
+                            OpenedScreenState::Offline
+                        }
                     } else if source.is_missing(info.id.as_str()) {
                         OpenedScreenState::Missing
                     } else if source

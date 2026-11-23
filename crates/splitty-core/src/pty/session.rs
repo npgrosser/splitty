@@ -65,6 +65,8 @@ pub struct Session {
     exit_reported: AtomicBool,
     /// Closed while its program still ran.
     closed_on_request: AtomicBool,
+    /// The size of the last resize, columns above rows; zero before one.
+    size: std::sync::atomic::AtomicU32,
     /// Shared with the terminal, which feeds it.
     output: Arc<Output>,
     /// Shared with the output, which queues the probe answers.
@@ -483,6 +485,7 @@ impl Session {
             managed,
             exit_reported: AtomicBool::new(false),
             closed_on_request: AtomicBool::new(false),
+            size: std::sync::atomic::AtomicU32::new(0),
             output,
             input: Arc::clone(&input),
             osc_rx,
@@ -746,7 +749,19 @@ impl SessionHandle for Session {
     }
 
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
-        self.terminal.resize(cols, rows)
+        self.terminal.resize(cols, rows)?;
+        self.size
+            .store(u32::from(cols) << 16 | u32::from(rows), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn size(&self) -> Option<(u16, u16)> {
+        let size = self.size.load(Ordering::SeqCst);
+        let (cols, rows) = (
+            u16::try_from(size >> 16).ok()?,
+            u16::try_from(size & 0xffff).ok()?,
+        );
+        (cols != 0 && rows != 0).then_some((cols, rows))
     }
 
     fn close(&self) -> io::Result<()> {

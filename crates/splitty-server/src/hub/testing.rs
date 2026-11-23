@@ -15,7 +15,7 @@ use futures::future::BoxFuture;
 use splitty_core::protocol::PROTOCOL_VERSION;
 use splitty_remote::bridge::NativeBridge;
 use splitty_remote::handshake::{self, Handshake, RunningDaemon};
-use splitty_remote::install::{Prepared, Probe, Server};
+use splitty_remote::install::{Prepared, Probe, Running, Server};
 use splitty_remote::ssh::{SshError, SshTarget};
 use splitty_remote::tunnel::{PortReservation, PortTunnelError, ReverseTunnelError};
 use splitty_transport::{admission, negotiation, wire};
@@ -97,6 +97,8 @@ pub struct ScriptedHost {
     server_version: &'static str,
     /// The protocol version of that server.
     protocol: u32,
+    /// Whether the running daemon's own server is installed on the host.
+    daemon_server: bool,
     /// Whether `daemon stop` ends the daemon.
     stops: bool,
     /// An optional failure script, run instead of the native fixture.
@@ -140,6 +142,7 @@ impl ScriptedHost {
             preparation_cleanup: None,
             server_version: VERSION,
             protocol: PROTOCOL_VERSION,
+            daemon_server: false,
             stops: true,
             bridge: None,
             welcome: WELCOME,
@@ -213,6 +216,13 @@ impl ScriptedHost {
     /// The protocol of the server, and so of the daemon it starts.
     pub fn with_protocol(mut self, protocol: u32) -> Self {
         self.protocol = protocol;
+        self
+    }
+
+    /// The running daemon runs from an installed server of its own version,
+    /// which answers the handshake while it is kept.
+    pub fn with_daemon_server(mut self) -> Self {
+        self.daemon_server = true;
         self
     }
 
@@ -358,11 +368,35 @@ impl Connector for ScriptedHost {
     fn prepare<'a>(
         &'a self,
         target: &'a SshTarget,
+        running: Running,
         on_install: Box<dyn FnOnce(&str) + Send + 'a>,
         context: &'a splitty_transport::queue::Context,
     ) -> BoxFuture<'a, Result<Prepared, HubError>> {
         Box::pin(async move {
             self.ask(format!("prepare {}", target.as_str()));
+            let kept = (running == Running::Keep && self.daemon_server)
+                .then(|| self.daemon.lock().expect("daemon").clone())
+                .flatten()
+                .map(|daemon| daemon.version)
+                .filter(|version| version != VERSION);
+            if let Some(version) = kept {
+                return Ok(Prepared {
+                    server: Server::Installed {
+                        path: format!("/home/u/.local/share/splitty/remote/{version}/splitty"),
+                        config_dir: None,
+                    },
+                    probe: Probe {
+                        kernel: self.kernel.into(),
+                        arch: "x86_64".into(),
+                        home: "/home/u".into(),
+                        marker: None,
+                        daemon: Some(version.clone()),
+                    },
+                    uploaded: false,
+                    had_payload: true,
+                    kept: Some(version),
+                });
+            }
             let arch = match self.prepare {
                 Prepare::Installed | Prepare::DaemonFails => "x86_64",
                 Prepare::UnsupportedKernel => {
@@ -414,9 +448,11 @@ impl Connector for ScriptedHost {
                     arch: arch.into(),
                     home: "/home/u".into(),
                     marker: None,
+                    daemon: None,
                 },
                 uploaded: matches!(self.prepare, Prepare::Installs(_)),
                 had_payload: true,
+                kept: None,
             })
         })
     }
@@ -424,7 +460,7 @@ impl Connector for ScriptedHost {
     fn handshake<'a>(
         &'a self,
         target: &'a SshTarget,
-        _prepared: &'a Prepared,
+        prepared: &'a Prepared,
         context: &'a splitty_transport::queue::Context,
     ) -> BoxFuture<'a, Result<splitty_transport::budget::Charged<Handshake>, HubError>> {
         Box::pin(async move {
@@ -460,7 +496,7 @@ impl Connector for ScriptedHost {
             };
             let answer = serde_json::json!({
                 "handshake": 2,
-                "server": {"version": self.server_version, "protocol": self.protocol, "path": "/p", "transportVersions":[1]},
+                "server": {"version": prepared.kept.as_deref().unwrap_or(self.server_version), "protocol": self.protocol, "path": "/p", "transportVersions":[1]},
                 "daemon": {
                     "running": true, "pid": 4711, "instance": if daemon.legacy { None } else { Some("0123456789abcdef0123456789abcdef") }, "transportVersion": if daemon.legacy { None } else { Some(1) }, "version": daemon.version,
                     "legacy": daemon.legacy, "legacyMigration": daemon.legacy_migration,

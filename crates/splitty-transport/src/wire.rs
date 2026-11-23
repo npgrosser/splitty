@@ -21,6 +21,13 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 pub const FRAME_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a connection compares the wall clock with its own timers.
+pub const WAKE_CHECK: Duration = Duration::from_secs(2);
+/// How far the wall clock must run ahead between two checks for the machine
+/// to count as having slept.
+pub const WAKE_SKEW: Duration = Duration::from_secs(5);
+/// How long the peer has to answer a ping after the machine woke.
+pub const WAKE_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]

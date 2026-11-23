@@ -1196,7 +1196,7 @@ The memory contract covers application-owned transport buffers, including retain
 
 The local service's hub reaches hosts through system `ssh` (`splitty-remote`), using WSL's SSH client on Windows. Every remote command is a `CommandLine` of constant words and values passed through `quote`, sent as one argument after `--`. Probe and install scripts are constant single lines run as `sh -c '<script>' <name> <quoted values>`, so the host login shell parses only that outer line.
 
-Before connecting, the client probes the host once (kernel, architecture, `$HOME`, the marker of its own version) and, when its version is missing and it has a payload for the host's kernel (Linux or Darwin) and architecture, installs its server:
+Before connecting, the client probes the host once (kernel, architecture, `$HOME`, the marker of its own version, the version of an installed server a daemon runs from). A daemon that runs from an installed server of another version is used with that server and nothing is uploaded (`install::Running::Keep`); when that daemon cannot be used as it is, or the connection carries a confirmed update, and whenever no such daemon runs, the client installs its server when its version is missing and it has a payload for the host's kernel (Linux or Darwin) and architecture:
 
 ```
 ~/.local/share/splitty/remote/<version>/

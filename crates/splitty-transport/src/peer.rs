@@ -13,6 +13,7 @@ use std::{
     io,
     sync::{Arc, Mutex},
     task::Poll,
+    time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -333,6 +334,28 @@ impl Drop for Peer {
     }
 }
 
+/// Whether the machine slept between two checks: the wall clock ran ahead of
+/// the timers by more than a clock adjustment would.
+fn slept(wall: Duration, timers: Duration) -> bool {
+    wall > timers + wire::WAKE_SKEW
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test adds to the wall clock, as a machine's sleep does.
+    static WALL_AHEAD: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+}
+
+/// The wall clock, which runs on while the machine sleeps.
+fn wall() -> Duration {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    #[cfg(test)]
+    let now = now + WALL_AHEAD.get();
+    now
+}
+
 async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     sender: &Sender,
@@ -348,6 +371,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // Liveness is time since the last matched pong (or connection start),
     // checked at 15-second ticks, not a fresh 30-second grace for every ping.
     let mut last_pong = Instant::now();
+    // The timers stand still while the machine sleeps, so a connection that
+    // died meanwhile would look alive for another liveness period. The wall
+    // clock tells that it slept; the peer then has to answer a ping soon.
+    let mut wake = time::interval_at(Instant::now() + wire::WAKE_CHECK, wire::WAKE_CHECK);
+    wake.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let mut seen = (Instant::now(), wall());
+    let mut woken: Option<Instant> = None;
     loop {
         let read = codec::read_limited(
             &mut reader,
@@ -365,6 +395,21 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     if outstanding.is_none() {
                         let nonce = rand::random(); outstanding = Some(nonce);
                         sender.control(Kind::Ping, &wire::Ping { nonce })?;
+                    }
+                }
+                _ = wake.tick() => {
+                    let now = (Instant::now(), wall());
+                    let slept = slept(now.1.saturating_sub(seen.1), now.0 - seen.0);
+                    seen = now;
+                    if slept && woken.is_none() {
+                        if outstanding.is_none() {
+                            let nonce = rand::random(); outstanding = Some(nonce);
+                            sender.control(Kind::Ping, &wire::Ping { nonce })?;
+                        }
+                        woken = Some(now.0 + wire::WAKE_GRACE);
+                    }
+                    if woken.is_some_and(|deadline| now.0 >= deadline) {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "native peer did not answer ping after the machine woke"));
                     }
                 }
                 // Keep this exact future across control ticks. Liveness is
@@ -397,6 +442,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 if outstanding == Some(pong.nonce) {
                     outstanding = None;
                     last_pong = Instant::now();
+                    woken = None;
                 }
             }
             Kind::Cancel => {
@@ -1126,6 +1172,44 @@ mod tests {
                 0,
                 "all retained final frames released"
             );
+        }
+    }
+
+    /// After the machine slept, the peer is asked at once: one that answers
+    /// keeps the connection, one that is gone ends it within the grace, long
+    /// before the ordinary liveness period.
+    #[tokio::test(start_paused = true)]
+    async fn a_peer_that_is_gone_after_the_machine_slept_ends_the_connection_soon() {
+        assert!(!slept(Duration::from_secs(4), Duration::from_secs(2)));
+        assert!(slept(Duration::from_secs(60), Duration::from_secs(2)));
+        for answers in [true, false] {
+            let (server, mut raw) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(server);
+            let context = queue::Context::default();
+            let mut peer = Peer::start(read, write, &ready(), context.clone());
+            let budget = ConnectionBudget::default();
+            tokio::task::yield_now().await;
+            WALL_AHEAD.set(WALL_AHEAD.get() + Duration::from_secs(3600));
+            time::advance(wire::WAKE_CHECK).await;
+            let frame = codec::read(&mut raw, &budget).await.unwrap().unwrap();
+            assert_eq!(frame.value.kind, Kind::Ping, "asked right after waking");
+            let ping: wire::Ping = frame.value.decode().unwrap();
+            drop(frame);
+            if answers {
+                codec::write(&mut raw, &Frame::json(Kind::Pong, &ping).unwrap())
+                    .await
+                    .unwrap();
+            }
+            time::advance(wire::WAKE_GRACE + wire::WAKE_CHECK).await;
+            tokio::task::yield_now().await;
+            if answers {
+                assert!(!context.is_closed(), "an answering peer stays connected");
+            } else {
+                let error = peer.tasks.remove(0).await.unwrap().unwrap_err();
+                assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+                assert!(error.to_string().contains("woke"), "{error}");
+            }
+            peer.shutdown().await;
         }
     }
 

@@ -538,6 +538,52 @@ fn settings_departure_cancels_follow_but_keeps_later_missing_outcome_visible() {
 }
 
 #[test]
+fn a_reconnecting_hosts_screens_say_so_and_an_offline_hosts_say_offline() {
+    with_view(|window, view| {
+        let (group, _receiver) = setup(window, &view);
+        let screen = window.update(|_, cx| {
+            view.read(cx)
+                .model
+                .as_ref()
+                .unwrap()
+                .opened()
+                .into_iter()
+                .find(|entry| entry.key().source_id() == group.source_id())
+                .map(|entry| entry.key().clone())
+                .unwrap()
+        });
+        let state = |window: &mut VisualTestContext, state: &str| {
+            let selector: &'static str =
+                Box::leak(format!("drawer-state-{screen}-{state}").into_boxed_str());
+            window.debug_bounds(selector).is_some()
+        };
+        assert!(!state(window, "Reconnecting…") && !state(window, "Offline"));
+
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| {
+                let mut model = workspace.model.clone().unwrap();
+                model.ui_test_reconnecting(group.source_id()).unwrap();
+                workspace.reconcile(model, window, cx);
+            })
+        });
+        draw(window);
+        assert!(state(window, "Reconnecting…"));
+        assert!(!state(window, "Offline"));
+
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| {
+                let mut model = workspace.model.clone().unwrap();
+                model.disconnect(group.source_id()).unwrap();
+                workspace.reconcile(model, window, cx);
+            })
+        });
+        draw(window);
+        assert!(state(window, "Offline"));
+        assert!(!state(window, "Reconnecting…"));
+    });
+}
+
+#[test]
 fn remote_plus_is_inert_offline_and_uses_a_fresh_ready_capture() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);

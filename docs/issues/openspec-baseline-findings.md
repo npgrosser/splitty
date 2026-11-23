@@ -201,9 +201,15 @@ Line numbers refer to the tree at commit `b495e1c`.
     got through, and a cancelled clipboard write swallowed the output after it (`replay_output.ts`,
     `pty/replay.rs`).
 - Still open from the same review:
-  - **No `size` before the replay of a session the size arbiter forgot** (`prune` in `protocol/sizing.rs`): the
-    replay is parsed at the pane's size, not the PTY's. The redraw after the attach repaints full-screen programs;
-    plain output stays wrapped at the pane's width. Needs the PTY's size from the session.
+  - **Fixed (2026-11-23, `reconnect-and-host-connect`): no `size` before the replay of a session the size
+    arbiter forgot.** The PTY session remembers its last resize (`SessionHandle::size`) and an attach seeds the
+    arbiter with it. Still open: a session adopted from a keeper after a daemon restart has no size until a
+    client reports one.
+  - **Fixed (2026-11-23, `reconnect-and-host-connect`): the redraw after an attach redrew nothing in many
+    programs.** It resized the PTY by one row and straight back, so a program that reads the size when it handles
+    the signal found it unchanged. The two resizes are 150 ms apart now (`NUDGE` in `protocol/sizing.rs`). A
+    client of a server without `pty-size-v1` still sends its two resizes back to back
+    (`report_size` in `native_workspace/source.rs`).
   - **Size events are not ordered with the output.** The server resizes the PTY, publishes the size and streams
     output on separate tasks (`protocol/sizing.rs`, `watch_size` and `stream_output` in `protocol/dispatcher.rs`),
     and the `watch` channel coalesces sizes, so a client can parse a repaint at the old size or old output at the

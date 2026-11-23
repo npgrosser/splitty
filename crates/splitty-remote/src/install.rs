@@ -52,9 +52,10 @@ pub fn normalize_arch(machine: &str) -> &str {
     }
 }
 
-/// Prints the kernel, the architecture, `$HOME`, and the marker of version
-/// `$1` when that version's server is installed.
-const PROBE: &str = r#"printf "%s\n" "$(uname -s)" "$(uname -m)" "$HOME"; d="$HOME/.local/share/splitty/remote/$1"; if [ -x "$d/splitty" ] && [ -f "$d/.payload-sha256" ]; then cat "$d/.payload-sha256"; fi"#;
+/// Prints the kernel, the architecture, `$HOME`, the marker of version `$1`
+/// when that version's server is installed, and `daemon=<version>` when a
+/// daemon runs from an installed server (the first found, read from `ps`).
+const PROBE: &str = r#"printf "%s\n" "$(uname -s)" "$(uname -m)" "$HOME"; base="$HOME/.local/share/splitty/remote"; d="$base/$1"; if [ -x "$d/splitty" ] && [ -f "$d/.payload-sha256" ]; then cat "$d/.payload-sha256"; fi; procs=$(ps -axo args= 2>/dev/null || true); for r in "$base"/*/; do r=${r%/}; [ -x "$r/splitty" ] && [ -f "$r/.payload-sha256" ] || continue; case "$procs" in *"$r/splitty daemon run"*) printf "daemon=%s\n" "${r##*/}"; break;; esac; done"#;
 
 /// Installs version `$1` from the archive on standard input, whose SHA-256 is
 /// `$2`, checked with `sha256sum` or, where that is missing, `shasum -a 256`.
@@ -119,6 +120,9 @@ pub enum InstallError {
     },
 }
 
+/// What begins the probe's line about a running daemon.
+const DAEMON_LINE: &str = "daemon=";
+
 /// What the probe found on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
@@ -127,6 +131,8 @@ pub struct Probe {
     pub home: String,
     /// The checksum marker of the probed version, when it is installed.
     pub marker: Option<String>,
+    /// The version of an installed server a daemon runs from.
+    pub daemon: Option<String>,
 }
 
 /// Parse the probe's output, checking `$HOME` before it is ever used.
@@ -163,11 +169,26 @@ fn parse_probe_budgeted(
     let text = std::str::from_utf8(stdout).map_err(|_| invalid("not UTF-8"))?;
     let mut lines = text.strip_suffix('\n').unwrap_or(text).split('\n');
     let (Some(kernel), Some(arch), Some(home)) = (lines.next(), lines.next(), lines.next()) else {
-        return Err(invalid("expected three or four lines"));
+        return Err(invalid("expected three to five lines"));
     };
-    let marker = lines.next();
+    let mut marker = lines.next();
+    let mut daemon = marker.and_then(|line| line.strip_prefix(DAEMON_LINE));
+    if daemon.is_some() {
+        marker = None;
+    } else {
+        daemon = match lines.next() {
+            None => None,
+            Some(line) => match line.strip_prefix(DAEMON_LINE) {
+                Some(version) => Some(version),
+                None => return Err(invalid("expected three to five lines")),
+            },
+        };
+    }
     if lines.next().is_some() {
-        return Err(invalid("expected three or four lines"));
+        return Err(invalid("expected three to five lines"));
+    }
+    if daemon.is_some_and(|version| !is_version(version)) {
+        return Err(invalid("invalid daemon version"));
     }
     if kernel.is_empty() || arch.is_empty() || kernel.len() > 256 || arch.len() > 256 {
         return Err(invalid("invalid kernel or architecture"));
@@ -183,6 +204,7 @@ fn parse_probe_budgeted(
         arch: arch.to_owned(),
         home: home.to_owned(),
         marker: marker.map(str::to_owned),
+        daemon: daemon.map(str::to_owned),
     })
 }
 
@@ -381,13 +403,28 @@ pub struct Prepared {
     pub uploaded: bool,
     /// Whether this client had a payload for the host.
     pub had_payload: bool,
+    /// The version of the running daemon's own server, when that is used in
+    /// place of this client's.
+    pub kept: Option<String>,
 }
 
-/// Make sure the host has this client's server, installing it when a payload
-/// for the host is available, and say how to run it.
+/// What [`prepare`] does on a host whose daemon runs from an installed
+/// server of another version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Running {
+    /// Use that server and upload nothing.
+    Keep,
+    /// Install this client's server beside it.
+    Install,
+}
+
+/// Make sure the host has a server to run and say how to run it: this
+/// client's, installed when a payload for the host is available, or with
+/// [`Running::Keep`] the one its daemon already runs from.
 pub async fn prepare<E: Executor>(
     executor: &E,
     version: &str,
+    running: Running,
     payload_for: impl FnOnce(&str, &str) -> Result<Option<Payload>, InstallError>,
     on_install: impl FnOnce(&Probe),
 ) -> Result<Prepared, InstallError> {
@@ -411,25 +448,34 @@ pub async fn prepare<E: Executor>(
             allocation: Some(allocation),
         });
     }
-    let installed = Server::Installed {
+    let server = |version: &str| Server::Installed {
         path: format!("{}/{REMOTE_DIR}/{version}/splitty", probe.home),
         config_dir: (probe.kernel == "Darwin")
             .then(|| format!("{}/{MACOS_CONFIG_DIR}", probe.home)),
+    };
+    let installed = server(version);
+    // The running daemon's own server, where it is another version's.
+    let kept = match running {
+        Running::Keep => probe.daemon.clone().filter(|running| running != version),
+        Running::Install => None,
     };
 
     let Some(payload) = payload_for(&probe.kernel, &probe.arch)? else {
         // Without a payload, a server of this version that another client
         // installed (and verified) is still the best choice.
-        let server = if probe.marker.as_deref().is_some_and(is_sha256) {
-            installed
+        let (server, kept) = if probe.marker.as_deref().is_some_and(is_sha256) {
+            (installed, None)
+        } else if let Some(running) = kept {
+            (server(&running), Some(running))
         } else {
-            Server::Path
+            (Server::Path, None)
         };
         return Ok(Prepared {
             server,
             probe,
             uploaded: false,
             had_payload: false,
+            kept,
         });
     };
     if probe.marker.as_deref() == Some(payload.sha256.as_str()) {
@@ -438,6 +484,16 @@ pub async fn prepare<E: Executor>(
             probe,
             uploaded: false,
             had_payload: true,
+            kept: None,
+        });
+    }
+    if let Some(running) = kept {
+        return Ok(Prepared {
+            server: server(&running),
+            probe,
+            uploaded: false,
+            had_payload: true,
+            kept: Some(running),
         });
     }
 
@@ -454,6 +510,7 @@ pub async fn prepare<E: Executor>(
             probe,
             uploaded: true,
             had_payload: true,
+            kept: None,
         }),
         Err(
             source @ SshError::Failed {
@@ -623,19 +680,38 @@ mod tests {
                 kernel: "Linux".into(),
                 arch: "x86_64".into(),
                 home: "/home/user".into(),
-                marker: None
+                marker: None,
+                daemon: None
             }
         );
         let sum = "a".repeat(64);
         let probe =
             parse_probe("vm", format!("Linux\naarch64\n/root\n{sum}\n").as_bytes()).expect("probe");
         assert_eq!(probe.marker.as_deref(), Some(sum.as_str()));
+        for (text, marker, daemon) in [
+            (
+                "Linux\nx86_64\n/root\ndaemon=0.5.0\n".to_string(),
+                None,
+                "0.5.0",
+            ),
+            (
+                format!("Linux\nx86_64\n/root\n{sum}\ndaemon=0.6.0-rc.1\n"),
+                Some(sum.as_str()),
+                "0.6.0-rc.1",
+            ),
+        ] {
+            let probe = parse_probe("vm", text.as_bytes()).expect("probe");
+            assert_eq!(probe.marker.as_deref(), marker);
+            assert_eq!(probe.daemon.as_deref(), Some(daemon));
+        }
 
         for bad in [
             &b"Linux\nx86_64\n"[..],
             b"Linux\nx86_64\nrelative/home\n",
             b"Linux\nx86_64\n/home/a\rb\n",
             b"Linux\nx86_64\n/home/user\nmarker\nextra\n",
+            b"Linux\nx86_64\n/home/user\ndaemon=0.5.0\nmarker\n",
+            b"Linux\nx86_64\n/home/user\ndaemon=../etc\n",
             b"\nx86_64\n/home/user\n",
         ] {
             assert!(
@@ -686,6 +762,7 @@ mod tests {
             let prepared = prepare(
                 &host,
                 "0.1.0",
+                Running::Install,
                 |_, _| Ok(Some(payload(true))),
                 |_| announced = true,
             )
@@ -738,6 +815,7 @@ mod tests {
         let first = prepare(
             &host,
             "0.1.0",
+            Running::Install,
             |_, _| Ok(Some(Payload::new(bytes.clone(), PayloadSource::Itself))),
             |_| {},
         )
@@ -746,6 +824,7 @@ mod tests {
         let second = prepare(
             &host,
             "0.1.0",
+            Running::Install,
             |_, _| Ok(Some(Payload::new(bytes, PayloadSource::Itself))),
             |_| panic!("no second install"),
         )
@@ -756,7 +835,7 @@ mod tests {
         assert_eq!(host.uploads.load(Ordering::SeqCst), 1);
 
         // A client of the same version without a payload uses it too.
-        let third = prepare(&host, "0.1.0", |_, _| Ok(None), |_| {})
+        let third = prepare(&host, "0.1.0", Running::Install, |_, _| Ok(None), |_| {})
             .await
             .expect("no payload");
         assert_eq!(third.server, first.server);
@@ -767,9 +846,15 @@ mod tests {
         let home = home();
         let mut host = LocalShell::new(home.path().to_path_buf());
         host.corrupt = true;
-        let error = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {})
-            .await
-            .expect_err("checksum failure");
+        let error = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await
+        .expect_err("checksum failure");
         assert!(matches!(error, InstallError::Checksum { .. }), "{error:?}");
         let entries = fs::read_dir(home.path().join(REMOTE_DIR))
             .expect("dir")
@@ -784,9 +869,15 @@ mod tests {
     async fn a_server_that_does_not_run_is_not_moved_into_place() {
         let home = home();
         let host = LocalShell::new(home.path().to_path_buf());
-        let error = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(false))), |_| {})
-            .await
-            .expect_err("does not run");
+        let error = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(false))),
+            |_| {},
+        )
+        .await
+        .expect_err("does not run");
         assert!(
             matches!(error, InstallError::DoesNotRun { .. }),
             "{error:?}"
@@ -801,9 +892,15 @@ mod tests {
         fs::create_dir_all(&dir).expect("mkdir");
         fs::write(dir.join(".payload-sha256"), "0".repeat(64)).expect("marker");
         let host = LocalShell::new(home.path().to_path_buf());
-        let prepared = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {})
-            .await
-            .expect("install");
+        let prepared = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await
+        .expect("install");
         assert!(prepared.uploaded);
         assert!(dir.join("splitty").is_file());
     }
@@ -825,7 +922,14 @@ mod tests {
             }
         }
         let host = LocalShell::new(home.path().to_path_buf());
-        let result = prepare(&host, "0.2.0-dev.1", |_, _| Ok(Some(payload(true))), |_| {}).await;
+        let result = prepare(
+            &host,
+            "0.2.0-dev.1",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await;
         let mut running = running.expect("running");
         let _ = running.kill();
         let _ = running.wait();
@@ -877,14 +981,89 @@ mod tests {
         ));
         fs::create_dir_all(&hostile).expect("hostile home");
         let host = LocalShell::new(hostile.clone());
-        let prepared = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {})
-            .await
-            .expect("install");
+        let prepared = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await
+        .expect("install");
         assert!(!marker.exists(), "nothing from $HOME was executed");
         let line = prepared.server.command().word("--version");
         let output = host.run(&line, None).await.expect("run installed server");
         assert!(output.status.success(), "{:?}", output);
         assert!(!marker.exists(), "nothing from $HOME was executed");
+    }
+
+    /// A daemon that runs from an installed server of another version is
+    /// used as it is: nothing is uploaded, until an install is asked for.
+    #[tokio::test]
+    async fn a_running_daemons_own_server_is_kept_instead_of_an_upload() {
+        let home = home();
+        let old = version_dir(home.path(), "0.0.9");
+        fs::create_dir_all(&old).expect("mkdir");
+        fs::write(old.join("splitty"), "#!/bin/sh\n").expect("server");
+        fs::set_permissions(old.join("splitty"), fs::Permissions::from_mode(0o755)).expect("chmod");
+        fs::write(old.join(".payload-sha256"), "a".repeat(64)).expect("marker");
+        let bin = tempfile::tempdir().expect("bin");
+        let ps = bin.path().join("ps");
+        fs::write(
+            &ps,
+            format!(
+                "#!/bin/sh\necho \"{} daemon run --lock-fd 10\"\n",
+                old.join("splitty").display()
+            ),
+        )
+        .expect("fake ps");
+        fs::set_permissions(&ps, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let mut host = LocalShell::new(home.path().to_path_buf());
+        host.bin = Some(bin.path().to_path_buf());
+
+        let kept = prepare(
+            &host,
+            "0.1.0",
+            Running::Keep,
+            |_, _| Ok(Some(payload(true))),
+            |_| panic!("nothing to install"),
+        )
+        .await
+        .expect("kept");
+        assert_eq!(kept.kept.as_deref(), Some("0.0.9"));
+        assert!(!kept.uploaded && kept.had_payload);
+        assert_eq!(
+            kept.server.display(),
+            old.join("splitty").to_str().expect("path")
+        );
+        assert_eq!(host.uploads.load(Ordering::SeqCst), 0);
+
+        // An explicit install puts this client's version on the host.
+        let bytes = archive(true);
+        let installed = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(Payload::new(bytes.clone(), PayloadSource::Itself))),
+            |_| {},
+        )
+        .await
+        .expect("installed");
+        assert!(installed.uploaded && installed.kept.is_none());
+        assert!(version_dir(home.path(), "0.1.0").join("splitty").exists());
+
+        // Once this version is installed, it is the one that is used.
+        let own = prepare(
+            &host,
+            "0.1.0",
+            Running::Keep,
+            |_, _| Ok(Some(Payload::new(bytes, PayloadSource::Itself))),
+            |_| panic!("already installed"),
+        )
+        .await
+        .expect("own");
+        assert_eq!(own.kept, None);
+        assert_eq!(own.server, installed.server);
     }
 
     /// A directory with a fake `uname` for a host of `kernel` and `machine`.
@@ -924,6 +1103,7 @@ mod tests {
         let prepared = prepare(
             &host,
             "0.1.0",
+            Running::Install,
             |kernel, arch| choose_payload(kernel, arch, None, built_in, |_| Ok(None)),
             |_| {},
         )
@@ -956,9 +1136,15 @@ mod tests {
     async fn a_linux_host_gets_no_configuration_directory() {
         let home = home();
         let host = LocalShell::new(home.path().to_path_buf());
-        let prepared = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {})
-            .await
-            .expect("install");
+        let prepared = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await
+        .expect("install");
         assert!(
             matches!(
                 prepared.server,
@@ -1007,9 +1193,15 @@ mod tests {
         let bin = tools_without_sha256sum(&[("shasum", &shasum)]);
         let mut host = LocalShell::new(home.path().to_path_buf());
         host.path = Some(bin.path().to_path_buf());
-        let prepared = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {})
-            .await
-            .expect("install");
+        let prepared = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await
+        .expect("install");
         assert!(prepared.uploaded);
         assert!(used.exists(), "verified with shasum");
         assert!(version_dir(home.path(), "0.1.0").join("splitty").is_file());
@@ -1021,9 +1213,15 @@ mod tests {
         let bin = tools_without_sha256sum(&[]);
         let mut host = LocalShell::new(home.path().to_path_buf());
         host.path = Some(bin.path().to_path_buf());
-        let error = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {})
-            .await
-            .expect_err("no tool");
+        let error = prepare(
+            &host,
+            "0.1.0",
+            Running::Install,
+            |_, _| Ok(Some(payload(true))),
+            |_| {},
+        )
+        .await
+        .expect_err("no tool");
         assert!(
             matches!(error, InstallError::NoChecksumTool { .. }),
             "{error:?}"
@@ -1086,6 +1284,7 @@ mod tests {
                     status,
                 },
                 "0.1.0",
+                Running::Install,
                 |_, _| Ok(Some(payload(true))),
                 |_| {},
             )
@@ -1170,6 +1369,7 @@ mod tests {
         let error = prepare(
             &OtherKernel,
             "0.1.0",
+            Running::Install,
             |_, _| Ok(Some(payload(true))),
             |_| {},
         )
@@ -1190,6 +1390,7 @@ mod tests {
         let prepared = prepare(
             &host,
             "0.1.0",
+            Running::Install,
             |_, _| Ok(None),
             |_| panic!("nothing to install"),
         )
@@ -1281,6 +1482,7 @@ mod tests {
         let prepared = prepare(
             &host,
             "0.1.0",
+            Running::Install,
             |kernel, arch| choose_payload(kernel, arch, None, built_in, |_| Ok(None)),
             |_| {},
         )

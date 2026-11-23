@@ -8,7 +8,7 @@ use futures::future::BoxFuture;
 use splitty_remote::bridge::NativeBridge;
 use splitty_remote::handshake::RunningDaemon;
 use splitty_remote::handshake::{self, Handshake, HandshakeError};
-use splitty_remote::install::{self, Prepared, Server};
+use splitty_remote::install::{self, Prepared, Running, Server};
 use splitty_remote::ssh::{run_checked, Ssh, SshError, SshTarget};
 use splitty_remote::tunnel::{
     parse_prepared, prepare_command, PortReservation, PortTunnel, ReverseTunnel,
@@ -25,15 +25,17 @@ impl Connector for SshConnector {
     fn prepare<'a>(
         &'a self,
         target: &'a SshTarget,
+        running: Running,
         on_install: Box<dyn FnOnce(&str) + Send + 'a>,
         context: &'a splitty_transport::queue::Context,
     ) -> BoxFuture<'a, Result<Prepared, HubError>> {
         Box::pin(async move {
             let ssh = Ssh::stdio_only(target.clone()).with_context(context.clone());
-            let prepared = install::prepare(&ssh, VERSION, install::payload_for, |probe| {
-                on_install(&probe.arch)
-            })
-            .await?;
+            let prepared =
+                install::prepare(&ssh, VERSION, running, install::payload_for, |probe| {
+                    on_install(&probe.arch)
+                })
+                .await?;
             Ok(prepared)
         })
     }
@@ -223,8 +225,15 @@ impl SshConnector {
         port: u16,
         share: &splitty_remote::tunnel::exposure::Share,
     ) -> Result<ReverseTunnel, HubError> {
+        // The relay is this client's: a kept server of another version
+        // may not have it.
         let prepared = self
-            .prepare(target, Box::new(|_| {}), &Default::default())
+            .prepare(
+                target,
+                Running::Install,
+                Box::new(|_| {}),
+                &Default::default(),
+            )
             .await?;
         if prepared.probe.kernel != "Linux" {
             return Err(HubError::ReverseUnsupported {

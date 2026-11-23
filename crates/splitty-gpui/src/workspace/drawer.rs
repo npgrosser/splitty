@@ -3020,6 +3020,9 @@ impl Workspace {
                     splitty_client_core::workspace::OpenedScreenState::Ready => None,
                     splitty_client_core::workspace::OpenedScreenState::Loading => Some("Loading"),
                     splitty_client_core::workspace::OpenedScreenState::Missing => Some("Missing"),
+                    splitty_client_core::workspace::OpenedScreenState::Reconnecting => {
+                        Some("Reconnecting…")
+                    }
                     splitty_client_core::workspace::OpenedScreenState::Offline => Some("Offline"),
                 };
                 let screen_snapshot = window_model

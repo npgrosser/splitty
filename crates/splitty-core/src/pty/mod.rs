@@ -304,6 +304,10 @@ pub trait SessionHandle: Send + Sync {
     fn subscribe_with(&self, context: splitty_transport::queue::Context) -> Subscription;
     async fn write(&self, data: &[u8]) -> io::Result<()>;
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
+    /// The columns and rows the terminal was last resized to, when known.
+    fn size(&self) -> Option<(u16, u16)> {
+        None
+    }
     fn close(&self) -> io::Result<()>;
     /// Whether [`close`](Self::close) was called while the program still
     /// ran: its exit is user-initiated (`mux-protocol`, Classified

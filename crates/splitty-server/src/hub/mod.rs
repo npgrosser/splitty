@@ -52,7 +52,7 @@ use splitty_remote::bridge::{Ended, NativeBridge};
 use splitty_remote::handshake::{Handshake, RunningDaemon, Screen};
 use splitty_remote::hosts::{self, HostPreferences, KnownHost};
 pub use splitty_remote::hosts::{HostOrder, HostPreference, PreferenceError};
-use splitty_remote::install::{Prepared, Server};
+use splitty_remote::install::{Prepared, Running, Server};
 use splitty_remote::ssh::{self, SshError, SshTarget};
 use splitty_remote::tunnel::PortReservation;
 use splitty_remote::tunnel::{migration_offer, update_plan, UpdatePlan};
@@ -82,12 +82,14 @@ const BRIDGE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How the hub reaches hosts: [`SshConnector`] with the system `ssh`, a
 /// scripted host in tests.
 pub trait Connector: Send + Sync {
-    /// Make sure `target` has this client's server, installing it when this
-    /// client carries one for the host. `on_install` gets the host's
+    /// Make sure `target` has a server to run: this client's, installed when
+    /// this client carries one for the host, or with [`Running::Keep`] the
+    /// one its daemon already runs from. `on_install` gets the host's
     /// architecture before an upload starts.
     fn prepare<'a>(
         &'a self,
         target: &'a SshTarget,
+        running: Running,
         on_install: Box<dyn FnOnce(&str) + Send + 'a>,
         context: &'a splitty_transport::queue::Context,
     ) -> BoxFuture<'a, Result<Prepared, HubError>>;
@@ -688,39 +690,59 @@ impl Hub {
             Ok(())
         };
 
-        let install_progress = progress.clone();
-        let install_host = host.clone();
-        let install_context = context.clone();
-        let prepared = self
-            .connector
-            .prepare(
-                &target,
-                Box::new(move |arch: &str| {
-                    match install_context.budget.display(
-                        &format_args!("Installing Splitty {VERSION} on {install_host} ({arch})..."),
-                        true,
-                    ) {
-                        Ok(message) => {
-                            let _ = install_progress.try_send(message.map(|message| Progress {
-                                step: Step::Install,
-                                message,
-                            }));
-                        }
-                        Err(_) => install_context.close(),
+        let on_install = || -> Box<dyn FnOnce(&str) + Send> {
+            let install_progress = progress.clone();
+            let install_host = host.clone();
+            let install_context = context.clone();
+            Box::new(move |arch: &str| {
+                match install_context.budget.display(
+                    &format_args!("Installing Splitty {VERSION} on {install_host} ({arch})..."),
+                    true,
+                ) {
+                    Ok(message) => {
+                        let _ = install_progress.try_send(message.map(|message| Progress {
+                            step: Step::Install,
+                            message,
+                        }));
                     }
-                }),
-                context,
-            )
+                    Err(_) => install_context.close(),
+                }
+            })
+        };
+        // A daemon that runs from an installed server of another version is
+        // used with that server, so connecting uploads nothing; a confirmed
+        // update installs this client's.
+        let server = if update {
+            Running::Install
+        } else {
+            Running::Keep
+        };
+        let mut prepared = self
+            .connector
+            .prepare(&target, server, on_install(), context)
             .await?;
 
         report(
             Step::Daemon,
             format_args!("Asking {host} for its Splitty daemon..."),
         )?;
-        let handshake = self
+        let mut handshake = self
             .connector
             .handshake(&target, &prepared, context)
             .await?;
+        // A kept server whose daemon this client cannot use as it is gives
+        // way to this client's own, which decides what is offered.
+        if prepared.kept.is_some() && !usable(&host, &handshake) {
+            drop(handshake);
+            prepared = self
+                .connector
+                .prepare(&target, Running::Install, on_install(), context)
+                .await?;
+            handshake = self
+                .connector
+                .handshake(&target, &prepared, context)
+                .await?;
+        }
         let (mut handshake, reservation) = handshake.into_parts();
         let mut metadata = Some(reservation);
         let result = async {
@@ -796,7 +818,14 @@ impl Hub {
                     format_args!("Started a private Splitty daemon on {host}."),
                 )?;
             }
-            let update_availability = failure::UpdateAvailability::new(daemon, &handshake.server.version);
+            // With a kept server the replacement is the one this client
+            // carries: a confirmed update installs it first.
+            let replacement = if prepared.kept.is_some() && prepared.had_payload {
+                VERSION
+            } else {
+                &handshake.server.version
+            };
+            let update_availability = failure::UpdateAvailability::new(daemon, replacement);
             // The window's protocol is this server's: the UI comes from it. A
             // daemon outside the window keeps running untouched.
             if !compatible(daemon.protocol, PROTOCOL_VERSION) {
@@ -899,6 +928,14 @@ impl Hub {
 }
 
 /// The daemon the handshake found running or started.
+/// Whether the daemon a kept server answered for can be used as it is: a
+/// native one of a protocol this client speaks.
+fn usable(host: &str, handshake: &Handshake) -> bool {
+    running(host, handshake).is_ok_and(|daemon| {
+        !daemon.legacy && daemon.supports_native() && compatible(daemon.protocol, PROTOCOL_VERSION)
+    })
+}
+
 fn running<'a>(host: &str, handshake: &'a Handshake) -> Result<&'a RunningDaemon, HubError> {
     match &handshake.daemon.daemon {
         Some(daemon) if handshake.daemon.running => Ok(daemon),
@@ -1063,6 +1100,73 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[tokio::test]
+    async fn a_compatible_older_daemon_is_used_with_its_own_server_and_offers_the_update() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let host = testing::ScriptedHost::new(dir.path())
+            .with_keeping_daemon("0.0.0", PROTOCOL_VERSION)
+            .with_daemon_server();
+        let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+        let context = splitty_transport::queue::Context::default();
+        let (progress, mut reports) = mpsc::channel(8);
+        let reached = match hub
+            .reach(
+                SshTarget::parse("vm1").expect("target"),
+                false,
+                progress,
+                &context,
+            )
+            .await
+        {
+            Ok(reached) => reached,
+            Err(error) => panic!("a compatible daemon connects: {error}"),
+        };
+        assert_eq!(reached.daemon.version, "0.0.0");
+        assert!(
+            reached.update.available,
+            "the update this client carries is offered, not installed"
+        );
+        assert_eq!(
+            host.asked()[..2],
+            ["prepare vm1", "handshake"],
+            "one preparation: nothing is installed for the connection"
+        );
+        while let Ok(report) = reports.try_recv() {
+            assert_ne!(report.step, Step::Install, "{}", report.message);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kept_server_whose_daemon_cannot_be_used_gives_way_to_this_clients() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let host = testing::ScriptedHost::new(dir.path())
+            .with_keeping_daemon("0.0.0", PROTOCOL_VERSION + 2)
+            .with_daemon_server();
+        let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+        let context = splitty_transport::queue::Context::default();
+        let (progress, _reports) = mpsc::channel(8);
+        let outcome = hub
+            .reach(
+                SshTarget::parse("vm1").expect("target"),
+                false,
+                progress,
+                &context,
+            )
+            .await;
+        let error = match outcome {
+            Err(error) => error,
+            Ok(_) => panic!("incompatible daemon must not connect"),
+        };
+        let failure = error.failure("vm1");
+        assert_eq!(failure.code, Code::Incompatible);
+        assert!(failure.update.expect("eligibility").available);
+        assert_eq!(
+            host.asked(),
+            ["prepare vm1", "handshake", "prepare vm1", "handshake"],
+            "this client's server is installed to decide what is offered"
+        );
+    }
+
     #[tokio::test]
     async fn incompatible_update_offer_requires_the_discovered_matching_replacement() {
         for replacement in [VERSION, "0.0.0"] {
