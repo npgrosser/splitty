@@ -588,3 +588,4 @@ Each point names what holds now, the alternative, and where it is recorded.
   - Splitty Salon and Splitty Salon Light have neutral grays, and the light one is clearly darker than before (surface `#d7d7d7`, terminal `#dddddd`). Alternative: a faint warm tint instead of pure gray.
   - The earlier look is kept as **Splitty Salon Teal** (`splitty-salon-teal`), with **Splitty Salon Teal Light** (`splitty-salon-teal-light`) on a warm paper tone. Alternative: other names.
   - Windows 11 Light still takes the default light terminal palette (SDT-1), which is now a mid-light gray instead of a paper tone.
+- **`window-close-closes-screens` WCS-1** (2026-11-24, provisional, tbd; recorded in the change's proposal): closing a window while another is open closes its local screens and detaches its hosts' screens, asking once when something ends and offering to move them instead. Alternative: hand the screens to another window without a question, as before.

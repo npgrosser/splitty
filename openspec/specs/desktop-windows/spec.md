@@ -84,12 +84,27 @@ A move SHALL change only which window holds the screen: the application SHALL se
 - **AND** the first window still shows `work`
 
 ### Requirement: Closing A Window
-Closing a window (its close control or `window.close`) while the application has another one SHALL end nothing and ask nothing: its screens SHALL be handed to the window that was active last among the others, each with its sessions and terminal state, and the receiving window SHALL keep its shown screen. A window whose last screen was closed or moved away SHALL close unless it is the application's last, which stays open without a screen.
+Closing a window (its close control or `window.close`) while the application has another one SHALL close what the window holds: its local screens SHALL be closed and the hosts' screens it holds SHALL be detached, their sessions staying on their hosts. The application SHALL ask the local service once what closing the window's local screens ends (see `mux-protocol`, Close Assessment). When nothing ends, the screens SHALL close without a question. Otherwise the window SHALL ask one question that names what ends and offers to keep the window open, to close its screens, or to move them to another window; moving SHALL hand every screen the window holds to the window that was active last among the others, each with its sessions and terminal state, and SHALL end nothing. A window that holds only hosts' screens SHALL close without an assessment and without a question. A window whose last screen was closed, detached or moved away SHALL close unless it is the application's last, which stays open without a screen.
 
 #### Scenario: One of two windows closed
-- **WHEN** window B, which holds `notes` with a running program, is closed while window A is open
-- **THEN** B closes without a question
-- **AND** `notes` is in A's screen list with its program running, and A still shows the screen it showed
+- **WHEN** window B, which holds the local screen `notes` with a running program, is closed while window A is open
+- **THEN** B asks whether to close it, naming one running session, and nothing closes before the answer
+
+#### Scenario: Closing confirmed
+- **WHEN** the user answers that question with closing
+- **THEN** `notes` is closed with its program, and B closes
+
+#### Scenario: Moving instead of closing
+- **WHEN** the user answers that question with moving to another window
+- **THEN** B closes, `notes` is in A's screen list with its program running, and A still shows the screen it showed
+
+#### Scenario: Nothing ends
+- **WHEN** window B holds only a local screen with an idle shell and is closed while window A is open
+- **THEN** the screen closes without a question, and B closes
+
+#### Scenario: A window with a host's screens
+- **WHEN** window B holds only the screen `api` of the host `vm1` and is closed while window A is open
+- **THEN** `api` is detached without a question, its sessions keep running on `vm1`, and B closes
 
 #### Scenario: Last screen of a window
 - **WHEN** the only screen of window B is closed or moved to window A
