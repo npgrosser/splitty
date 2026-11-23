@@ -109,3 +109,18 @@ Closing the application's last window, and `window.quit` in any window, SHALL cl
 #### Scenario: Quit declined
 - **WHEN** `window.quit` asks because a terminal runs a program and the user declines
 - **THEN** every window stays open with its screens
+
+### Requirement: Moving A Group Of Screens
+The user SHALL be able to move every screen a window holds of one group, its local screens or those of one host, to another window or to a new one in one step, with `screen.move-group-to-next-window`, `screen.move-group-to-new-window` and a host's panel. The screens SHALL keep their order, the receiving window SHALL show the first, and A Move Changes No Server State SHALL hold for each. A screen of that group opened afterwards SHALL be held by the window that opens it.
+
+#### Scenario: A host's screens to a new window
+- **WHEN** a window holds `api` and `infra` of `vm1` and a local screen, and the user moves `vm1`'s screens to a new window
+- **THEN** the new window holds `api` and `infra` in that order and shows `api`, `vm1`'s connection stays as it is, and the first window keeps its local screen
+
+#### Scenario: The only group of a window
+- **WHEN** a window holds only local screens and the user moves them to another window
+- **THEN** that window lists them in their order, and the window they left closes
+
+#### Scenario: A screen that is gone
+- **WHEN** one of the group's screens was closed on its server before the move is carried out
+- **THEN** the other screens move and nothing else changes

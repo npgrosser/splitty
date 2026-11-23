@@ -8,6 +8,8 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`move-screen-groups` MSG-1** (2026-11-23, provisional, tbd; recorded in the change's proposal, behavior in `desktop-windows`, Moving A Group Of Screens): a group move takes the Screens the window holds at that moment; a Screen of the same host opened later belongs to the window that opens it, so a host's group can stand in two windows. Alternative: a host belongs to one window, and its later Screens follow it.
+
 - **`native-multi-window` NMW-P1 to NMW-P11** (2026-11-22, provisional, tbd; recorded in the change's design, behavior in the `desktop-windows` spec and in `remote-screens`, `terminal-sessions` and `mux-protocol`):
   - **NMW-P1:** closing a window that is not the last hands its Screens to the window that was active last among the others; nothing ends and nothing is asked. Alternative: the close ends the window's local Screens after the assessed question and detaches its remote ones, as a browser window closes its tabs.
   - **NMW-P2:** `window.new` opens a window with one new local Screen. Alternative: an empty window that offers "New Screen".
