@@ -147,6 +147,8 @@ pub enum WindowStart {
     NewScreen,
     /// A Screen another window holds, which moves to the new window.
     Screen(ScreenKey),
+    /// Several Screens, as a whole group of a window; the first is shown.
+    Screens(Vec<ScreenKey>),
 }
 
 pub enum CommandKind {
@@ -165,6 +167,12 @@ pub enum CommandKind {
     /// server hears of it but through the sizes its panes have there.
     MoveScreenToWindow {
         screen: ScreenKey,
+        target: WindowId,
+    },
+    /// Hand several opened Screens to window `target` in one step, as the
+    /// whole group of a host or the local one; the first is shown there.
+    MoveScreensToWindow {
+        screens: Vec<ScreenKey>,
         target: WindowId,
     },
     RequestHostUpdate {
@@ -1892,6 +1900,11 @@ async fn run_service_with_presence(
                                                 publish(&updates,Update::Status(error.to_string()),&stop).await?;
                                             }
                                         }
+                                        WindowStart::Screens(keys) => {
+                                            if let Err(error)=move_screens(&mut window,&mut local,&mut remotes,opened,&keys) {
+                                                publish(&updates,Update::Status(error.to_string()),&stop).await?;
+                                            }
+                                        }
                                         WindowStart::NewScreen => {
                                             // The new window creates its Screen as any window does.
                                             window.enter(opened);
@@ -1940,6 +1953,12 @@ async fn run_service_with_presence(
                         }
                         CommandKind::MoveScreenToWindow {screen,target} => {
                             match move_screen(&mut window,&mut local,&mut remotes,target,&screen) {
+                                Ok(())=>publish_model(&updates,&mut window,&stop).await?,
+                                Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
+                            }
+                        }
+                        CommandKind::MoveScreensToWindow {screens,target} => {
+                            match move_screens(&mut window,&mut local,&mut remotes,target,&screens) {
                                 Ok(())=>publish_model(&updates,&mut window,&stop).await?,
                                 Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                             }
@@ -2292,6 +2311,7 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::OpenWindow { .. }
             | CommandKind::CloseWindow
             | CommandKind::MoveScreenToWindow { .. }
+            | CommandKind::MoveScreensToWindow { .. }
     ) || matches!(kind,CommandKind::RequestClose {plan,..} if plan.target==CloseTarget::Window)
 }
 fn select_window_screen(
@@ -2327,6 +2347,29 @@ fn move_screen(
     window.move_screen_to_window(key, target)?;
     move_visibility(local, remotes, from, target, key);
     Ok(())
+}
+
+/// Hand several opened Screens to window `target`. They are moved from the
+/// last to the first, so the first one is the Screen the target shows; a
+/// Screen that is gone meanwhile is left out.
+fn move_screens(
+    window: &mut WindowWorkspace,
+    local: &mut source::SourceRuntime,
+    remotes: &mut remote::Remotes<'_>,
+    target: WindowId,
+    keys: &[ScreenKey],
+) -> std::io::Result<()> {
+    let mut moved = false;
+    for key in keys.iter().rev() {
+        moved |= move_screen(window, local, remotes, target, key).is_ok();
+    }
+    if moved {
+        Ok(())
+    } else {
+        Err(crate::connection::invalid(
+            "None of the Screens is open any more",
+        ))
+    }
 }
 
 fn move_visibility(

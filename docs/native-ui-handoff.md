@@ -148,7 +148,9 @@ sees another window's Screens. What crosses windows goes through `Windows`:
   `reconcile`), and the window that gets it takes them in `ensure_pane`, so
   the same `Terminal` entity is shown there. The worker sends the giving
   window its model first. A parked view nobody takes within five seconds is
-  dropped: its Screen closed.
+  dropped: its Screen closed. A whole group (the local Screens or a host's)
+  moves with one `MoveScreensToWindow`, or opens a window that starts with
+  it, from the host's panel and the two `screen.move-group-…` commands.
 - **Closing**: a window that is not the last sends `CloseWindow` and goes
   when the worker answers `WindowClosed`; its Screens are in another window's
   next model. A window whose last Screen left it closes the same way

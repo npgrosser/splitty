@@ -51,6 +51,11 @@ pub enum Command {
     MoveScreenToNewWindow,
     /// Hand the shown Screen to the application's next window.
     MoveScreenToNextWindow,
+    /// Hand every Screen of the shown Screen's group (the local Screens, or
+    /// those of its host) to a new window.
+    MoveScreenGroupToNewWindow,
+    /// Hand that group to the application's next window.
+    MoveScreenGroupToNextWindow,
     NewTab,
     NewTabWithProfile,
     CloseTab,
@@ -116,6 +121,8 @@ impl Command {
             MoveScreenDown,
             MoveScreenToNewWindow,
             MoveScreenToNextWindow,
+            MoveScreenGroupToNewWindow,
+            MoveScreenGroupToNextWindow,
             NewTab,
             NewTabWithProfile,
             CloseTab,
@@ -188,6 +195,8 @@ impl Command {
             MoveScreenDown => "screen.move-down",
             MoveScreenToNewWindow => "screen.move-to-new-window",
             MoveScreenToNextWindow => "screen.move-to-next-window",
+            MoveScreenGroupToNewWindow => "screen.move-group-to-new-window",
+            MoveScreenGroupToNextWindow => "screen.move-group-to-next-window",
             NewTab => "tab.new",
             NewTabWithProfile => "tab.new-with-profile",
             CloseTab => "tab.close",
@@ -262,6 +271,8 @@ impl Command {
             MoveScreenDown => "Move Screen Down",
             MoveScreenToNewWindow => "Move Screen to New Window",
             MoveScreenToNextWindow => "Move Screen to Next Window",
+            MoveScreenGroupToNewWindow => "Move Screen Group to New Window",
+            MoveScreenGroupToNextWindow => "Move Screen Group to Next Window",
             NewTab => "New Tab",
             NewTabWithProfile => "New Tab with Profile…",
             CloseTab => "Close Tab",
@@ -318,7 +329,9 @@ impl Command {
             | MoveScreenUp
             | MoveScreenDown
             | MoveScreenToNewWindow
-            | MoveScreenToNextWindow => Category::Screens,
+            | MoveScreenToNextWindow
+            | MoveScreenGroupToNewWindow
+            | MoveScreenGroupToNextWindow => Category::Screens,
             NewTab | NewTabWithProfile | CloseTab | CloseOtherTabs | NextTab | PreviousTab
             | MoveTabRight | MoveTabLeft | MoveTabToScreen => Category::Tabs,
             SplitRight | SplitDown | FocusPane(_) | MaximizePane | FloatPane | ArrangePanes
@@ -371,6 +384,8 @@ fn default_texts(platform: Platform, command: Command) -> Vec<String> {
         | MoveScreenDown
         | MoveScreenToNewWindow
         | MoveScreenToNextWindow
+        | MoveScreenGroupToNewWindow
+        | MoveScreenGroupToNextWindow
         | CloseWindow
         | CloseOtherTabs
         | CopyWorkingDirectory

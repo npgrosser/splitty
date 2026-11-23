@@ -739,7 +739,7 @@ impl Workspace {
         content
     }
 
-    fn host_content(&self, target: &str) -> PopoverContent {
+    fn host_content(&self, target: &str, cx: &App) -> PopoverContent {
         let mut content = PopoverContent::default();
         let owner = self.lifecycle_token();
         let opening = self
@@ -979,6 +979,43 @@ impl Workspace {
             .model
             .as_ref()
             .and_then(|model| HostGroupTarget::capture(model, model.source_for_target(target)?));
+        // The whole group goes to another window of the application.
+        let group_source = self
+            .model
+            .as_ref()
+            .and_then(|model| model.source_for_target(target))
+            .filter(|source| {
+                crate::windows::Windows::serving(cx)
+                    && self.model.as_ref().is_some_and(|model| {
+                        model
+                            .opened()
+                            .iter()
+                            .any(|entry| entry.key().source_id() == *source)
+                    })
+            });
+        if let Some(source) = group_source {
+            content.entries.push(separated(
+                MenuEntry::new(
+                    "move-host-to-new-window",
+                    "Move Screens to New Window",
+                    move |this, _, cx| this.move_group_to_new_window(source, cx),
+                )
+                .icon(IconName::ExternalLink),
+            ));
+            for (index, (window, title)) in crate::windows::Windows::others(self.window_id, cx)
+                .into_iter()
+                .enumerate()
+            {
+                content.entries.push(
+                    MenuEntry::new(
+                        format!("move-host-to-window-{index}"),
+                        format!("Move Screens to Window \u{201c}{title}\u{201d}"),
+                        move |this, _, cx| this.move_group_to_window(source, window, cx),
+                    )
+                    .icon(IconName::ExternalLink),
+                );
+            }
+        }
         if let Some(group) = open_group {
             content.entries.push(separated(
                 MenuEntry::new("close-host", "Close host", move |this, _, cx| {
@@ -1220,7 +1257,7 @@ impl Workspace {
                 ..PopoverContent::default()
             },
             PopoverKind::Connect => self.connect_content(popover, cx),
-            PopoverKind::Host(target) => self.host_content(target),
+            PopoverKind::Host(target) => self.host_content(target, cx),
             PopoverKind::Ports(group) => self.ports_content(popover, group, cx),
             PopoverKind::Shares(group) => self.shares_content(popover, group, cx),
         }
@@ -2473,11 +2510,11 @@ mod view_tests {
                 )
                 .unwrap();
             window.update(|_, cx| {
-                view.update(cx, |workspace, _| {
+                view.update(cx, |workspace, cx| {
                     workspace.model = Some(model);
                     let status = |target: &str| {
                         workspace
-                            .host_content(target)
+                            .host_content(target, cx)
                             .status
                             .map(|(text, _)| text.to_string())
                     };

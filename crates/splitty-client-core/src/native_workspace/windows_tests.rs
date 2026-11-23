@@ -356,3 +356,97 @@ async fn a_screen_from_outside_goes_to_the_window_that_was_active_last() {
     let _ = worker.await;
     drop(outside);
 }
+
+#[tokio::test]
+async fn a_whole_group_of_screens_moves_in_one_step_and_keeps_its_order() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let (commands, receiver) = mpsc::channel(64);
+    let (sender, mut updates) = mpsc::channel(64);
+    let worker = Worker::start_isolated(receiver, sender);
+    let mut seen = Seen::default();
+    until(&mut updates, &mut seen, |seen| {
+        seen.ready(WindowId::FIRST, 1)
+    })
+    .await;
+    let scope = seen.models[&WindowId::FIRST].lifecycle_token();
+    for screens in 2..=3 {
+        commands
+            .send(Command::new(scope, CommandKind::CreateScreen(None)))
+            .await
+            .unwrap();
+        until(&mut updates, &mut seen, |seen| {
+            seen.ready(WindowId::FIRST, screens)
+        })
+        .await;
+    }
+    let group: Vec<ScreenKey> = seen.models[&WindowId::FIRST]
+        .opened()
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    let listed = seen.listed(WindowId::FIRST);
+    let attached = seen.attached.len();
+
+    // The group opens a new window that holds all of it, in its order, and
+    // shows its first Screen; the window that gave it lists nothing.
+    let from = seen.order.len();
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::OpenWindow {
+                window: SECOND,
+                presence: WindowPresenceCell::default(),
+                start: WindowStart::Screens(group.clone()),
+            },
+        ))
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| {
+        seen.listed(SECOND).len() == 3
+    })
+    .await;
+    assert_eq!(seen.listed(SECOND), listed);
+    assert_eq!(seen.models[&SECOND].shown_key(), Some(group[0].clone()));
+    assert!(seen.listed(WindowId::FIRST).is_empty());
+    // One model for each window, not one per Screen.
+    assert!(seen.position((SECOND, Some(1)), from).is_none());
+    assert!(seen.position((SECOND, Some(2)), from).is_none());
+
+    // And back to the open window, with a Screen that is gone left out.
+    let mut back = group.clone();
+    back.push(
+        seen.models[&SECOND]
+            .local_source()
+            .screen_key("no-such-screen"),
+    );
+    commands
+        .send(
+            Command::new(
+                scope,
+                CommandKind::MoveScreensToWindow {
+                    screens: back,
+                    target: WindowId::FIRST,
+                },
+            )
+            .in_window(SECOND),
+        )
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| {
+        seen.listed(WindowId::FIRST).len() == 3 && seen.listed(SECOND).is_empty()
+    })
+    .await;
+    assert_eq!(seen.listed(WindowId::FIRST), listed);
+    assert_eq!(
+        seen.models[&WindowId::FIRST].shown_key(),
+        Some(group[0].clone())
+    );
+    assert_eq!(
+        seen.attached.len(),
+        attached,
+        "a group move attaches nothing"
+    );
+    worker.shutdown().unwrap();
+}

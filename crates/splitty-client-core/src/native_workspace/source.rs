@@ -929,6 +929,7 @@ impl SourceRuntime {
             | CommandKind::OpenWindow { .. }
             | CommandKind::CloseWindow
             | CommandKind::MoveScreenToWindow { .. }
+            | CommandKind::MoveScreensToWindow { .. }
             | CommandKind::RequestClose { .. } => {
                 unreachable!("close is handled before normal commands")
             }

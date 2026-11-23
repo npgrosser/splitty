@@ -33,7 +33,10 @@ application, with a new screen. Every screen is in exactly one window, and
 each window lists its own screens in its drawer. A screen's menu in the drawer
 moves it to another window or to a new one, as do **Move Screen to New
 Window** and **Move Screen to Next Window** in the command palette; its
-terminals keep running and keep their history. Closing a window while another
+terminals keep running and keep their history. A host's panel moves all its
+screens at once, and **Move Screen Group to New Window** or **to Next
+Window** does that for the group of the shown screen, the local screens
+included. Closing a window while another
 one is open closes nothing else: its screens go to the window you used last
 before it. Closing the last window, or **Quit**, ends the application.
 

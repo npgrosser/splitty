@@ -4502,6 +4502,22 @@ impl Workspace {
             KeyCommand::MoveScreenDown => self.move_shown_screen(false, cx),
             KeyCommand::MoveScreenToNewWindow => self.move_shown_screen_to_new_window(cx),
             KeyCommand::MoveScreenToNextWindow => self.move_shown_screen_to_next_window(cx),
+            KeyCommand::MoveScreenGroupToNewWindow => {
+                if let Some(source) = self.current_screen_key().map(|key| key.source_id()) {
+                    self.move_group_to_new_window(source, cx);
+                }
+            }
+            KeyCommand::MoveScreenGroupToNextWindow => {
+                if let Some(source) = self.current_screen_key().map(|key| key.source_id()) {
+                    match self.next_window(cx) {
+                        Some(target) => self.move_group_to_window(source, target, cx),
+                        None => {
+                            self.status = "There is no other window to move the Screens to".into();
+                            cx.notify();
+                        }
+                    }
+                }
+            }
             KeyCommand::NewTab => self.tab(cx),
             KeyCommand::NewTabWithProfile => self.new_tab_with_profile(window, cx),
             KeyCommand::CloseTab => self.close_focused_pane(window, cx),

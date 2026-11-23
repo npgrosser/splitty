@@ -79,6 +79,8 @@ receives those keys.
 | Move Screen Down | `screen.move-down` | none | none |
 | Move Screen to New Window | `screen.move-to-new-window` | none | none |
 | Move Screen to Next Window | `screen.move-to-next-window` | none | none |
+| Move Screen Group to New Window | `screen.move-group-to-new-window` | none | none |
+| Move Screen Group to Next Window | `screen.move-group-to-next-window` | none | none |
 
 ### Tabs
 

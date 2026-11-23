@@ -129,6 +129,20 @@ const TABLE: &[Row] = &[
         &[],
         None,
     ),
+    (
+        "screen.move-group-to-new-window",
+        "Move Screen Group to New Window",
+        "Screens",
+        &[],
+        None,
+    ),
+    (
+        "screen.move-group-to-next-window",
+        "Move Screen Group to Next Window",
+        "Screens",
+        &[],
+        None,
+    ),
     ("tab.new", "New Tab", "Tabs", &["mod+t"], None),
     (
         "tab.new-with-profile",

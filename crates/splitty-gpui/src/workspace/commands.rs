@@ -486,23 +486,65 @@ impl Workspace {
         let Some(screen) = self.current_screen_key() else {
             return;
         };
-        let mut others: Vec<WindowId> = crate::windows::Windows::others(self.window_id, cx)
-            .into_iter()
-            .map(|(id, _)| id)
-            .collect();
-        others.sort();
-        let next = others
-            .iter()
-            .find(|id| **id > self.window_id)
-            .or(others.first())
-            .copied();
-        match next {
+        match self.next_window(cx) {
             Some(target) => self.move_screen_to_window(screen, target, cx),
             None => {
                 self.status = "There is no other window to move the Screen to".into();
                 cx.notify();
             }
         }
+    }
+
+    /// The window opened after this one, or the first one from the last.
+    pub(super) fn next_window(&self, cx: &App) -> Option<WindowId> {
+        let mut others: Vec<WindowId> = crate::windows::Windows::others(self.window_id, cx)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        others.sort();
+        others
+            .iter()
+            .find(|id| **id > self.window_id)
+            .or(others.first())
+            .copied()
+    }
+
+    /// The Screens of one group this window holds: the local ones, or those
+    /// of one host, in the order the Drawer lists them.
+    fn group_screens(&self, source: SourceId) -> Vec<ScreenKey> {
+        self.model.as_ref().map_or_else(Vec::new, |model| {
+            model
+                .opened()
+                .iter()
+                .map(|entry| entry.key().clone())
+                .filter(|key| key.source_id() == source)
+                .collect()
+        })
+    }
+
+    /// Hand every Screen of a group to a new window, in one step.
+    pub(super) fn move_group_to_new_window(&mut self, source: SourceId, cx: &mut Context<Self>) {
+        let screens = self.group_screens(source);
+        if !screens.is_empty() {
+            self.open_window(
+                splitty_client_core::native_workspace::WindowStart::Screens(screens),
+                cx,
+            );
+        }
+    }
+
+    /// Hand every Screen of a group to another open window, in one step.
+    pub(super) fn move_group_to_window(
+        &mut self,
+        source: SourceId,
+        target: WindowId,
+        cx: &mut Context<Self>,
+    ) {
+        let screens = self.group_screens(source);
+        let Some(owner) = self.lifecycle_token().filter(|_| !screens.is_empty()) else {
+            return;
+        };
+        self.send_captured(owner, Command::MoveScreensToWindow { screens, target }, cx);
     }
 
     fn holds_screen(&self, screen: &ScreenKey) -> bool {

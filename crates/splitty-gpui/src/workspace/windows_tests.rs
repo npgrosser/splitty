@@ -338,3 +338,42 @@ fn a_question_of_the_local_service_is_asked_once_for_all_windows() {
         0
     );
 }
+
+#[test]
+fn a_whole_group_goes_to_another_window_with_one_command() {
+    let (mut app, mut commands) = application();
+    let mut model = WindowWorkspace::new(Uuid::new_v4());
+    let keys = model
+        .ui_test_local_screens_fixture(&["work", "notes"])
+        .unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    sent(&mut commands);
+
+    // To a new window: it opens, and starts with the group.
+    run(
+        &mut app,
+        WindowId::FIRST,
+        KeyCommand::MoveScreenGroupToNewWindow,
+    );
+    assert_eq!(app.update(|cx| Windows::count(cx)), 2);
+    assert!(sent(&mut commands).iter().any(|command| matches!(
+        command.kind(),
+        CommandKind::OpenWindow { window, start: WindowStart::Screens(screens), .. }
+            if *window == SECOND && screens == &keys
+    )));
+    model.ui_test_open_window(SECOND).unwrap();
+    for key in keys.iter().rev() {
+        model.ui_test_move_screen(key, SECOND).unwrap();
+    }
+    model_for(&mut app, &model, WindowId::FIRST);
+    model_for(&mut app, &model, SECOND);
+    sent(&mut commands);
+
+    // To the next open window: one command names every Screen of the group.
+    run(&mut app, SECOND, KeyCommand::MoveScreenGroupToNextWindow);
+    assert!(sent(&mut commands).iter().any(|command| {
+        command.window() == SECOND
+            && matches!(command.kind(), CommandKind::MoveScreensToWindow { screens, target }
+                if screens == &keys && *target == WindowId::FIRST)
+    }));
+}
