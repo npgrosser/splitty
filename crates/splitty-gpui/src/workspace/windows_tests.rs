@@ -415,3 +415,57 @@ fn the_screens_menu_moves_it_to_a_new_window_by_a_click() {
     )));
     assert_eq!(app.update(|cx| Windows::count(cx)), 2);
 }
+
+#[test]
+fn a_hosts_screen_changes_windows_with_its_terminal_view() {
+    let (mut app, mut commands) = application();
+    let mut model = WindowWorkspace::new(Uuid::new_v4());
+    let local = model.ui_test_local_screen_fixture("work").unwrap();
+    let (remote, _) = model.ui_test_remote_terminal_fixture("host.test").unwrap();
+    assert_ne!(remote.source_id(), local.source_id());
+    model_for(&mut app, &model, WindowId::FIRST);
+    assert_eq!(shown(&mut app, WindowId::FIRST), Some(remote.clone()));
+    let views = |app: &mut TestAppContext, id: WindowId| -> Vec<EntityId> {
+        let Some(view) = view(app, id) else {
+            return Vec::new();
+        };
+        app.update(|cx| {
+            view.read(cx)
+                .panes
+                .iter()
+                .filter(|(pane, _)| pane.source_id() == remote.source_id())
+                .map(|(_, pane)| pane.terminal.entity_id())
+                .collect()
+        })
+    };
+    let before = views(&mut app, WindowId::FIRST);
+    assert_eq!(before.len(), 1, "the host Screen's terminal view");
+    sent(&mut commands);
+
+    // The host's Screen goes to a new window over the connection the
+    // application already has: no command connects the host again.
+    run(&mut app, WindowId::FIRST, KeyCommand::MoveScreenToNewWindow);
+    assert_eq!(app.update(|cx| Windows::count(cx)), 2);
+    let opened = sent(&mut commands);
+    assert!(opened.iter().any(|command| matches!(
+        command.kind(),
+        CommandKind::OpenWindow { window, start: WindowStart::Screen(screen), .. }
+            if *window == SECOND && screen == &remote
+    )));
+    assert!(!opened
+        .iter()
+        .any(|command| matches!(command.kind(), CommandKind::ConnectHost { .. })));
+
+    model.ui_test_open_window(SECOND).unwrap();
+    model.ui_test_move_screen(&remote, SECOND).unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    model_for(&mut app, &model, SECOND);
+    assert_eq!(shown(&mut app, SECOND), Some(remote.clone()));
+    assert_eq!(shown(&mut app, WindowId::FIRST), Some(local));
+    assert!(views(&mut app, WindowId::FIRST).is_empty());
+    assert_eq!(
+        views(&mut app, SECOND),
+        before,
+        "the same terminal view, with what it shows"
+    );
+}

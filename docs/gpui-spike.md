@@ -2288,6 +2288,11 @@ Added on 2026-11-23: the smoke ends with a key press, the default key of
 stage 22 only when a second window opened and no terminal got the key. A
 view test opens a Screen's menu and clicks "Move to New Window".
 
+A further view test moves a host's Screen to a new window: the same
+terminal view arrives there and no command connects the host again. Synthetic
+pointer and key events through XTest do not reach the window under GNOME's
+Wayland session; a screenshot of the real window does work.
+
 Not checked: the pointer and the menus in a real second window (no input
 automation on the test machine), a host Screen moved between real windows,
 two windows under sustained input at once, macOS and Windows.
