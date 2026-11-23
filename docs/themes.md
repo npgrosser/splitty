@@ -16,8 +16,11 @@ Both come with the app and can be added as files.
   Splitty Modern in the muted tones of the application icon, with grays that
   lean to teal, an ochre accent, terracotta for danger and sage for success;
   Splitty Salon Light is its counterpart on a paper tone with a slate teal
-  accent. Their terminal palettes keep the ANSI colors of Splitty Modern, so
-  program output stays easy to tell apart. New settings show Splitty Salon as
+  accent. The dark terminal palette is in the same tones: a dark teal gray
+  that is not black as its background, light text, and ANSI colors that are
+  the interface's terracotta, sage, ochre, slate blue, mauve and teal, light
+  enough to read and to tell apart. The light one keeps the ANSI colors of
+  Splitty Modern Light. New settings show Splitty Salon as
   their one theme, whatever the system's preference, and pair it with Splitty
   Salon Light once they follow the system; settings that name another theme
   keep it.

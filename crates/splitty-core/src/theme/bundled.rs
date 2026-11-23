@@ -143,12 +143,14 @@ mod tests {
         assert_eq!(dark.palette.accent, "#cfa55b");
         assert_eq!(light.name, "Splitty Salon Light");
         assert_eq!(light.palette.accent, "#2f6f73");
-        // Both name their terminal colors: the ANSI colors are not the
-        // muted ones of the interface.
+        // Both name their terminal colors. The dark one's are in the tones
+        // of the interface on a background that is not black; the light one
+        // keeps the ANSI colors of Splitty Modern Light.
         assert_eq!(
             dark.terminal.get("blue").map(String::as_str),
-            Some("#63a0ff")
+            Some("#86aed0")
         );
+        assert_eq!(dark.terminal.get("bg").map(String::as_str), Some("#1a2120"));
         assert_eq!(
             light.terminal.get("blue").map(String::as_str),
             Some("#3589d6")
