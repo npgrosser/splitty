@@ -1415,6 +1415,8 @@ pub struct Workspace {
     /// The Screen handed to another window and back, with its pane and the
     /// terminal view that has to come with it.
     smoke_moved: Option<(ScreenKey, PaneKey, EntityId)>,
+    /// The key presses that ran a command before the window key was pressed.
+    smoke_windows_keys: u64,
     smoke_markers: bool,
     smoke_hidden_output: bool,
     smoke_editor_reconciles: u64,
@@ -1988,6 +1990,7 @@ impl Workspace {
             smoke_second_screen: None,
             smoke_initial: None,
             smoke_moved: None,
+            smoke_windows_keys: 0,
             smoke_markers: false,
             smoke_hidden_output: false,
             smoke_editor_reconciles: 0,
@@ -5512,9 +5515,22 @@ impl Workspace {
                                 .get(pane)
                                 .is_some_and(|view| view.terminal.entity_id() == *terminal)
                     });
+                if !same {
+                    self.finish_smoke(false, cx);
+                    return;
+                }
+                // The key of `window.new`, through the keymap as a key press.
+                self.smoke_windows_keys = self.smoke_shortcut_checks.load(Ordering::Acquire);
+                self.focus_current(window, cx);
+                self.smoke_key(window, cx, "cmd-n", "ctrl-shift-n", None);
+                self.smoke_stage = 22;
+            }
+            // The key opened a window and reached no terminal.
+            22 if crate::windows::Windows::count(cx) == 2
+                && self.smoke_shortcut_checks.load(Ordering::Acquire) > self.smoke_windows_keys =>
+            {
                 self.finish_smoke(
-                    same && self.smoke_hidden_output
-                        && self.smoke_editor_clean.load(Ordering::Acquire),
+                    self.smoke_hidden_output && self.smoke_editor_clean.load(Ordering::Acquire),
                     cx,
                 );
             }

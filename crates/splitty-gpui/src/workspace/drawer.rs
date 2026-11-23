@@ -2598,7 +2598,7 @@ impl Workspace {
         entries
     }
 
-    fn open_screen_menu(
+    pub(super) fn open_screen_menu(
         &mut self,
         key: &ScreenKey,
         position: Point<Pixels>,

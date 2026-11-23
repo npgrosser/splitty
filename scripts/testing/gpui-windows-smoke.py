@@ -392,15 +392,15 @@ def main():
         probes = [item for item in records if item.get("probe") == "splitty-local-workspace"]
         shutdowns = [item for item in records if item.get("probeShutdown") == "complete"]
         graphics = [item["nativeGraphics"] for item in records if "nativeGraphics" in item]
-        if smoke_exit not in (None, 0) or len(probes) != 1 or probes[0].get("passed") is not True or probes[0].get("stage") != 21:
-            raise RuntimeError("Windows workspace smoke did not pass all 21 stages")
+        if smoke_exit not in (None, 0) or len(probes) != 1 or probes[0].get("passed") is not True or probes[0].get("stage") != 22:
+            raise RuntimeError("Windows workspace smoke did not pass all 22 stages")
         if len(shutdowns) != 1:
             raise RuntimeError("Windows workspace did not report complete shutdown")
         if not graphics or not graphics[-1].get("device") or graphics[-1].get("software") is True:
             raise RuntimeError("Windows GPUI did not report a hardware graphics device")
         result["workspaceProbe"] = probes[0]
         result["nativeGraphics"] = graphics[-1]
-        result["checks"].append("windows-workspace-21-stages-hardware-gpu-and-shutdown")
+        result["checks"].append("windows-workspace-22-stages-hardware-gpu-and-shutdown")
         deadline = time.monotonic() + 5
         while owned_linux_pids(config) - before and time.monotonic() < deadline:
             time.sleep(.2)

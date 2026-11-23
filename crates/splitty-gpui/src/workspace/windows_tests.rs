@@ -377,3 +377,41 @@ fn a_whole_group_goes_to_another_window_with_one_command() {
                 if screens == &keys && *target == WindowId::FIRST)
     }));
 }
+
+#[test]
+fn the_screens_menu_moves_it_to_a_new_window_by_a_click() {
+    use gpui_kit::{Modifiers, VisualTestContext};
+    let (mut app, mut commands) = application();
+    let mut model = WindowWorkspace::new(Uuid::new_v4());
+    let keys = model
+        .ui_test_local_screens_fixture(&["work", "notes"])
+        .unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    sent(&mut commands);
+    let (handle, view) = app
+        .update(|cx| Windows::ui_test_window(WindowId::FIRST, cx))
+        .unwrap();
+    let mut window = VisualTestContext::from_window(handle, &app);
+    let key = keys[1].clone();
+    // The menu a right click on the Screen's row opens.
+    window.update(|window, cx| {
+        cx.set_reduce_motion(true);
+        window.resize(gpui_kit::size(gpui_kit::px(900.), gpui_kit::px(620.)));
+        view.update(cx, |workspace, cx| {
+            workspace.drawer_visible = true;
+            let at = gpui_kit::point(gpui_kit::px(60.), gpui_kit::px(120.));
+            workspace.open_screen_menu(&key, at, window, cx);
+        });
+        window.draw(cx).clear(cx);
+    });
+    let entry = window
+        .debug_bounds("popover-move-to-new-window")
+        .expect("the menu's entry");
+    window.simulate_click(entry.center(), Modifiers::default());
+    window.run_until_parked();
+    assert!(sent(&mut commands).iter().any(|command| matches!(
+        command.kind(),
+        CommandKind::OpenWindow { start: WindowStart::Screen(screen), .. } if screen == &keys[1]
+    )));
+    assert_eq!(app.update(|cx| Windows::count(cx)), 2);
+}

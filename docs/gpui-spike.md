@@ -2283,6 +2283,11 @@ Checked on Linux (Wayland, hardware graphics):
   gets a Screen, commands stamped with their window, a window that closes
   only after the worker removed it, and the last window's assessed close.
 
-Not checked: keys, the Drawer menu and the pointer in a second real window
-(no input automation on the test machine), a host Screen moved between real
-windows, two windows under sustained input at once, macOS and Windows.
+Added on 2026-11-23: the smoke ends with a key press, the default key of
+`window.new` dispatched through the window as a key event; it passes at
+stage 22 only when a second window opened and no terminal got the key. A
+view test opens a Screen's menu and clicks "Move to New Window".
+
+Not checked: the pointer and the menus in a real second window (no input
+automation on the test machine), a host Screen moved between real windows,
+two windows under sustained input at once, macOS and Windows.
