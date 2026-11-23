@@ -2565,6 +2565,8 @@ mod tests {
         output.remove(&session_b);
 
         // Splitting the other pane changes nothing about this one's size.
+        // The redraw after the attach has passed by then.
+        redraw_settled().await;
         source
             .command(
                 &mut window,
@@ -2586,6 +2588,7 @@ mod tests {
             attached(3),
         )
         .await;
+        redraw_settled().await;
         let model = window.source(id).unwrap();
         let pane_c = model
             .routes()
@@ -3373,6 +3376,9 @@ mod tests {
 
         /// [`Self::stty`] for the session of `pane`, shown or not.
         async fn stty_in(&mut self, pane: &str, session: &str, marker: &str) -> (u16, u16) {
+            // A redraw after an attach holds the PTY one row short for a
+            // moment; the size asked for is the one it settles at.
+            redraw_settled().await;
             let command = format!("printf '{marker}_%s_\\n' \"$(stty size)\"\n");
             let route = TerminalToken::new(self.token, pane, session);
             self.source
@@ -3394,6 +3400,14 @@ mod tests {
             self.output.remove(session);
             size
         }
+    }
+
+    /// Wait until a redraw the server may hold a PTY for has passed.
+    async fn redraw_settled() {
+        tokio::time::sleep(
+            splitty_core::protocol::sizing::NUDGE + std::time::Duration::from_millis(100),
+        )
+        .await;
     }
 
     /// `<marker>_<rows> <cols>_` in a shell's output, not its echoed command.
