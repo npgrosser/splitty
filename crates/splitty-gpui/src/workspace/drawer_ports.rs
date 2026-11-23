@@ -55,9 +55,12 @@ impl HostIndicator {
     }
 
     /// Screens of a host the window cannot reach are dimmed, also while its
-    /// connection is being opened again.
+    /// connection is being opened again, by itself or after a retry.
     pub(super) fn unreachable(self) -> bool {
-        matches!(self, Self::Failed | Self::Offline | Self::Reconnecting)
+        matches!(
+            self,
+            Self::Failed | Self::Offline | Self::Reconnecting | Self::Connecting
+        )
     }
 
     /// What the caption says besides its dot; nothing while all is well.
@@ -355,7 +358,7 @@ mod indicator_tests {
                 false,
                 HostIndicator::Connecting,
                 Some("connecting…"),
-                false,
+                true,
             ),
             (
                 Some(SourceStatus::Reconnecting),

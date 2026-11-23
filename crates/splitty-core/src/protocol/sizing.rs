@@ -392,11 +392,11 @@ impl SizeArbiter {
         let mut state = self.lock();
         for (id, session) in &mut state.sessions {
             if session.nudged.is_some_and(|due| due <= now) {
-                session.nudged = None;
-                if let Some(size) = session.applied {
-                    if let Err(error) = (self.resize)(id, size) {
-                        debug!(session = %id, %error, "PTY resize failed");
-                    }
+                // A resize that failed leaves the redraw pending: the next
+                // tick tries again, so the PTY does not stay one row off.
+                match session.applied.map(|size| (self.resize)(id, size)) {
+                    Some(Err(error)) => debug!(session = %id, %error, "PTY resize failed"),
+                    _ => session.nudged = None,
                 }
             }
         }
@@ -475,7 +475,9 @@ fn nudge(
             rows,
         },
     )?;
-    session.nudged = Some(now + NUDGE);
+    // A redraw already in progress keeps its time: further requests must not
+    // hold the PTY one row off for longer.
+    session.nudged.get_or_insert(now + NUDGE);
     Ok(())
 }
 
@@ -751,6 +753,19 @@ mod tests {
         );
         assert!(!arbiter.nudged(SID));
         assert!(!sizes.has_changed().unwrap(), "nothing published");
+    }
+
+    #[test]
+    fn further_redraw_requests_do_not_hold_the_pty_off_for_longer() {
+        let (arbiter, resizes) = arbiter(SizePolicy::Active);
+        let now = Instant::now();
+        arbiter.activity(A, false, now);
+        arbiter.report(SID, A, WIDE, false, now);
+        arbiter.report(SID, A, WIDE, true, now);
+        arbiter.report(SID, A, WIDE, true, now + NUDGE / 2);
+        arbiter.restore(now + NUDGE);
+        assert_eq!(last_resize(&resizes), Some(WIDE), "back at the first time");
+        assert!(!arbiter.nudged(SID));
     }
 
     #[test]

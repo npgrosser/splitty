@@ -726,23 +726,23 @@ impl Hub {
             Step::Daemon,
             format_args!("Asking {host} for its Splitty daemon..."),
         )?;
-        let mut handshake = self
-            .connector
-            .handshake(&target, &prepared, context)
-            .await?;
-        // A kept server whose daemon this client cannot use as it is gives
+        let first = self.connector.handshake(&target, &prepared, context).await;
+        // A kept server that cannot answer (an older one may not know this
+        // handshake), or whose daemon this client cannot use as it is, gives
         // way to this client's own, which decides what is offered.
-        if prepared.kept.is_some() && !usable(&host, &handshake) {
-            drop(handshake);
-            prepared = self
-                .connector
-                .prepare(&target, Running::Install, on_install(), context)
-                .await?;
-            handshake = self
-                .connector
-                .handshake(&target, &prepared, context)
-                .await?;
-        }
+        let handshake = match first {
+            Ok(handshake) if prepared.kept.is_none() || usable(&host, &handshake) => handshake,
+            Err(error) if prepared.kept.is_none() => return Err(error),
+            _ => {
+                prepared = self
+                    .connector
+                    .prepare(&target, Running::Install, on_install(), context)
+                    .await?;
+                self.connector
+                    .handshake(&target, &prepared, context)
+                    .await?
+            }
+        };
         let (mut handshake, reservation) = handshake.into_parts();
         let mut metadata = Some(reservation);
         let result = async {
@@ -929,10 +929,15 @@ impl Hub {
 
 /// The daemon the handshake found running or started.
 /// Whether the daemon a kept server answered for can be used as it is: a
-/// native one of a protocol this client speaks.
+/// native one of a protocol this client speaks that already ran. One the kept
+/// server had to start means the daemon it was kept for is gone, and a new
+/// daemon is this client's to start.
 fn usable(host: &str, handshake: &Handshake) -> bool {
     running(host, handshake).is_ok_and(|daemon| {
-        !daemon.legacy && daemon.supports_native() && compatible(daemon.protocol, PROTOCOL_VERSION)
+        !daemon.legacy
+            && !daemon.started
+            && daemon.supports_native()
+            && compatible(daemon.protocol, PROTOCOL_VERSION)
     })
 }
 
@@ -1164,6 +1169,35 @@ mod tests {
             host.asked(),
             ["prepare vm1", "handshake", "prepare vm1", "handshake"],
             "this client's server is installed to decide what is offered"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kept_server_that_cannot_answer_the_handshake_gives_way_to_this_clients() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let host = testing::ScriptedHost::new(dir.path())
+            .with_keeping_daemon("0.0.0", PROTOCOL_VERSION)
+            .with_daemon_server()
+            .with_silent_daemon_server();
+        let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+        let context = splitty_transport::queue::Context::default();
+        let (progress, _reports) = mpsc::channel(8);
+        let reached = match hub
+            .reach(
+                SshTarget::parse("vm1").expect("target"),
+                false,
+                progress,
+                &context,
+            )
+            .await
+        {
+            Ok(reached) => reached,
+            Err(error) => panic!("the client's own server connects: {error}"),
+        };
+        assert_eq!(reached.daemon.version, "0.0.0", "the daemon stays");
+        assert_eq!(
+            host.asked()[..4],
+            ["prepare vm1", "handshake", "prepare vm1", "handshake"]
         );
     }
 

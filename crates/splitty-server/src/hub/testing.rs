@@ -99,6 +99,8 @@ pub struct ScriptedHost {
     protocol: u32,
     /// Whether the running daemon's own server is installed on the host.
     daemon_server: bool,
+    /// Whether that server fails the handshake, as one too old for it does.
+    daemon_server_silent: bool,
     /// Whether `daemon stop` ends the daemon.
     stops: bool,
     /// An optional failure script, run instead of the native fixture.
@@ -143,6 +145,7 @@ impl ScriptedHost {
             server_version: VERSION,
             protocol: PROTOCOL_VERSION,
             daemon_server: false,
+            daemon_server_silent: false,
             stops: true,
             bridge: None,
             welcome: WELCOME,
@@ -223,6 +226,12 @@ impl ScriptedHost {
     /// which answers the handshake while it is kept.
     pub fn with_daemon_server(mut self) -> Self {
         self.daemon_server = true;
+        self
+    }
+
+    /// The daemon's own server does not know this client's handshake.
+    pub fn with_silent_daemon_server(mut self) -> Self {
+        self.daemon_server_silent = true;
         self
     }
 
@@ -471,7 +480,9 @@ impl Connector for ScriptedHost {
                 )));
             }
             self.ask("handshake".into());
-            if matches!(self.prepare, Prepare::DaemonFails) {
+            if matches!(self.prepare, Prepare::DaemonFails)
+                || (prepared.kept.is_some() && self.daemon_server_silent)
+            {
                 return Err(splitty_remote::handshake::HandshakeError::Ssh(
                     splitty_remote::ssh::classify(
                         target.as_str(),

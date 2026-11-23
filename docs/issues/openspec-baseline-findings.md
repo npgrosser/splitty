@@ -210,6 +210,9 @@ Line numbers refer to the tree at commit `b495e1c`.
     the signal found it unchanged. The two resizes are 150 ms apart now (`NUDGE` in `protocol/sizing.rs`). A
     client of a server without `pty-size-v1` still sends its two resizes back to back
     (`report_size` in `native_workspace/source.rs`).
+  - **Open (2026-11-23): the first shared local port on a host whose daemon's own server is used uploads the
+    client's server without a progress report** (`reverse_tunnel` in `hub/connector.rs`): the relay is the
+    client's, and before `reconnect-and-host-connect` that server was always installed by then.
   - **Size events are not ordered with the output.** The server resizes the PTY, publishes the size and streams
     output on separate tasks (`protocol/sizing.rs`, `watch_size` and `stream_output` in `protocol/dispatcher.rs`),
     and the `watch` channel coalesces sizes, so a client can parse a repaint at the old size or old output at the
