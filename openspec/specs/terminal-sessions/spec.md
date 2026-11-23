@@ -182,7 +182,7 @@ A client disconnecting SHALL stop all output streams of that connection and MUST
 - **THEN** the session's process keeps running, and a client of the next daemon can attach to the session by the same id
 
 ### Requirement: Terminal Resize
-On `resize` with a session `id`, `cols` and `rows`, the server SHALL record that size as the size at which the requesting connection shows the session, and SHALL set the session's PTY to the size its PTY size policy derives from the recorded sizes (see PTY Size Policy). The server SHALL answer every `resize` with a `size` event for the session to the requesting connection, carrying the session's PTY size after the report, also when the size did not change. When a `resize` carries `redraw: true` and the PTY size does not change, the server SHALL set the PTY one row short (one row more for a PTY of a single row) and SHALL set it back to its size 150 milliseconds later, so the session's processes redraw, without sending a `size` event for the intermediate size. The two resizes are apart because a program that reads the size only when it handles the signal would otherwise find it unchanged and redraw nothing. A size change by the policy in between SHALL end the redraw with that size. A `resize` with `cols` or `rows` of 0 SHALL change nothing and be answered with an `error` event for the session.
+On `resize` with a session `id`, `cols` and `rows`, the server SHALL record that size as the size at which the requesting connection shows the session, and SHALL set the session's PTY to the size its PTY size policy derives from the recorded sizes (see PTY Size Policy). The server SHALL answer every `resize` with a `size` event for the session to the requesting connection, carrying the session's PTY size after the report, also when the size did not change. When a `resize` carries `redraw: true` and the PTY size does not change, the server SHALL set the PTY one row short (one row more for a PTY of a single row) and SHALL set it back to its size 300 milliseconds later, so the session's processes redraw, without sending a `size` event for the intermediate size. The two resizes are apart because a program that reads the size only when it handles the signal would otherwise find it unchanged and redraw nothing. A size change by the policy in between SHALL end the redraw with that size. A `resize` with `cols` or `rows` of 0 SHALL change nothing and be answered with an `error` event for the session.
 
 #### Scenario: Resize applies to the PTY
 - **WHEN** the only client showing a session sends `{"type":"resize","id":"<sid>","cols":100,"rows":30}`
@@ -200,7 +200,7 @@ On `resize` with a session `id`, `cols` and `rows`, the server SHALL record that
 
 #### Scenario: Redraw without a size change
 - **WHEN** a client sends `resize` with `redraw: true` and the PTY size stays 100 columns and 30 rows
-- **THEN** the PTY is set to 100 columns and 29 rows, and 150 milliseconds later back to 100 columns and 30 rows
+- **THEN** the PTY is set to 100 columns and 29 rows, and 300 milliseconds later back to 100 columns and 30 rows
 - **AND** no connection receives a `size` event with 29 rows
 
 ### Requirement: Process Exit

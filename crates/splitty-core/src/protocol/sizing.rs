@@ -18,8 +18,9 @@ use tracing::debug;
 pub const TICK: Duration = Duration::from_secs(1);
 
 /// How long a redraw keeps the PTY one row off: long enough for a program to
-/// handle the signal and read the changed size, short enough to pass unseen.
-pub const NUDGE: Duration = Duration::from_millis(150);
+/// handle the signal and read the changed size, also a shell on a loaded
+/// machine, short enough to pass as one repaint.
+pub const NUDGE: Duration = Duration::from_millis(300);
 
 /// Which connections' reports decide a session's PTY size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

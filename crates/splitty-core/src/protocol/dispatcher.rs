@@ -2413,8 +2413,9 @@ mod tests {
     }
 
     /// A program that reads the terminal's size a moment after the signal
-    /// and draws only when it changed, as editors and prompt toolkits do.
-    const REDRAWS_ON_A_NEW_SIZE: &str = r#"last=$(stty size); echo ready; trap 'sleep 0.02; now=$(stty size); if [ "$now" != "$last" ]; then echo "redraw $now"; last=$now; fi' WINCH; while :; do sleep 0.05; done"#;
+    /// (a shell runs its trap once the command in the foreground ended) and
+    /// draws only when it changed, as editors and prompt toolkits do.
+    const REDRAWS_ON_A_NEW_SIZE: &str = r#"last=$(stty size); echo ready; trap 'now=$(stty size); if [ "$now" != "$last" ]; then echo "redraw $now"; last=$now; fi' WINCH; while :; do sleep 0.02; done"#;
 
     /// After a connection was lost, the next one attaches and asks for a
     /// redraw at the size the PTY already has. A real program on a real PTY

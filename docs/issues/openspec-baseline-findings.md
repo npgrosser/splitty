@@ -207,7 +207,7 @@ Line numbers refer to the tree at commit `b495e1c`.
     the keeper tells in its hello. Still open: a newly created session nobody resized yet has none.
   - **Fixed (2026-11-23, `reconnect-and-host-connect`): the redraw after an attach redrew nothing in many
     programs.** It resized the PTY by one row and straight back, so a program that reads the size when it handles
-    the signal found it unchanged. The two resizes are 150 ms apart now (`NUDGE` in `protocol/sizing.rs`). A
+    the signal found it unchanged. The two resizes are 300 ms apart now (`NUDGE` in `protocol/sizing.rs`). A
     client of a server without `pty-size-v1` still sends its two resizes back to back
     (`report_size` in `native_workspace/source.rs`).
   - **Open (2026-11-23): the first shared local port on a host whose daemon's own server is used uploads the
