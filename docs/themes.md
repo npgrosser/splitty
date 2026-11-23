@@ -10,20 +10,21 @@ Both come with the app and can be added as files.
 
 ## What ships
 
-- The Splitty themes (Salon, Modern, Classic, Retro, Aurora, Neon, Cozy, their
-  light and gray variants, Adwaita), each as a UI theme and as a terminal
-  palette. Splitty Salon is the default: the rounded sans-serif look of
-  Splitty Modern in the muted tones of the application icon, with grays that
-  lean to teal, an ochre accent, terracotta for danger and sage for success;
-  Splitty Salon Light is its counterpart on a paper tone with a slate teal
-  accent. The dark terminal palette is in the same tones: a dark teal gray
-  that is not black as its background, light text, and ANSI colors that are
-  the interface's terracotta, sage, ochre, slate blue, mauve and teal, light
-  enough to read and to tell apart. The light one keeps the ANSI colors of
-  Splitty Modern Light. New settings show Splitty Salon as
-  their one theme, whatever the system's preference, and pair it with Splitty
-  Salon Light once they follow the system; settings that name another theme
-  keep it.
+- The Splitty themes (Salon, Salon Teal, Modern, Classic, Retro, Aurora, Neon,
+  Cozy, their light and gray variants, Adwaita), each as a UI theme and as a
+  terminal palette. Splitty Salon is the default: the rounded sans-serif look
+  of Splitty Modern in muted, neutral grays with an ochre accent, terracotta
+  for danger and sage for success. Neither end is harsh: its surfaces are a
+  dark gray that is not black, and those of Splitty Salon Light a mid-light
+  gray that is not white, with a slate teal accent. The terminal palettes are
+  in the same tones, with ANSI colors that are the interface's terracotta,
+  sage, ochre, slate blue, mauve and teal, light or dark enough to read and
+  to tell apart. Splitty Salon Teal is the same theme with grays that lean to
+  teal, the tones of the application icon, and Splitty Salon Teal Light its
+  counterpart on a warm, yellowish paper tone. New settings show Splitty
+  Salon as their one theme, whatever the system's preference, and pair it
+  with Splitty Salon Light once they follow the system; settings that name
+  another theme keep it.
 - Splitty Modern and Splitty Modern Light were called Splitty Dark and Splitty
   Light and keep those identifiers (`splitty-dark`, `splitty-light`).
 - The Windows themes, which also change the shape of the interface: Windows 11

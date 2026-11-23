@@ -584,3 +584,7 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **RHC-1:** the redraw after an attach holds the PTY one row short for 300 ms: 150 ms were too short for a shell on a loaded machine to read the size in time. Alternative: grow by a row as before, or another hold time.
   - **RHC-2:** a connection takes the wall clock running more than 5 s ahead of its timers, checked every 2 s, as the machine having slept, and gives its peer 10 s to answer. Alternative: the platforms' sleep notifications.
   - **RHC-3:** connecting uses a running daemon's own installed server and uploads nothing; the client's server is installed for a confirmed update, when that daemon cannot be used, and for sharing a local port. Alternative: install on every connection as before, in the background after connecting.
+- **Salon themes, 2026-11-23** (provisional, tbd; no change, a theme adjustment):
+  - Splitty Salon and Splitty Salon Light have neutral grays, and the light one is clearly darker than before (surface `#d7d7d7`, terminal `#dddddd`). Alternative: a faint warm tint instead of pure gray.
+  - The earlier look is kept as **Splitty Salon Teal** (`splitty-salon-teal`), with **Splitty Salon Teal Light** (`splitty-salon-teal-light`) on a warm paper tone. Alternative: other names.
+  - Windows 11 Light still takes the default light terminal palette (SDT-1), which is now a mid-light gray instead of a paper tone.

@@ -1,0 +1,23 @@
+# name: Splitty Salon Teal
+palette = 0=#0d1110
+palette = 1=#dd8a74
+palette = 2=#9cc49a
+palette = 3=#dcb86f
+palette = 4=#86aed0
+palette = 5=#c09acb
+palette = 6=#72bdb3
+palette = 7=#cdd4d2
+palette = 8=#71847f
+palette = 9=#e9a08c
+palette = 10=#b2d6ae
+palette = 11=#e9cb8b
+palette = 12=#a3c5e2
+palette = 13=#d2b0dc
+palette = 14=#8fd0c6
+palette = 15=#f4f6f5
+background = #1a2120
+foreground = #d5dbd9
+cursor-color = #cfa55b
+cursor-text = #1a2120
+selection-background = #33403d
+selection-foreground = #e6eae9
