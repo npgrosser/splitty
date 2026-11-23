@@ -25,9 +25,10 @@ A remote host SHALL be reachable with the system `ssh` client and SHALL run Linu
 - **THEN** it installs the macOS arm64 server it carries and connects as to a Linux host
 
 ### Requirement: Server Installation
-Before it asks the host for its daemon, the hub SHALL probe the host in one SSH call for its kernel, architecture, home directory, and whether the client's own version is installed in `~/.local/share/splitty/remote/<version>/` with a checksum marker that matches the client's payload.
+Before it asks the host for its daemon, the hub SHALL probe the host in one SSH call for its kernel, architecture, home directory, and whether the client's own version is installed in `~/.local/share/splitty/remote/<version>/` with a checksum marker that matches the client's payload, and the version of an installed server below `~/.local/share/splitty/remote/` that a daemon runs from.
 - When the version is installed and matches, the client SHALL use it without uploading anything.
-- Otherwise it SHALL upload the payload over the SSH connection's standard input into a new directory of mode 0700 below `~/.local/share/splitty/remote/`, verify the payload's SHA-256 checksum on the host, unpack it, check that the unpacked server runs on the host (`splitty --version`), record the checksum as the marker, and only then move it to `~/.local/share/splitty/remote/<version>/`, replacing a broken install of the same version.
+- Otherwise, when a daemon runs from an installed server of another version and the connection carries no confirmed update, the client SHALL use that server for the handshake and the bridge and SHALL upload nothing. When the daemon it answers for cannot be used as it is (a legacy daemon, one without the native transport, or one of a mux protocol the client does not speak), the client SHALL install its own version as below and ask again, so that what it offers is decided as before.
+- In every other case, and for a connection that carries a confirmed update, it SHALL upload the payload over the SSH connection's standard input into a new directory of mode 0700 below `~/.local/share/splitty/remote/`, verify the payload's SHA-256 checksum on the host, unpack it, check that the unpacked server runs on the host (`splitty --version`), record the checksum as the marker, and only then move it to `~/.local/share/splitty/remote/<version>/`, replacing a broken install of the same version.
 - A host with neither `sha256sum` nor `shasum` SHALL get nothing installed, and the client SHALL say that the host lacks a SHA-256 tool, not that the upload was corrupted.
 - It SHALL report the `install` step, naming the version, the host and the architecture.
 - After an install, and whenever the probe found the version installed, the client SHALL run the installed server by its absolute path for every later command on the host.
@@ -53,6 +54,18 @@ A `splitty` that the user installed on the host elsewhere SHALL NOT be changed o
 #### Scenario: Payload does not run on the host
 - **WHEN** the unpacked server cannot run on the host, for example because its architecture does not match
 - **THEN** nothing is moved into place and the client reports that the server does not run on the host
+
+#### Scenario: A compatible older daemon runs
+- **WHEN** a client of version 0.6.0 connects to a host whose daemon runs from `~/.local/share/splitty/remote/0.5.0/splitty` and speaks a mux protocol the client supports
+- **THEN** the client uploads nothing, runs the handshake and the bridge with the 0.5.0 server, and connects
+
+#### Scenario: A confirmed update installs
+- **WHEN** the user confirms the update of that host
+- **THEN** the client installs its 0.6.0 server and replaces the daemon as Host Update describes
+
+#### Scenario: A kept server whose daemon cannot be used
+- **WHEN** the daemon that runs from an installed older server speaks a mux protocol the client does not support
+- **THEN** the client installs its own version, asks the host again, and reports the host as incompatible with its update plan
 
 ### Requirement: Payload Sources
 The client SHALL take the server it installs from the first available of these sources:

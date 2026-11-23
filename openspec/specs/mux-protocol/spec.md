@@ -674,6 +674,8 @@ Liveness SHALL belong to the carrier of a connection; the session messages SHALL
 
 A native connection SHALL send a transport ping every 15 seconds while none of its pings is unanswered, SHALL answer every ping of its peer with a pong carrying the same nonce, and SHALL end the connection when, at one of its 15-second checks, no pong matching its outstanding ping has arrived for 30 seconds or more since the last matching pong or, before the first, since the connection was accepted. Other frames SHALL NOT count as an answer. A peer that falls silent is therefore ended within 45 seconds.
 
+The timers of a machine that sleeps stand still, so a connection that died meanwhile would pass for alive for another such period. A native connection SHALL therefore compare the wall clock with its timers every 2 seconds; when the wall clock ran ahead by more than 5 seconds, the machine slept, and the connection SHALL send a ping at once unless one is unanswered and SHALL end when no matching pong arrives within 10 seconds. A matching pong SHALL end that wait and keep the connection.
+
 When a connection ends by liveness, the server SHALL release it as on any other disconnect (see Disconnect Handling): its client registration, its editor and file registrations and the streams it attached.
 
 #### Scenario: Responsive client
@@ -687,6 +689,14 @@ When a connection ends by liveness, the server SHALL release it as on any other 
 #### Scenario: Peer of the previous release
 - **WHEN** a native client or host of the previous release connects
 - **THEN** transport pings decide its liveness as before; no capability is involved, since session messages never carried a ping on a native connection
+
+#### Scenario: Peer gone after sleep
+- **WHEN** a machine wakes after its host connection died while it slept
+- **THEN** the connection is ended within about 12 seconds of waking, and the client reconnects
+
+#### Scenario: Peer still there after sleep
+- **WHEN** a machine wakes and its peer answers the ping sent on waking within 10 seconds
+- **THEN** the connection stays
 
 ### Requirement: Welcome Announces Capabilities
 Immediately after a completed native service negotiation, without waiting for any client message, the server SHALL send `mux.welcome` carrying its `capabilities` (shape in `docs/protocol.ts`). The welcome SHALL carry no screen list, no connection identity and no server mode: a client reads the workspace with `mux.workspace_resync` (see Ordered Workspace Catalog) and the mode with `GET /api/mux/status` (see `server-modes`).

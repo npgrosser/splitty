@@ -182,7 +182,7 @@ A client disconnecting SHALL stop all output streams of that connection and MUST
 - **THEN** the session's process keeps running, and a client of the next daemon can attach to the session by the same id
 
 ### Requirement: Terminal Resize
-On `resize` with a session `id`, `cols` and `rows`, the server SHALL record that size as the size at which the requesting connection shows the session, and SHALL set the session's PTY to the size its PTY size policy derives from the recorded sizes (see PTY Size Policy). The server SHALL answer every `resize` with a `size` event for the session to the requesting connection, carrying the session's PTY size after the report, also when the size did not change. When a `resize` carries `redraw: true` and the PTY size does not change, the server SHALL resize the PTY by one row and back to its size, so the session's processes redraw, without sending a `size` event for the intermediate size. A `resize` with `cols` or `rows` of 0 SHALL change nothing and be answered with an `error` event for the session.
+On `resize` with a session `id`, `cols` and `rows`, the server SHALL record that size as the size at which the requesting connection shows the session, and SHALL set the session's PTY to the size its PTY size policy derives from the recorded sizes (see PTY Size Policy). The server SHALL answer every `resize` with a `size` event for the session to the requesting connection, carrying the session's PTY size after the report, also when the size did not change. When a `resize` carries `redraw: true` and the PTY size does not change, the server SHALL set the PTY one row short (one row more for a PTY of a single row) and SHALL set it back to its size 150 milliseconds later, so the session's processes redraw, without sending a `size` event for the intermediate size. The two resizes are apart because a program that reads the size only when it handles the signal would otherwise find it unchanged and redraw nothing. A size change by the policy in between SHALL end the redraw with that size. A `resize` with `cols` or `rows` of 0 SHALL change nothing and be answered with an `error` event for the session.
 
 #### Scenario: Resize applies to the PTY
 - **WHEN** the only client showing a session sends `{"type":"resize","id":"<sid>","cols":100,"rows":30}`
@@ -200,8 +200,8 @@ On `resize` with a session `id`, `cols` and `rows`, the server SHALL record that
 
 #### Scenario: Redraw without a size change
 - **WHEN** a client sends `resize` with `redraw: true` and the PTY size stays 100 columns and 30 rows
-- **THEN** the PTY is resized to 100 columns and 31 rows and back to 100 columns and 30 rows
-- **AND** no connection receives a `size` event with 31 rows
+- **THEN** the PTY is set to 100 columns and 29 rows, and 150 milliseconds later back to 100 columns and 30 rows
+- **AND** no connection receives a `size` event with 29 rows
 
 ### Requirement: Process Exit
 When a session's process exits, the server SHALL send each connection streaming that session a `closed` event with the `sessionId` and the actual `exitCode` when available, and SHALL stop streaming the session after draining its available final output. A nonzero exit code MUST NOT be collapsed to a generic failure value. Signal termination SHALL carry `signal` when available; an unavailable code SHALL be absent rather than falsely zero. The exited session SHALL remain registered until its pane is closed, including automatic closure according to the owning host policy. The `session.exited` event is a notification and is outside this capability. An ordinary mux pane whose exit matches the owning server close_on_exit setting SHALL be closed once its process, seen running by the server, has exited and its output has ended, without waiting for a periodic sample; while its terminal stays open, or for an exit that happened while no server observed it, it SHALL be closed after a bounded grace for final output. This holds also when no clients are attached.
@@ -513,7 +513,7 @@ The server SHALL announce `pty-size-v1` in `mux.welcome.capabilities` when it su
 - **THEN** `mux.welcome.capabilities` contains `pty-size-v1`
 
 ### Requirement: PTY Size Events
-The server SHALL send `size` with the `sessionId`, `cols`, `rows` and the `policy` in effect to every connection that streams a session whenever the session's PTY size set by the policy changes and whenever the policy is reconfigured. On `attach`, when the session has a PTY size set by the policy, the server SHALL send `size` before the buffered output; after `create`, it SHALL send the session's size once one is set.
+The server SHALL send `size` with the `sessionId`, `cols`, `rows` and the `policy` in effect to every connection that streams a session whenever the session's PTY size set by the policy changes and whenever the policy is reconfigured. On `attach`, when the session has a PTY size set by the policy, the server SHALL send `size` before the buffered output; a session whose size the policy no longer holds, because no connection showed or streamed it meanwhile, SHALL count with the size its PTY was last set to; after `create`, it SHALL send the session's size once one is set.
 
 #### Scenario: Other clients learn the new size
 - **WHEN** clients A and B stream a session and A's `resize` changes its PTY size to 100×30
@@ -522,6 +522,10 @@ The server SHALL send `size` with the `sessionId`, `cols`, `rows` and the `polic
 #### Scenario: Size before the replay
 - **WHEN** a client attaches to a session whose PTY size was set to 100×30 by the policy
 - **THEN** it receives the `size` event before the first binary frame of the replay
+
+#### Scenario: Size before the replay after every connection left
+- **WHEN** the only connection that showed a session at 100×30 ends and a new connection attaches to it later
+- **THEN** it receives a `size` event with 100×30 before the first binary frame of the replay
 
 ### Requirement: Client Size Reports
 With a server that announces `pty-size-v1`, a client SHALL report as `resize` the size of a shown pane (its panel visible on the active screen), report it again when the pane becomes shown, and send `hide` when it stops being shown. In a client with several windows (see `desktop-windows`) every window has its active screen: a pane is shown while its panel is visible on the screen a window shows, and SHALL stop being shown when its window becomes hidden while another window of the client stays visible, until that window is visible again. It SHALL report no other pane, except that it MAY report the other terminal tabs of a shown pane's tab group at that pane's measured size, follow that size, and send `hide` for them once the group stops being shown; the native app does. Its first report after an attach SHALL carry `redraw: true` instead of resizing the PTY by one row and back. With other servers it SHALL resize the PTY as before, send none of these messages and resize no background tab.

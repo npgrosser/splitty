@@ -115,7 +115,7 @@ A native window SHALL allow rearranging its opened remote Screen references with
 - **THEN** the window changes no reference order and sends no host operation
 
 ### Requirement: Remote Screen Reconnect
-When a host's connection drops after `remote.ready`, the client SHALL mark that host's screens as reconnecting, keep them from taking input, and reconnect with a delay that grows to 10 seconds, with a freshly authorized host stream for every attempt. A failed host-stream open SHALL NOT be reported as an error of the local connection. No queued terminal input or mutation from the lost connection SHALL be replayed. After a successful reconnect, the client SHALL resync the host's screens and re-attach their sessions. When the connection fails with an error code that retrying cannot fix, the client SHALL stop retrying and show the error with its hint and a retry. When a host cannot be reached again, its screens SHALL be shown as offline with a retry.
+When a host's connection drops after `remote.ready`, the client SHALL mark that host's screens as reconnecting, in the screen list and above the shown screen's terminals, show them dimmed with their last picture, keep them from taking input, and reconnect with a delay that grows to 10 seconds, with a freshly authorized host stream for every attempt. A failed host-stream open SHALL NOT be reported as an error of the local connection. No queued terminal input or mutation from the lost connection SHALL be replayed. After a successful reconnect, the client SHALL resync the host's screens and re-attach their sessions. When the connection fails with an error code that retrying cannot fix, the client SHALL stop retrying and show the error with its hint and a retry. When a host cannot be reached again, its screens SHALL be shown as offline with a retry.
 
 #### Scenario: Network drop
 - **WHEN** the connection to `vm1` drops and the host is reachable again 20 seconds later
@@ -214,7 +214,7 @@ An authorized native main host connection SHALL support an explicit update inten
 
 The intent SHALL apply to one connection attempt and be consumed before a potentially mutating command; reconnect and ambiguous completion SHALL NOT replay it. Successful replacement SHALL report update progress and require a fresh handshake for the intended native daemon. A daemon already running the intended version SHALL remain running. Migration offers SHALL be structured metadata rather than inferred from message text; blocked legacy migration SHALL use `migration_unavailable` and SHALL NOT offer an ordinary update that cannot succeed.
 
-The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix, comparing numeric prerelease identifiers numerically and ignoring build metadata; an invalid version SHALL NOT authorize a replacement. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching prepared replacement required by the shared replacement plan. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
+The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix, comparing numeric prerelease identifiers numerically and ignoring build metadata; an invalid version SHALL NOT authorize a replacement. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching replacement required by the shared replacement plan; for a connection that uses the daemon's own server (see `remote-hosts`, Server Installation) the replacement counts as matching when the client carries a server for the host, since a confirmed update installs it before it replaces the daemon. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
 
 The `update` metadata in `remote.ready` and in an `incompatible` `remote.error` SHALL be the whole plan for an ordinary update: `available`, `keepsSessions`, and `toVersion` when available. An available update SHALL keep every session of the host, so it ends no screen and no pane; the connection drops for a moment. A window SHALL offer an ordinary update only when `available` and `keepsSessions` are both true, SHALL name `toVersion` as the version the host gets, and SHALL NOT count or name screens or panes that end. With a hub that sends no `toVersion` the window SHALL name its local server's version instead.
 
@@ -258,6 +258,10 @@ The `update` metadata in `remote.ready` and in an `incompatible` `remote.error` 
 #### Scenario: Build metadata only
 - **WHEN** the hub's and the daemon's versions differ only in build metadata
 - **THEN** the hub reports no available update
+
+#### Scenario: Update offered without an install
+- **WHEN** a client that carries a server for the host connects to an older compatible daemon with its own server
+- **THEN** `remote.ready` reports the update as available with the client's version as `toVersion`, and nothing was uploaded
 
 ### Requirement: Port Forwards Through The Hub
 The server SHALL offer forwards from a local port to a port of a host:
