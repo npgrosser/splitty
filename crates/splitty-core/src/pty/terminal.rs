@@ -59,6 +59,11 @@ pub trait Terminal: Send + Sync {
     /// Write input; the result says whether the terminal took it.
     async fn write(&self, data: &[u8]) -> io::Result<()>;
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
+    /// The columns and rows the terminal had when the session took it, when
+    /// it knows: a kept one's keeper tells its current size.
+    fn initial_size(&self) -> Option<(u16, u16)> {
+        None
+    }
     /// Hang up an ordinary session's terminal, or stop a managed one's
     /// program without waiting. Closing twice is a no-op.
     fn close(&self) -> io::Result<()>;

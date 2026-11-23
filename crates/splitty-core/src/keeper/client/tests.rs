@@ -293,6 +293,7 @@ fn a_frame_straddling_the_buffer_end_is_split_there() {
         session_id: "straddle".into(),
         socket: PathBuf::new(),
         pid: None,
+        size: (0, 0),
         stream: std::sync::Mutex::new(None),
         next_seq: std::sync::atomic::AtomicU32::new(1),
         pending: std::sync::Mutex::new(Default::default()),

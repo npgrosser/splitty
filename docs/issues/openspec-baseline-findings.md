@@ -203,8 +203,8 @@ Line numbers refer to the tree at commit `b495e1c`.
 - Still open from the same review:
   - **Fixed (2026-11-23, `reconnect-and-host-connect`): no `size` before the replay of a session the size
     arbiter forgot.** The PTY session remembers its last resize (`SessionHandle::size`) and an attach seeds the
-    arbiter with it. Still open: a session adopted from a keeper after a daemon restart has no size until a
-    client reports one.
+    arbiter with it; a session adopted from a keeper after a daemon restart starts with the size
+    the keeper tells in its hello. Still open: a newly created session nobody resized yet has none.
   - **Fixed (2026-11-23, `reconnect-and-host-connect`): the redraw after an attach redrew nothing in many
     programs.** It resized the PTY by one row and straight back, so a program that reads the size when it handles
     the signal found it unchanged. The two resizes are 150 ms apart now (`NUDGE` in `protocol/sizing.rs`). A

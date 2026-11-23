@@ -65,7 +65,8 @@ pub struct Session {
     exit_reported: AtomicBool,
     /// Closed while its program still ran.
     closed_on_request: AtomicBool,
-    /// The size of the last resize, columns above rows; zero before one.
+    /// The size of the last resize, or the one a kept terminal came with,
+    /// columns above rows; zero while unknown.
     size: std::sync::atomic::AtomicU32,
     /// Shared with the terminal, which feeds it.
     output: Arc<Output>,
@@ -477,6 +478,10 @@ impl Session {
             status_revision: AtomicU64::new(0),
         });
         let terminal = start(Arc::clone(&output) as Arc<dyn Feed>)?;
+        // A terminal adopted from a keeper has the size of its last resize.
+        let size = terminal
+            .initial_size()
+            .map_or(0, |(cols, rows)| u32::from(cols) << 16 | u32::from(rows));
         let session = Arc::new(Session {
             id,
             shell_profile_id,
@@ -485,7 +490,7 @@ impl Session {
             managed,
             exit_reported: AtomicBool::new(false),
             closed_on_request: AtomicBool::new(false),
-            size: std::sync::atomic::AtomicU32::new(0),
+            size: std::sync::atomic::AtomicU32::new(size),
             output,
             input: Arc::clone(&input),
             osc_rx,
@@ -2848,6 +2853,9 @@ mod spec_tests {
         fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
             Ok(())
         }
+        fn initial_size(&self) -> Option<(u16, u16)> {
+            Some((132, 43))
+        }
         fn close(&self) -> io::Result<()> {
             Ok(())
         }
@@ -2880,6 +2888,13 @@ mod spec_tests {
         assert_eq!(session.scrollback(), b"before\x1b[?2004h\x1b]2;vim\x07");
         assert_eq!(session.osc_title_watch().borrow().title, "vim");
         assert_eq!(session.shell_pid(), Some(4242));
+        assert_eq!(
+            session.size(),
+            Some((132, 43)),
+            "the size the kept terminal came with, before any resize"
+        );
+        session.resize(100, 30).expect("resize");
+        assert_eq!(session.size(), Some((100, 30)));
         assert_eq!(
             session.subscribe().snapshot.as_slice(),
             session.scrollback(),

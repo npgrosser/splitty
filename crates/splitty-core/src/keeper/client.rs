@@ -159,6 +159,9 @@ struct Shared {
     session_id: String,
     socket: PathBuf,
     pid: Option<u32>,
+    /// The size the keeper's terminal had when it said hello; zeros from a
+    /// keeper that does not tell.
+    size: (u16, u16),
     /// The connection frames go out on; replaced after a reconnect.
     stream: Mutex<Option<UnixStream>>,
     next_seq: AtomicU32,
@@ -246,6 +249,7 @@ impl KeptTerminal {
             session_id: hello.session_id.clone(),
             socket,
             pid: hello.pid,
+            size: (hello.cols, hello.rows),
             stream: Mutex::new(Some(stream)),
             next_seq: AtomicU32::new(1),
             pending: Mutex::new(HashMap::new()),
@@ -507,6 +511,11 @@ impl Terminal for KeptTerminal {
 
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
         self.shared.send(&Frame::Resize { cols, rows })
+    }
+
+    fn initial_size(&self) -> Option<(u16, u16)> {
+        let (cols, rows) = self.shared.size;
+        (cols != 0 && rows != 0).then_some((cols, rows))
     }
 
     fn close(&self) -> io::Result<()> {
