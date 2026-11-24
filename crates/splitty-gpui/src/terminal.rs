@@ -159,6 +159,9 @@ const SCROLL_BOTTOM_IN: Duration = Duration::from_millis(150);
 const SCROLL_BOTTOM_OUT: Duration = Duration::from_millis(200);
 /// How long after the last zoom step of a burst the PTY learns its size.
 const SIZE_REPORT_HOLD: Duration = Duration::from_millis(120);
+/// How long after a local pane resize the size marker waits for the server's
+/// matching `size` event before showing a multi-client mismatch.
+const SIZE_MARKER_GRACE: Duration = Duration::from_millis(200);
 /// How long a program's synchronized update (DEC private mode 2026) may keep
 /// its output from the screen, counted from the moment it began.
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -815,6 +818,9 @@ pub struct Terminal {
     size_report_pending: bool,
     /// Zoom steps are arriving: the size is reported when this runs out.
     size_report_hold: Option<Task<()>>,
+    /// A local pane resize was reported: the size marker waits for this before
+    /// showing a mismatch so normal resize roundtrips do not flash hatching.
+    size_marker_hold: Option<Task<()>>,
     resized_pixel_cell: Option<(u32, u32)>,
     /// The engine holds the frame from before a synchronized update: this
     /// releases it when that update, known by its number, takes too long.
@@ -910,6 +916,7 @@ impl Terminal {
             display_scale: 1.,
             size_report_pending: false,
             size_report_hold: None,
+            size_marker_hold: None,
             resized_pixel_cell: None,
             held_frame_release: None,
             font,
@@ -1084,13 +1091,19 @@ impl Terminal {
             return;
         }
         self.set_zoom(scale, cx);
+        if self.size_marker_hold.is_some() {
+            self.hold_size_marker(cx);
+        }
         self.size_report_hold = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SIZE_REPORT_HOLD).await;
-            let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
                 this.size_report_hold = None;
                 // A pane that is not shown has measured nothing: it reports
                 // when it is laid out again.
                 if this.size_report_pending {
+                    if this.size_marker_hold.is_some() {
+                        this.hold_size_marker(cx);
+                    }
                     this.report_size();
                 }
             });
@@ -1212,6 +1225,7 @@ impl Terminal {
         self.scroll_remainder_x = 0.;
         self.scroll_route = None;
         self.held_frame_release = None;
+        self.size_marker_hold = None;
         let result = if let Some(engine) = self.engine.as_mut() {
             engine.reset()
         } else {
@@ -1252,6 +1266,10 @@ impl Terminal {
     /// The session's PTY size changed, as its server's policy set it. The
     /// emulator takes it now, before the output written at that size.
     pub(crate) fn set_pty_size(&mut self, pty: Option<PtyGrid>, cx: &mut Context<Self>) {
+        if pty.is_none_or(|pty| (pty.cols, pty.rows) == (self.pane_size.cols, self.pane_size.rows))
+        {
+            self.size_marker_hold = None;
+        }
         if self.pty == pty {
             return;
         }
@@ -1265,6 +1283,18 @@ impl Terminal {
             }
         }
         cx.notify();
+    }
+
+    /// Keep the size marker hidden briefly after a local pane resize so the
+    /// normal server resize roundtrip does not flash the multi-client hatching.
+    fn hold_size_marker(&mut self, cx: &mut Context<Self>) {
+        self.size_marker_hold = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SIZE_MARKER_GRACE).await;
+            let _ = this.update(cx, |this, cx| {
+                this.size_marker_hold = None;
+                cx.notify();
+            });
+        }));
     }
 
     /// A view without a layout yet (new, or reset for a reconnect) takes the
@@ -1298,6 +1328,9 @@ impl Terminal {
 
     /// What the pane shows of a PTY size that differs from its own.
     pub(crate) fn size_marker(&self) -> Option<SizeMarker> {
+        if self.size_marker_hold.is_some() {
+            return None;
+        }
         SizeMarker::new(self.pane_size, self.pty)
     }
 
@@ -2400,8 +2433,22 @@ impl Terminal {
         if previous != (self.bounds, self.metrics, self.display_scale) {
             self.invalidate_presentation();
         }
+        let was_ready = self.geometry_ready;
+        let was_matched = !was_ready
+            || self.size_marker_hold.is_some()
+            || self.pty.is_some_and(|pty| {
+                (pty.cols, pty.rows) == (self.pane_size.cols, self.pane_size.rows)
+            });
         let pane_changed = self.pane_size != size;
         self.pane_size = size;
+        if self
+            .pty
+            .is_some_and(|pty| (pty.cols, pty.rows) == (self.pane_size.cols, self.pane_size.rows))
+        {
+            self.size_marker_hold = None;
+        } else if (pane_changed || self.size_report_pending) && was_matched && self.pty.is_some() {
+            self.hold_size_marker(cx);
+        }
         // The emulator keeps the session's PTY size; the pane's own is
         // reported and becomes the PTY's with the server's answer.
         let size = self.target_size();
@@ -3980,6 +4027,64 @@ mod presentation_tests {
             assert_eq!(marker, None);
             assert_eq!(window.update(|_, cx| terminal.read(cx).grid_shift), 0);
             assert!(window.debug_bounds("terminal-size-marker").is_none());
+        });
+    }
+
+    #[test]
+    fn local_pane_resize_holds_size_marker_until_grace_period_passes() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            let draw = |window: &mut VisualTestContext| {
+                window.update(|window, cx| window.draw(cx).clear(cx));
+            };
+            draw(window);
+            let initial = window.update(|_, cx| terminal.read(cx).pane_size);
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.set_pty_size(
+                        Some(PtyGrid {
+                            cols: initial.cols,
+                            rows: initial.rows,
+                            takeover: true,
+                        }),
+                        cx,
+                    )
+                })
+            });
+            draw(window);
+
+            // Growing the pane reports the new size and hides the size marker
+            // during the roundtrip grace period.
+            commands.borrow_mut().clear();
+            window.update(|window, cx| {
+                window.resize(size(px(1200.), px(720.)));
+                window.draw(cx).clear(cx);
+            });
+            let grown = window.update(|_, cx| terminal.read(cx).pane_size);
+            assert!(grown.cols > initial.cols || grown.rows > initial.rows);
+            assert!(matches!(
+                commands.borrow().last(),
+                Some(Command::Resize(cols, rows)) if (*cols, *rows) == (grown.cols, grown.rows)
+            ));
+            assert_eq!(
+                window.update(|_, cx| terminal.read(cx).size_marker()),
+                None,
+                "normal local resize must not immediately flash the multi-client marker"
+            );
+            assert!(window.debug_bounds("terminal-size-marker").is_none());
+
+            // If the server never adopts the larger size (another client holds
+            // the PTY), the marker appears once the grace period runs out.
+            window
+                .executor()
+                .advance_clock(super::SIZE_MARKER_GRACE + std::time::Duration::from_millis(1));
+            window.run_until_parked();
+            draw(window);
+            let marker = window
+                .update(|_, cx| terminal.read(cx).size_marker())
+                .expect("marker appears after grace period when PTY stayed smaller");
+            assert_eq!(marker.label, format!("{}×{}", initial.cols, initial.rows));
+            assert!(window.debug_bounds("terminal-size-marker").is_some());
         });
     }
 
