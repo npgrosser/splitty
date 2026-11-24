@@ -7801,6 +7801,7 @@ impl Render for Workspace {
                         })
                         .px_3()
                         .py_1()
+                        .ml(chrome_rems(reserved_width))
                         .flex_none()
                         .flex()
                         .flex_col()

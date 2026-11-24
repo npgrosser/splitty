@@ -18,6 +18,8 @@ struct Seen {
     output: HashMap<WindowId, String>,
     statuses: Vec<(WindowId, String)>,
     elsewhere: Vec<(WindowId, ScreenKey, WindowId)>,
+    close_settled: Vec<(WindowId, u64)>,
+    close_rejected: Vec<(WindowId, u64, String)>,
 }
 impl Seen {
     fn listed(&self, window: WindowId) -> Vec<String> {
@@ -104,6 +106,12 @@ async fn until(
                 screen,
                 window: holder,
             } => seen.elsewhere.push((window, screen, holder)),
+            Update::CloseSettled { request_id, .. } => {
+                seen.close_settled.push((window, request_id))
+            }
+            Update::CloseRejected {
+                request_id, reason, ..
+            } => seen.close_rejected.push((window, request_id, reason)),
             _ => {}
         }
     }
@@ -448,5 +456,169 @@ async fn a_whole_group_of_screens_moves_in_one_step_and_keeps_its_order() {
         attached,
         "a group move attaches nothing"
     );
+    worker.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn closing_from_a_newer_window_does_not_make_an_earlier_windows_closes_stale() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let (commands, receiver) = mpsc::channel(64);
+    let (sender, mut updates) = mpsc::channel(64);
+    let worker = Worker::start_isolated(receiver, sender);
+    let mut seen = Seen::default();
+    until(&mut updates, &mut seen, |seen| {
+        seen.ready(WindowId::FIRST, 1)
+    })
+    .await;
+    let first = seen.models[&WindowId::FIRST].clone();
+    let scope = first.lifecycle_token();
+    let first_screen = first.shown_key().expect("first Screen");
+
+    // Add a second tab in the first window so closing a pane leaves its Screen open.
+    let initial_pane = first
+        .local_source()
+        .snapshot()
+        .expect("first Screen snapshot")
+        .panes
+        .keys()
+        .next()
+        .expect("initial pane")
+        .to_string();
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::Tab {
+                screen: first_screen.clone(),
+                pane: initial_pane,
+            },
+        ))
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| {
+        seen.models.get(&WindowId::FIRST).is_some_and(|model| {
+            model
+                .local_source()
+                .snapshot()
+                .is_some_and(|screen| screen.panes.len() == 2)
+        })
+    })
+    .await;
+
+    // Open a second window with a Screen of its own, then close that Screen
+    // using the second window's higher ID space (`SECOND.ordinal() << 32`).
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::OpenWindow {
+                window: SECOND,
+                presence: WindowPresenceCell::default(),
+                start: WindowStart::NewScreen,
+            },
+        ))
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| seen.ready(SECOND, 1)).await;
+    let second_model = seen.models[&SECOND].clone();
+    let second_screen = second_model.shown_key().expect("second Screen");
+    let second_request_id = (SECOND.ordinal() << 32) + 1;
+    let second_plan = second_model
+        .local_source()
+        .assess_close(
+            second_request_id,
+            CloseTarget::Screen {
+                screen: second_screen.screen_id().to_owned(),
+            },
+        )
+        .unwrap();
+    commands
+        .send(Command::close(second_plan, true).in_window(SECOND))
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| {
+        seen.close_settled.contains(&(SECOND, second_request_id))
+    })
+    .await;
+    assert!(seen.close_rejected.is_empty());
+
+    // Now the first window closes a pane with its own low ID space (`1`):
+    // the second window's higher ID must not make the first window's close stale.
+    let first_model = seen.models[&WindowId::FIRST].clone();
+    let pane_to_close = first_model
+        .local_source()
+        .snapshot()
+        .expect("first Screen snapshot")
+        .panes
+        .keys()
+        .next()
+        .expect("a pane")
+        .to_string();
+    let first_request_id = (WindowId::FIRST.ordinal() << 32) + 1;
+    let first_plan = first_model
+        .local_source()
+        .assess_close(
+            first_request_id,
+            CloseTarget::Pane {
+                screen: first_screen.screen_id().to_owned(),
+                pane: pane_to_close.clone(),
+            },
+        )
+        .unwrap();
+    commands
+        .send(Command::close(first_plan, true).in_window(WindowId::FIRST))
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| {
+        seen.close_settled
+            .contains(&(WindowId::FIRST, first_request_id))
+    })
+    .await;
+    assert!(
+        seen.close_rejected.is_empty(),
+        "unexpected close rejections: {:?}",
+        seen.close_rejected
+    );
+    assert!(
+        !seen.models[&WindowId::FIRST]
+            .local_source()
+            .snapshot()
+            .expect("first Screen snapshot")
+            .panes
+            .contains_key(&splitty_core::ids::PaneId::from(pane_to_close.as_str())),
+        "the closed pane must be removed"
+    );
+
+    // A genuinely stale close ID from the same window is still rejected.
+    let remaining_pane = seen.models[&WindowId::FIRST]
+        .local_source()
+        .snapshot()
+        .expect("first Screen snapshot")
+        .panes
+        .keys()
+        .next()
+        .expect("remaining pane")
+        .to_string();
+    let stale_plan = seen.models[&WindowId::FIRST]
+        .local_source()
+        .assess_close(
+            first_request_id,
+            CloseTarget::Pane {
+                screen: first_screen.screen_id().to_owned(),
+                pane: remaining_pane,
+            },
+        )
+        .unwrap();
+    commands
+        .send(Command::close(stale_plan, true).in_window(WindowId::FIRST))
+        .await
+        .unwrap();
+    until(&mut updates, &mut seen, |seen| {
+        seen.close_rejected.iter().any(|(win, id, reason)| {
+            *win == WindowId::FIRST && *id == first_request_id && reason.contains("stale")
+        })
+    })
+    .await;
+
     worker.shutdown().unwrap();
 }

@@ -72,7 +72,10 @@ pub(super) struct SourceRuntime {
     reported: HashMap<String, (u16, u16)>,
     refresh_error: Option<String>,
     control_error: Option<String>,
-    last_close_request: u64,
+    /// The highest close request ID seen from each window; windows draw IDs
+    /// from disjoint ranges (`window_id.ordinal() << 32`), so staleness is
+    /// monotonic per window rather than across windows.
+    last_close_request: HashMap<WindowId, u64>,
     pending_close: Option<PendingClose>,
     select_created: Option<(WindowId, String)>,
     files: files::FileTransfers,
@@ -111,7 +114,7 @@ impl SourceRuntime {
             reported: HashMap::new(),
             refresh_error: None,
             control_error: None,
-            last_close_request: 0,
+            last_close_request: HashMap::new(),
             pending_close: None,
             select_created: None,
             files: files::FileTransfers::default(),
@@ -546,6 +549,10 @@ impl SourceRuntime {
         ) {
             window.cancel_remote_creation_follow();
         }
+        if matches!(&command.kind, CommandKind::RequestClose { .. }) {
+            self.last_close_request
+                .retain(|id, _| window.has_window(*id));
+        }
         let mut close_window = false;
         let mut model = Some(
             window
@@ -608,7 +615,8 @@ impl SourceRuntime {
             if plan.source_token().is_none() {
                 // The channel-owned startup prompt may race publication.
                 if let Err(error) = validate_pre_discovery_close(&plan, confirmed) {
-                    self.last_close_request = self.last_close_request.max(plan.request_id);
+                    let last = self.last_close_request.entry(sender).or_insert(0);
+                    *last = (*last).max(plan.request_id);
                     out.push(Update::CloseRejected {
                         source: response_source,
                         request_id: plan.request_id,
@@ -630,12 +638,13 @@ impl SourceRuntime {
                 // Rejecting this duplicate would clear the UI's matching pending request.
                 return Ok(out);
             }
+            let last_close_request = self.last_close_request.get(&sender).copied().unwrap_or(0);
             let result = if self.pending_close.is_some() {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::WouldBlock,
                     "previous close still settling",
                 ))
-            } else if request_id <= self.last_close_request {
+            } else if request_id <= last_close_request {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     "stale close request",
@@ -653,7 +662,8 @@ impl SourceRuntime {
             } else {
                 validate_pre_discovery_close(&plan, confirmed)
             };
-            self.last_close_request = self.last_close_request.max(request_id);
+            let last = self.last_close_request.entry(sender).or_insert(0);
+            *last = (*last).max(request_id);
             match result {
                 Ok(()) => {
                     if plan.target == CloseTarget::Window {
