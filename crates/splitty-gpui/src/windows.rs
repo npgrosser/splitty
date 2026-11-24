@@ -194,6 +194,19 @@ impl Windows {
         })
     }
 
+    /// Whether every open window other than `id` has its Drawer pinned state
+    /// equal to `pinned` (trivially true when `id` is the only window).
+    pub(crate) fn other_drawers_match(id: WindowId, pinned: bool, cx: &App) -> bool {
+        cx.try_global::<Self>().is_none_or(|windows| {
+            windows
+                .entries
+                .iter()
+                .filter(|entry| entry.id != id)
+                .filter_map(|entry| entry.workspace.upgrade())
+                .all(|workspace| workspace.read(cx).drawer_pinned() == pinned)
+        })
+    }
+
     /// Close a window the worker never heard of.
     pub(crate) fn abandon(id: WindowId, cx: &mut App) {
         if let Some((handle, _)) = Self::entry(id, cx) {

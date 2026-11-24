@@ -208,9 +208,9 @@ fn a_window_asks_before_its_screens_close_and_can_hand_them_over_instead() {
         .update(|cx| Windows::ui_test_window(SECOND, cx))
         .unwrap();
     let mut window = gpui_kit::VisualTestContext::from_window(handle, &app);
-    let mut ask = |app: &mut TestAppContext,
-                   commands: &mut mpsc::Receiver<WorkerCommand>,
-                   window: &mut gpui_kit::VisualTestContext| {
+    let ask = |app: &mut TestAppContext,
+               commands: &mut mpsc::Receiver<WorkerCommand>,
+               window: &mut gpui_kit::VisualTestContext| {
         run(app, SECOND, KeyCommand::CloseWindow);
         let asked = sent(commands);
         assert!(!asked.iter().any(|command| matches!(
@@ -598,4 +598,114 @@ fn a_hosts_screen_changes_windows_with_its_terminal_view() {
         command.kind(),
         CommandKind::AssessClose { .. } | CommandKind::CloseWindow
     )));
+}
+
+#[test]
+fn drawer_pinning_is_per_window_and_persists_when_all_windows_agree() {
+    use splitty_client_core::appearance::{
+        test_support::{settings_snapshot_with_pin, Availability},
+        DrawerVisibilityOutcome, DrawerVisibilityResult,
+    };
+
+    let (mut app, mut commands) = application();
+    let owner = Uuid::new_v4();
+    let mut model = WindowWorkspace::new(owner);
+    let keys = model
+        .ui_test_local_screens_fixture(&["work", "notes"])
+        .unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    sent(&mut commands);
+
+    // Open a second window and prime both with saved `drawer.pinned = true`.
+    run(&mut app, WindowId::FIRST, KeyCommand::MoveScreenToNewWindow);
+    model.ui_test_open_window(SECOND).unwrap();
+    model.ui_test_move_screen(&keys[1], SECOND).unwrap();
+    model_for(&mut app, &model, WindowId::FIRST);
+    model_for(&mut app, &model, SECOND);
+    let deliver_appearance = |app: &mut TestAppContext, generation: u64, pinned: bool| {
+        let snapshot = settings_snapshot_with_pin(owner, generation, Availability::Full, pinned);
+        for id in [WindowId::FIRST, SECOND] {
+            let update = Update::Appearance(snapshot.clone());
+            let update = if id == WindowId::FIRST {
+                update
+            } else {
+                Update::ForWindow {
+                    window: id,
+                    update: Box::new(update),
+                }
+            };
+            app.update(|cx| Windows::ui_test_deliver(update, cx));
+        }
+        app.run_until_parked();
+    };
+    deliver_appearance(&mut app, 1, true);
+    sent(&mut commands);
+
+    let pinned = |app: &mut TestAppContext, id: WindowId| {
+        let view = view(app, id).unwrap();
+        app.update(|cx| view.read(cx).drawer_pinned())
+    };
+    let toggle = |app: &mut TestAppContext, id: WindowId| {
+        let view = view(app, id).unwrap();
+        app.update(|cx| view.update(cx, |workspace, cx| workspace.toggle_drawer(cx)));
+    };
+    assert!(pinned(&mut app, WindowId::FIRST));
+    assert!(pinned(&mut app, SECOND));
+
+    // Unpinning only the second window leaves the first pinned and does not
+    // overwrite the persisted default.
+    toggle(&mut app, SECOND);
+    assert!(pinned(&mut app, WindowId::FIRST));
+    assert!(!pinned(&mut app, SECOND));
+    assert!(!sent(&mut commands)
+        .iter()
+        .any(|c| matches!(c.kind(), CommandKind::SetDrawerVisibility { .. })));
+
+    // An unrelated appearance broadcast (same `drawer.pinned`) keeps the
+    // second window unpinned.
+    deliver_appearance(&mut app, 2, true);
+    assert!(pinned(&mut app, WindowId::FIRST));
+    assert!(!pinned(&mut app, SECOND));
+
+    // Unpinning the first window too makes all open windows agree on `false`,
+    // so the new default is persisted.
+    toggle(&mut app, WindowId::FIRST);
+    assert!(!pinned(&mut app, WindowId::FIRST));
+    assert!(!pinned(&mut app, SECOND));
+    let request_id = sent(&mut commands)
+        .into_iter()
+        .find_map(|c| match c.kind() {
+            CommandKind::SetDrawerVisibility {
+                request_id,
+                pinned: false,
+                ..
+            } => Some(*request_id),
+            _ => None,
+        })
+        .expect("agreeing windows persist drawer.pinned = false");
+    app.update(|cx| {
+        Windows::ui_test_deliver(
+            Update::DrawerVisibility(DrawerVisibilityResult {
+                connection_id: owner,
+                request_id,
+                outcome: DrawerVisibilityOutcome::Confirmed(false),
+            }),
+            cx,
+        );
+    });
+    deliver_appearance(&mut app, 3, false);
+
+    // Pinning only the second window again stays local and does not persist.
+    sent(&mut commands);
+    toggle(&mut app, SECOND);
+    assert!(!pinned(&mut app, WindowId::FIRST));
+    assert!(pinned(&mut app, SECOND));
+    assert!(!sent(&mut commands)
+        .iter()
+        .any(|c| matches!(c.kind(), CommandKind::SetDrawerVisibility { .. })));
+
+    // An explicit Settings change to `drawer.pinned = true` updates all windows.
+    deliver_appearance(&mut app, 4, true);
+    assert!(pinned(&mut app, WindowId::FIRST));
+    assert!(pinned(&mut app, SECOND));
 }

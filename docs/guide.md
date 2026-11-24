@@ -44,7 +44,9 @@ window you used last before it and ends nothing. Closing the last window, or
 **Quit**, ends the application.
 
 Settings, theme, zoom and key bindings are the application's and apply in
-every window. Starting the app a second time is something else: that is a
+every window. Pinning or unpinning the drawer applies to that window; the
+saved default updates when every open window agrees, or when changed in
+Settings. Starting the app a second time is something else: that is a
 second, independent application with screens of its own.
 
 ## Templates

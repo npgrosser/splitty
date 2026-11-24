@@ -2109,13 +2109,17 @@ impl Workspace {
         }
         // Choices whose saved value this read shows give way to it; the
         // others stay drawn over it.
+        let initial = self.appearance_generation == 0;
+        let pinned_changed = snapshot.drawer().pinned != self.drawer_authoritative_pinned;
         self.appearance_choices.read(snapshot.generation());
         self.present_appearance(snapshot, true, window, cx);
         self.drawer_authoritative_pinned = snapshot.drawer().pinned;
         // A read already in flight can arrive after the click but before its
         // identified write result. Keep the submitted presentation until that
         // result settles; the local reader starts later reads after the write.
-        if self.drawer_pending.is_none() {
+        // An unrelated settings read (theme, zoom, font) keeps each window's
+        // own per-window Drawer pin state.
+        if self.drawer_pending.is_none() && (initial || pinned_changed) {
             if self.drawer_visible != self.drawer_authoritative_pinned {
                 self.wheel_navigation.reset();
             }
@@ -2299,6 +2303,11 @@ impl Workspace {
         }
     }
 
+    /// Whether this window currently keeps its Screen Drawer pinned open.
+    pub(crate) fn drawer_pinned(&self) -> bool {
+        self.drawer_visible
+    }
+
     fn present_drawer_pin(&mut self, pinned: bool) {
         self.drawer_visible = pinned;
         self.drawer_overlay_open = !pinned;
@@ -2312,9 +2321,23 @@ impl Workspace {
         if self.drawer_pending.is_some() {
             return;
         }
+        let desired = !self.drawer_visible;
+        // Pinning is per window. Persist the default `drawer.pinned` setting
+        // when this is the only window, or when every open window now agrees on
+        // a state different from the saved default.
+        let persist = if crate::windows::Windows::count(cx) <= 1 {
+            true
+        } else {
+            desired != self.drawer_authoritative_pinned
+                && crate::windows::Windows::other_drawers_match(self.window_id, desired, cx)
+        };
+        if !persist {
+            self.present_drawer_pin(desired);
+            cx.notify();
+            return;
+        }
         let connection = model.connection_id();
         let owner = model.source_token();
-        let desired = !self.drawer_visible;
         let request_id = Uuid::new_v4();
         if self
             .commands
