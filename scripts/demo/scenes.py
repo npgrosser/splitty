@@ -29,7 +29,7 @@ class Scene:
     setup: Callable | None = None
     drawer: bool = False
     zoom: float = 1.25
-    theme: str = "splitty-dark"
+    theme: str = "splitty-salon"
     size: tuple[int, int] | None = None
     # The machines the scene reaches over SSH, by name.
     hosts: tuple[str, ...] = ()
