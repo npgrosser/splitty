@@ -114,8 +114,8 @@ says so when the app does not start. On Arch:
 sudo pacman -S --needed libxcb libxkbcommon libxkbcommon-x11 wayland libglvnd vulkan-icd-loader
 ```
 
-The same installer is in the tar.gz, for a download of your own:
-`tar -xzf splitty-<version>-linux-x86_64.tar.gz` and then
+Releases after 0.6.2 have the same installer in the tar.gz, for a download of
+your own: `tar -xzf splitty-<version>-linux-x86_64.tar.gz` and then
 `./splitty-<version>-linux-x86_64/install.sh`. `--prefix DIR` installs
 somewhere else and `--version VERSION` another release. The app also runs
 from the unpacked folder without installing (`./splitty-gpui`), as long as
