@@ -4056,10 +4056,13 @@ mod presentation_tests {
             // Growing the pane reports the new size and hides the size marker
             // during the roundtrip grace period.
             commands.borrow_mut().clear();
-            window.update(|window, cx| {
-                window.resize(size(px(1200.), px(720.)));
-                window.draw(cx).clear(cx);
-            });
+            let (handle, viewport) =
+                window.update(|window, _| (window.window_handle(), window.viewport_size()));
+            window.simulate_window_resize(
+                handle,
+                size(viewport.width + px(200.), viewport.height + px(120.)),
+            );
+            draw(window);
             let grown = window.update(|_, cx| terminal.read(cx).pane_size);
             assert!(grown.cols > initial.cols || grown.rows > initial.rows);
             assert!(matches!(
