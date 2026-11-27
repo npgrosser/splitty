@@ -595,3 +595,7 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **NIX-3:** `release.json` is updated by a commit after the release is published, so the tagged revision still names the release before it. Alternative: a workflow that commits the update.
   - **NIX-4:** `make install` and the Nix packages link the `splitty` command into `bin`; the deb and rpm link only `splitty-gpui`. Alternative: link the app only.
   - **NIX-5:** CI builds `splitty-bin` and `libghostty-vt` and only evaluates the source package. Alternative: build it on a schedule or with a binary cache that also serves users.
+- **`linux-tarball-installer` LTI-1 to LTI-3** (2026-11-27, provisional, tbd; recorded in the change's proposal):
+  - **LTI-1:** the documented install command for Linux without deb or rpm pipes `packaging/linux/native/install.sh` from the default branch into `sh`. Alternative: publish the installer as a release file and pipe it from the latest release.
+  - **LTI-2:** the desktop entry that installer writes names the executable and the icon by path. Alternative: by name, as in the packages.
+  - **LTI-3:** the installer links the `splitty` command into `bin`, like `make install` (NIX-4).

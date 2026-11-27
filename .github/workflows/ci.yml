@@ -218,6 +218,14 @@ jobs:
           app=$(echo "$RUNNER_TEMP"/native-unpacked/splitty-*-linux-x86_64)
           "$app/splitty-gpui" --help
           "$app/splitty" --version
+          # The tar.gz's installer, into a prefix of its own, and its removal.
+          "$app/install.sh" --prefix "$RUNNER_TEMP/native-prefix"
+          "$RUNNER_TEMP/native-prefix/bin/splitty-gpui" --help
+          "$RUNNER_TEMP/native-prefix/bin/splitty" --version
+          grep -x "Exec=$RUNNER_TEMP/native-prefix/bin/splitty-gpui" \
+            "$RUNNER_TEMP/native-prefix/share/applications/splitty.desktop"
+          "$app/install.sh" --prefix "$RUNNER_TEMP/native-prefix" --uninstall
+          test ! -e "$RUNNER_TEMP/native-prefix/lib/splitty"
 
       # The dependencies the deb declares exist and install; the installed
       # command starts.

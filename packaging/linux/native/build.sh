@@ -144,11 +144,12 @@ install -m 0644 "$here/splitty.desktop" "$stage/usr/share/applications/splitty.d
 install -m 0644 "$repo_root/crates/splitty-gpui/icons/icon.png" \
     "$stage/usr/share/icons/hicolor/512x512/apps/splitty.png"
 
-# The tar.gz runs from wherever it is unpacked; it brings the desktop entry
-# and the icon for those who want to install them.
+# The tar.gz runs from wherever it is unpacked; its install.sh installs it for
+# one user, with the desktop entry and the icon it brings.
 install -m 0644 "$here/splitty.desktop" "$app/splitty.desktop"
 install -m 0644 "$repo_root/crates/splitty-gpui/icons/icon.png" "$app/splitty.png"
 install -m 0644 "$repo_root/LICENSE" "$app/LICENSE"
+install -m 0755 "$here/install.sh" "$app/install.sh"
 
 echo "[3/3] Packing"
 

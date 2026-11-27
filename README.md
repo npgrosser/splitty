@@ -6,10 +6,19 @@ A graphical terminal multiplexer for Linux, macOS and Windows.
 
 ## Install
 
-Download the package for your system from the
-[latest release](https://github.com/npgrosser/splitty/releases/latest):
-Windows 10/11 (with WSL 2), macOS (Apple silicon and Intel) and Linux (deb,
-rpm, tar.gz). The notes for each system are in [Install](docs/install.md).
+[Install](docs/install.md) has the commands to copy for each system; the
+files are on the
+[latest release](https://github.com/npgrosser/splitty/releases/latest) page.
+
+| System | How |
+|---|---|
+| [Windows 10/11](docs/install.md#windows) (x64, with WSL 2) | Installer |
+| [macOS](docs/install.md#macos) (Apple silicon, Intel) | Disk image |
+| [Debian, Ubuntu](docs/install.md#debian-ubuntu) (x86_64) | deb |
+| [Fedora, openSUSE](docs/install.md#fedora-opensuse) (x86_64) | rpm |
+| [Any other Linux](docs/install.md#any-other-linux) (x86_64) | `curl -fsSL https://raw.githubusercontent.com/npgrosser/splitty/main/packaging/linux/native/install.sh \| sh` |
+| [NixOS, Nix](docs/install.md#nix) (x86_64) | `nix run github:npgrosser/splitty` |
+| [Everything else](docs/install.md#not-supported) | Not supported |
 
 > A personal project in active development (0.x), used daily on all three
 > systems. Expect rough edges and changes between versions.

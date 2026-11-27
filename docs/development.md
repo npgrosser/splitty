@@ -114,7 +114,13 @@ one), the app and the `splitty` command, and writes into `build/native-linux/`:
 | File | Content |
 |---|---|
 | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm` | Package `splitty`: `/opt/splitty/` (`splitty-gpui`, `splitty`, `shell-integration/`), the link `/usr/bin/splitty-gpui`, `splitty.desktop` and the icon |
-| `splitty-<version>-linux-x86_64.tar.gz` | The same files in one folder, with the desktop entry, the icon and the license |
+| `splitty-<version>-linux-x86_64.tar.gz` | The same files in one folder, with the desktop entry, the icon, the license and `install.sh` |
+
+`packaging/linux/native/install.sh` installs the tar.gz for one user under a
+prefix (`~/.local`), in the layout of `make install`. Beside the app's files
+it installs those; alone, as when it is piped from the repository into `sh`,
+it downloads the tar.gz of the latest release and checks it against the
+release's `SHA256SUMS` ([Install](install.md#any-other-linux)).
 
 `--executable FILE` packs a built `splitty-gpui` without compiling anything;
 `--cli FILE` ships another `splitty` command (the release ships the static
