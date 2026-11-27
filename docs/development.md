@@ -126,6 +126,32 @@ Ubuntu 22.04, so its packages need glibc 2.35 or later. A pre-release version
 is written with a tilde inside the packages (`0.3.0~rc.1`), so the release
 that follows counts as newer.
 
+`make build` builds the app and the `splitty` command without packing, and
+`make install` installs them under `PREFIX` (`~/.local` by default) in the
+layout the packages use, with `lib/splitty` in place of `/opt/splitty`
+([Install](install.md#building-from-source)).
+
+### Nix
+
+`flake.nix` offers the app for x86_64 Linux in two packages; their
+definitions are in `packaging/nix/`:
+
+| Package | Definition | Content |
+|---|---|---|
+| `splitty-bin` (default) | `bin.nix` | The tar.gz of the release `release.json` names, patched to the libraries of the Nix store |
+| `splitty` | `source.nix` | The app built from the checkout with nixpkgs' Rust and installed by `make install` |
+| `libghostty-vt` | `libghostty-vt.nix` | The pinned terminal library, from the archives, the Zig release and the checksums `scripts/bootstrap-libghostty-vt.py` names |
+
+`packaging/nix/update-release.sh <version>` writes the version and the
+checksums of a published release into `release.json`; run it and commit the
+file once the release workflow has published the release. Until then the
+flake keeps installing the release before it. `splitty` builds the release's
+four server archives in while the workspace version equals that release's
+and none otherwise, so a checkout between a version bump and that update has
+no servers for remote hosts. `nix flake update` moves the pinned nixpkgs.
+`nix develop` opens a shell with the build's libraries and `GHOSTTY_VT_DIR`
+set.
+
 ### macOS
 
 On a Mac with Xcode's command line tools:

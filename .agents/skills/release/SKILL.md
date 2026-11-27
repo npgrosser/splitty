@@ -46,4 +46,6 @@ The helper resolves relocated Windows Downloads via the Windows shell, uses XDG 
 
 Monitor the matching CI run while building. The local delivery and CI have separate outcomes: finish the local package even if an unrelated CI platform fails, and report that failure. A successful local build alone is not a successful GitHub release. On interruption, resume unfinished build/delivery/checks against the same tag. Never delete or retag a published version to conceal a failure.
 
+Once the workflow has published the GitHub release, point the Nix flake at it: run `packaging/nix/update-release.sh VERSION`, commit `packaging/nix/release.json` as `chore(nix): point the flake at vVERSION` and push that commit to the release branch. The release's files do not exist before, so this is a commit after the tag; skip it and say so when the release was not published.
+
 Finish with the tag and commit, push result, CI URL and actual status, local platform/architecture, and the full Downloads path(s) with SHA-256. Under WSL include the Windows-native path. State any uncompleted part and its concrete blocker, and whether the GitHub release was published.

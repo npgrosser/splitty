@@ -589,3 +589,9 @@ Each point names what holds now, the alternative, and where it is recorded.
   - The earlier look is kept as **Splitty Salon Teal** (`splitty-salon-teal`), with **Splitty Salon Teal Light** (`splitty-salon-teal-light`) on a warm paper tone. Alternative: other names.
   - Windows 11 Light still takes the default light terminal palette (SDT-1), which is now a mid-light gray instead of a paper tone.
 - **`window-close-closes-screens` WCS-1** (2026-11-24, provisional, tbd; recorded in the change's proposal): closing a window while another is open closes its local screens and detaches its hosts' screens, asking once when something ends and offering to move them instead. Alternative: hand the screens to another window without a question, as before.
+- **`nix-flake-and-source-install` NIX-1 to NIX-5** (2026-11-27, provisional, tbd; recorded in the change's proposal):
+  - **NIX-1:** the flake's default package is `splitty-bin`, the published release. Alternative: default to the build from source.
+  - **NIX-2:** the flake's source package builds in the release's server archives while the workspace version equals the release `packaging/nix/release.json` names, and none otherwise. Alternative: build the static Linux servers in Nix and leave macOS hosts out.
+  - **NIX-3:** `release.json` is updated by a commit after the release is published, so the tagged revision still names the release before it. Alternative: a workflow that commits the update.
+  - **NIX-4:** `make install` and the Nix packages link the `splitty` command into `bin`; the deb and rpm link only `splitty-gpui`. Alternative: link the app only.
+  - **NIX-5:** CI builds `splitty-bin` and `libghostty-vt` and only evaluates the source package. Alternative: build it on a schedule or with a binary cache that also serves users.

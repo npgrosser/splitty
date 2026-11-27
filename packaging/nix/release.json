@@ -1,0 +1,10 @@
+{
+  "version": "0.6.2",
+  "sha256": {
+    "splitty-0.6.2-linux-x86_64.tar.gz": "7afd3fdbe00293ff5593d14ce525e243399cf8d8de5e9a5a256e3d705687754a",
+    "splitty-darwin-aarch64.tar.gz": "6ab6e9e557bb5e9fb9128386241aea9f801b449bb47aa3cb7e295984bd5df4b5",
+    "splitty-darwin-x86_64.tar.gz": "9d0a67a9c20de371db6f0ea1729081a70b92bf1babddb16356cbed60149d17fd",
+    "splitty-wsl-aarch64.tar.gz": "1cc4d586456fdff79a3425f9dab33782dde1d5492e0e3152cdd7c4991786c9b5",
+    "splitty-wsl-x86_64.tar.gz": "89d287cd35b77e4bf147f80d30e810cf875aae5addf8228a1c03d912a1b01023"
+  }
+}

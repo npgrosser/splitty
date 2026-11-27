@@ -229,6 +229,34 @@ jobs:
           test -f /opt/splitty/shell-integration/bash/splitty.bash
           splitty-gpui --help
 
+  # The flake evaluates, and the package of the published release and the
+  # pinned terminal library build. The app's build from source is not run
+  # here: it compiles everything without a cache.
+  nix:
+    name: Nix flake
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
+
+      - name: Evaluate the flake
+        run: nix flake check --no-build
+
+      - name: Build the release package and the terminal library
+        run: nix build --print-build-logs .#splitty-bin .#libghostty-vt
+
+      - name: Check the release package
+        run: |
+          package=$(nix build --no-link --print-out-paths .#splitty-bin)
+          "$package/bin/splitty" --version
+          "$package/bin/splitty-gpui" --help
+          test -f "$package/lib/splitty/shell-integration/bash/splitty.bash"
+
   # The native app on Windows reaches its backend in WSL, which hosted
   # runners cannot start; this compiles the app and its tests.
   native-windows:
