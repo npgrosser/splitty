@@ -14,15 +14,17 @@ rpm, tar.gz). The notes for each system are in [Install](docs/install.md).
 > A personal project in active development (0.x), used daily on all three
 > systems. Expect rough edges and changes between versions.
 
-## Full keyboard control over splits and tabs
+## Full control with the keyboard or the mouse
+
+Splits and tabs are opened, moved, resized and closed entirely with keys:
 
 ![Splits and tabs opened with keys, a pane maximized and restored](https://github.com/npgrosser/splitty/raw/media/splits.webp)
 
-Every key can be changed: [Keyboard](docs/keyboard.md).
-
-## Or arrange them with the mouse
+Or entirely with the mouse:
 
 ![Tabs dragged out of a group into splits, splits resized](https://github.com/npgrosser/splitty/raw/media/pointer.webp)
+
+Every key can be changed: [Keyboard](docs/keyboard.md).
 
 ## Multiple screens on local and remote machines
 
@@ -32,12 +34,9 @@ Splitty connects with your `ssh` and installs itself on the host. Remote
 sessions keep running when you disconnect or close the app, without tmux or
 screen: [Remote development](docs/remote.md).
 
-## Remote ports are detected and forwarded with a click
+Ports that programs open on the host are detected and forwarded with a click:
 
 ![A port a program opened on the host is forwarded and reached locally](https://github.com/npgrosser/splitty/raw/media/ports.webp)
-
-A remote terminal's folder also opens in VS Code or Zed on your computer:
-[Files and editors](docs/files-and-editors.md).
 
 ## Customize themes and keys
 
